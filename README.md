@@ -72,9 +72,24 @@ starts the server with zero credentials and every turn fails with
 
 ```bash
 docker compose up -d postgres      # Postgres on 127.0.0.1:5432
+
+# agent server (port 8080)
 cd server
-node --experimental-strip-types --test test/*.test.ts
-npx tsc --noEmit
+PI_AGENT_DIR=~/.pi/agent PI_WORKSPACE_DIR=/tmp/agentdoc-ws \
+CHAT_PROVIDER=synthetic CHAT_MODEL=syn:large:text \
+DATABASE_URL=postgres://agentdocumentor:agentdocumentor@127.0.0.1:5432/agentdocumentor \
+DEV_AUTH_TOKEN=dev PORT=8080 npm start
+
+# chat client (port 5173, proxies /api to 8080)
+cd web && npm run dev
+# open http://localhost:5173/?token=dev&user=alice
+```
+
+Tests:
+
+```bash
+cd server && node --experimental-strip-types --test test/*.test.ts && npx tsc --noEmit
+cd web    && npx vitest run && npx tsc --noEmit
 ```
 
 TypeScript runs directly through node's **strip-only** type support, so there is no
@@ -84,6 +99,20 @@ decorators. Use a field and an explicit assignment instead. `tsc` still typechec
 
 Tests that need Postgres or provider credentials skip (and are reported as
 skipped) when those are unavailable; they never pass silently.
+
+## Client
+
+React 19 + Vite. `?token=` and `?user=` in the URL are a development convenience
+for switching identity, not an authentication scheme.
+
+Text is rendered as text, never as HTML: model output is untrusted input.
+The SSE parser is hand-written because a chunk boundary can fall inside a frame,
+inside a JSON string, or between the two newlines that end a record; assuming one
+chunk equals one frame works in development and corrupts long replies.
+
+Vite is pinned to 7.x because `@vitejs/plugin-react` does not support Vite 8 yet.
+Installing Vite 8 fails on a peer conflict; do not paper over it with
+`--legacy-peer-deps`.
 
 ## Design constraints that are not negotiable
 
