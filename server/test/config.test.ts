@@ -35,6 +35,17 @@ test("rejects an unknown thinking level", () => {
   );
 });
 
+test("generate mode does not require an agent directory", () => {
+  const { PI_AGENT_DIR: _omitted, ...withoutAgentDir } = base;
+  const cfg = loadConfig({ ...withoutAgentDir, PI_AGENT_CONFIG_MODE: "generate" });
+  assert.equal(cfg.agentDir, "", "generate mode writes its own configuration");
+});
+
+test("mounted mode still requires an agent directory", () => {
+  const { PI_AGENT_DIR: _omitted, ...withoutAgentDir } = base;
+  assert.throws(() => loadConfig(withoutAgentDir), /PI_AGENT_DIR is required/);
+});
+
 test("refuses a workspace that is the filesystem root", () => {
   assert.throws(
     () => loadConfig({ ...base, PI_WORKSPACE_DIR: "/" }),

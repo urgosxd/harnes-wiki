@@ -1,6 +1,11 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { prepareWritableAgentDir } from "./pi/agent-dir.ts";
+import {
+  generateConfigFromEnv,
+  resolveAgentConfigMode,
+  writeGeneratedModels,
+} from "./pi/agent-config.ts";
 import { Logger } from "./log.ts";
 import { loadConfig } from "./config.ts";
 import { createDatabase } from "./db/pool.ts";
@@ -29,14 +34,30 @@ async function main(): Promise<void> {
 
   await mkdir(config.workspaceDir, { recursive: true });
 
-  // Pi's credential store writes beside auth.json, so the mounted agent dir cannot
-  // be used directly when it is read-only. Credentials are copied into the
-  // workspace volume, which keeps the source mount read-only.
-  const effectiveAgentDir = await prepareWritableAgentDir({
-    sourceDir: config.agentDir,
-    runtimeDir: join(config.workspaceDir, "agent"),
-  });
-  log.info("agent credentials prepared", { agentDir: effectiveAgentDir });
+  // The container is self-contained by default: it writes its own Pi configuration
+  // from environment variables, so nothing has to be mounted from the host. A
+  // mounted agent directory remains supported for a team secret or a developer
+  // pointing at their own credentials.
+  const runtimeAgentDir = join(config.workspaceDir, "agent");
+  const agentMode = resolveAgentConfigMode(process.env);
+  let effectiveAgentDir: string;
+  if (agentMode === "generate") {
+    const generated = await writeGeneratedModels({
+      runtimeDir: runtimeAgentDir,
+      config: generateConfigFromEnv(process.env),
+    });
+    effectiveAgentDir = runtimeAgentDir;
+    // Never log the key itself; only where the file was written.
+    log.info("generated pi model configuration", { path: generated, provider: config.provider });
+  } else {
+    // Pi's credential store writes beside auth.json, so a read-only mount cannot be
+    // used directly. Credentials are copied into the workspace volume instead.
+    effectiveAgentDir = await prepareWritableAgentDir({
+      sourceDir: config.agentDir,
+      runtimeDir: runtimeAgentDir,
+    });
+    log.info("mounted agent credentials prepared", { agentDir: effectiveAgentDir });
+  }
 
   const db = createDatabase(config.databaseUrl);
   const migration = await migrate(db);
@@ -93,7 +114,8 @@ async function main(): Promise<void> {
     const model = runtime.modelRuntime.getModel(config.provider, config.modelId);
     if (!model) {
       throw new Error(
-        `model ${config.provider}/${config.modelId} is not available; check models.json in ${config.agentDir}`,
+        `model ${config.provider}/${config.modelId} is not available; ` +
+          `check the generated or mounted Pi configuration in ${effectiveAgentDir}`,
       );
     }
     return model as unknown as Model<never>;

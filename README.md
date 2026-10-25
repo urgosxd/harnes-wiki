@@ -145,9 +145,10 @@ The fastest path, which is what this build is for:
 docker compose up -d --build      # no environment variables needed
 ```
 
-The Pi agent directory defaults to `~/.pi/agent`, which Compose expands for you.
-`PI_AGENT_DIR` exists only to point at a different directory when yours is not
-there.
+The container is self-contained: it generates its own Pi model configuration from
+environment variables, and **no host directory is mounted**. `CHAT_API_KEY` is the
+only value it needs, and `scripts/up.sh` reads it from your existing
+`~/.pi/agent/models.json` so you do not have to retype it.
 
 Then open **<http://localhost:8088/?token=dev&user=alice>** and start chatting.
 Change `user=` to get a separate account: that parameter IS the whole identity
@@ -192,12 +193,27 @@ node scripts/smoke.mjs                    # 7 acceptance checks
 
 Every variable has a working default; the two below are only needed to override it.
 
-| Variable | Default | Override when |
+| Variable | Default | Meaning |
 |---|---|---|
-| `PI_AGENT_DIR` | `~/.pi/agent` | Your Pi credentials live somewhere else. Mounted read-only. |
-| `DEV_AUTH_TOKEN` | `dev` | You do not want `dev` as the token. |
-| `CHAT_PROVIDER` / `CHAT_MODEL` | `synthetic` / `syn:large:text` | You use a different provider or model. |
-| `POSTGRES_PASSWORD` | `agentdocumentor` | Local only; change it if the port is ever exposed. |
+| `CHAT_API_KEY` | **required** | Provider key. `scripts/up.sh` fills it from `~/.pi/agent/models.json`. |
+| `CHAT_PROVIDER` | `synthetic` | Provider id written into the generated config. |
+| `CHAT_MODEL` | `syn:large:text` | Model id. |
+| `CHAT_BASE_URL` | `https://api.synthetic.new/openai/v1` | Provider endpoint. |
+| `CHAT_API` | `openai-completions` | One of `openai-completions`, `openai-responses`, `anthropic-messages`, `google-generative-ai`. |
+| `CHAT_CONTEXT_WINDOW` / `CHAT_MAX_TOKENS` / `CHAT_REASONING` | `524288` / `65536` / `true` | Model capabilities. |
+| `DEV_AUTH_TOKEN` | `dev` | Token the app asks for. |
+| `POSTGRES_PASSWORD` | `agentdocumentor` | Local only. |
+
+### Self-contained container
+
+The service writes `/data/workspace/agent/models.json` (mode 0600) at boot from the
+`CHAT_*` variables, then uses it as its Pi agent directory. The SDK ships no
+built-in model catalog - measured: zero models with empty configuration - so this
+generated file is what makes the container work without any host state.
+
+`PI_AGENT_CONFIG_MODE=mounted` remains available for a team secret: it takes an
+agent directory read-only and copies `models.json` and `auth.json` into the data
+volume, because Pi's credential store needs a writable location for its lock.
 
 
 Services: `postgres` (loopback only), `server` (no published port), `web` (nginx on

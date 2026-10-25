@@ -1,3 +1,7 @@
+# Self-contained stack: no host directory is mounted into the agent server.
+# The container writes its own Pi model configuration from environment variables,
+# so it can be started on any machine that has a provider key, and the image never
+# carries credentials.
 services:
   postgres:
     image: postgres:16-alpine
@@ -8,8 +12,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentdocumentor}
       POSTGRES_DB: agentdocumentor
     ports:
-      # Published on loopback only: the database is reachable for development
-      # tooling, never from the network. 5434 belongs to another project.
+      # Loopback only: reachable for development tooling, never from the network.
       - "127.0.0.1:5432:5432"
     volumes:
       - agentdoc-pgdata:/var/lib/postgresql/data
@@ -30,23 +33,26 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      # The Pi agent directory holds provider credentials. It is mounted read-only
-      # below, never baked into the image.
-      PI_AGENT_DIR: /pi-agent
-      # A neutral workspace: Pi appends a <cwd> section to the system prompt even
-      # with an override, so this must never be a real project directory.
-      PI_WORKSPACE_DIR: /data/workspace
+      # The service generates its own models.json from these. Nothing is mounted.
+      PI_AGENT_CONFIG_MODE: generate
       CHAT_PROVIDER: ${CHAT_PROVIDER:-synthetic}
       CHAT_MODEL: ${CHAT_MODEL:-syn:large:text}
+      CHAT_API: ${CHAT_API:-openai-completions}
+      CHAT_BASE_URL: ${CHAT_BASE_URL:-https://api.synthetic.new/openai/v1}
+      CHAT_API_KEY: ${CHAT_API_KEY:?CHAT_API_KEY must be set - the provider key the container uses}
+      CHAT_CONTEXT_WINDOW: ${CHAT_CONTEXT_WINDOW:-524288}
+      CHAT_MAX_TOKENS: ${CHAT_MAX_TOKENS:-65536}
+      CHAT_REASONING: ${CHAT_REASONING:-true}
       CHAT_THINKING_LEVEL: ${CHAT_THINKING_LEVEL:-medium}
+      # Neutral workspace: Pi appends a <cwd> section to the system prompt.
+      PI_WORKSPACE_DIR: /data/workspace
       DATABASE_URL: postgres://agentdocumentor:${POSTGRES_PASSWORD:-agentdocumentor}@postgres:5432/agentdocumentor
-      # Development authentication only. Without it the server refuses every
-      # request, which is the intended failing-closed behaviour.
       DEV_AUTH_TOKEN: ${DEV_AUTH_TOKEN:-dev}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
       PORT: "8080"
       NODE_ENV: production
     volumes:
-      - ${PI_AGENT_DIR:-~/.pi/agent}:/pi-agent:ro
+      # Only the service's own data volume: generated config, session workspace.
       - agentdoc-workspace:/data/workspace
     healthcheck:
       test:
@@ -63,8 +69,7 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
-    # No published port: only the web container reaches the API, through the
-    # internal network. Exposing it would put the dev auth token on the host.
+    # No published port: only the web container reaches the API.
     networks:
       - internal
 
@@ -82,7 +87,6 @@ services:
       - internal
 
 networks:
-  # Private network: Postgres and the agent server are not reachable from outside.
   internal:
     driver: bridge
 

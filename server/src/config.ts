@@ -1,6 +1,7 @@
 /** Configuration is read once at startup and validated. Nothing here has a
  *  silent default that could point the agent at a real project directory. */
 export interface Config {
+  /** Empty in generate mode: the service writes its own Pi configuration. */
   agentDir: string;
   workspaceDir: string;
   provider: string;
@@ -46,8 +47,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     );
   }
 
+  // An agent directory is only needed when credentials come from a mount. In
+  // generate mode the service writes models.json itself, so demanding a path here
+  // would fail a configuration that is complete.
+  const mode = env.PI_AGENT_CONFIG_MODE?.trim() || "mounted";
+  const agentDir = mode === "generate" ? (env.PI_AGENT_DIR?.trim() ?? "") : required(env, "PI_AGENT_DIR");
+
   return {
-    agentDir: required(env, "PI_AGENT_DIR"),
+    agentDir,
     workspaceDir,
     provider: required(env, "CHAT_PROVIDER"),
     modelId: required(env, "CHAT_MODEL"),
