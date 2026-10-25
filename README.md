@@ -39,6 +39,23 @@ inline in `models.json` and `auth.json` is empty, so mounting only `auth.json`
 starts the server with zero credentials and every turn fails with
 `No API key found for the selected model.`
 
+## Development
+
+```bash
+docker compose up -d postgres      # Postgres on 127.0.0.1:5432
+cd server
+node --experimental-strip-types --test test/*.test.ts
+npx tsc --noEmit
+```
+
+TypeScript runs directly through node's **strip-only** type support, so there is no
+build step. Strip-only means syntax that emits JavaScript is rejected: no
+`constructor(private x: T)` parameter properties, no `enum`, no `namespace`, no
+decorators. Use a field and an explicit assignment instead. `tsc` still typechecks.
+
+Tests that need Postgres or provider credentials skip (and are reported as
+skipped) when those are unavailable; they never pass silently.
+
 ## Design constraints that are not negotiable
 
 These were established by running the SDK, not by reading its docs. Changing any of
@@ -58,6 +75,10 @@ them reintroduces a bug that was already observed.
    the persisted assistant message.
 5. **`agent_settled` ends a run.** `agent_end` does not: retries and queued work can
    follow it.
+6. **The transcript is append-only at the database level.** A trigger refuses
+   `UPDATE` and direct `DELETE` on `session_entries`. The cascade from deleting a
+   conversation is allowed, because refusing it would make user deletion
+   impossible; the two are told apart by whether the parent row still exists.
 
 ## Status
 

@@ -63,7 +63,7 @@ Worked in order. Each task closes with at least one work-unit commit on
     remembers. Unit + e2e test, no HTTP yet.
   - Commit: `feat(server): rebuildable pi session with diff persistence`
 
-- [ ] T3. Postgres schema and the conversation catalog
+- [x] T3. Postgres schema and the conversation catalog
   - `conversations`, `session_entries` (append-only, `UNIQUE(conversation_id, seq)`),
     `agent_runs` (`UNIQUE(conversation_id, idempotency_key)`), `tenant_mcp`.
   - Migrations runnable without a preinstalled Postgres (Docker Compose service).
@@ -119,5 +119,8 @@ Worked in order. Each task closes with at least one work-unit commit on
 | 2026-10-25 | decisions | Spikes in `/tmp/pispike` (0.86.1) and `/tmp/picheck` (1.4.0); findings recorded above. |
 | 2026-10-25 | T1 | `857a210`. 7 dep @earendil-works/* all 1.4.0 exact (verified installed tree). 7/7 tests pass, `tsc --noEmit` clean. Pin guard verified both ways: green with exact pins, red (`not ok 1`, `not ok 2`) with a `^1.4.0` range reintroduced. |
 | 2026-10-25 | T2 | `62f12b0`. 23/23 tests, `tsc --noEmit` clean. Recall across a rebuilt session verified WITH a negative control: same question with the real store answers `4417`, with an empty store answers `No code was provided`. Streaming verified WITH a mutation check: replay-at-the-end implementation fails the test (`first delta arrived 0ms before the turn ended`), and the original passes. Dev-surface test confirms zero of read/bash/edit/write/grep/find/ls are active. |
+| 2026-10-25 | T3 | 40/40 tests, `tsc --noEmit` clean. Postgres 16 via Compose (127.0.0.1:5432; 5434 belongs to another project). Append-only verified against the real database: `UPDATE` refused, direct `DELETE` refused, CASCADE from `conversations` allowed. Idempotency proven under a race: 8 simultaneous `startRun` on one key -> exactly 1 row created, all attempts agree on the run id. |
+| 2026-10-25 | T3 finding | The append-only trigger initially blocked the ON DELETE CASCADE, making conversation deletion impossible. Probed the ordering: during a cascade the parent row is already gone (`parent_exists=f`), so the trigger distinguishes a history rewrite from a legitimate delete. Covered by test so an ordering change fails loudly. |
+| 2026-10-25 | T3 finding | node's strip-only TypeScript rejects constructor parameter properties (`constructor(private db: T)`). Runtime limitation, not a type error: `tsc` accepts it and node fails with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`. Documented in README. |
 | 2026-10-25 | T2 chore | The harness safety policy blocked a `.env.example` file; variables live in `README.md` instead. |
 | 2026-10-25 | T1 note | `.env.example` is blocked by the harness safety policy (sensitive path). Variables are documented in `README.md` instead; no `.env` file exists in the repo. |

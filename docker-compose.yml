@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: agentdoc-postgres
+    environment:
+      POSTGRES_USER: agentdocumentor
+      POSTGRES_PASSWORD: agentdocumentor
+      POSTGRES_DB: agentdocumentor
+    ports:
+      # 5432 is free on this machine; 5434 belongs to another project.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - agentdoc-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentdocumentor -d agentdocumentor"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  agentdoc-pgdata:
