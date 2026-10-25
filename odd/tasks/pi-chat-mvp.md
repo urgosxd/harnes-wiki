@@ -46,7 +46,7 @@ Created: 2026-10-25
 Worked in order. Each task closes with at least one work-unit commit on
 `feature/pi-chat-mvp`, tests and docs alongside the behavior.
 
-- [ ] T1. Scaffold the agent server workspace and pin Pi 1.4.0
+- [x] T1. Scaffold the agent server workspace and pin Pi 1.4.0
   - Node 22, ESM, TypeScript strict, `npm install --save-exact` for every
     `@earendil-works/*` package, including transitive ones the SDK's own ranges
     resolve (`pi-mcp`, `pi-codemode`, `pi-ai`, `pi-agent-core`).
@@ -117,3 +117,5 @@ Worked in order. Each task closes with at least one work-unit commit on
 | Date | Task | Evidence |
 |---|---|---|
 | 2026-10-25 | decisions | Spikes in `/tmp/pispike` (0.86.1) and `/tmp/picheck` (1.4.0); findings recorded above. |
+| 2026-10-25 | T1 | `857a210`. 7 dep @earendil-works/* all 1.4.0 exact (verified installed tree). 7/7 tests pass, `tsc --noEmit` clean. Pin guard verified both ways: green with exact pins, red (`not ok 1`, `not ok 2`) with a `^1.4.0` range reintroduced. |
+| 2026-10-25 | T1 note | `.env.example` is blocked by the harness safety policy (sensitive path). Variables are documented in `README.md` instead; no `.env` file exists in the repo. |
