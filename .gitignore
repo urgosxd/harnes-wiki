@@ -1,0 +1,15 @@
+# Local Pi runtime state
+.atl/
+
+# Node
+node_modules/
+dist/
+*.log
+
+# Env and secrets
+.env
+.env.*
+!.env.example
+
+# Local runtime data
+.pidata/
