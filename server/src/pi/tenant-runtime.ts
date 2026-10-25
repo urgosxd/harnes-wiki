@@ -6,6 +6,7 @@ import {
   defineTool,
 } from "@earendil-works/pi-coding-agent";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
 import { Type } from "typebox";
 import type { ThinkingLevelName } from "../config.ts";
 
@@ -76,7 +77,19 @@ export class TenantRuntime {
   }): Promise<TenantRuntime> {
     const { tenant, agentDir, workspaceDir, systemPrompt } = options;
 
-    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    // The credential and catalog paths are passed explicitly. `ModelRuntime.create()`
+    // without them resolves through HOME and PI_CODING_AGENT_DIR, which happens to
+    // match the agent dir on a developer machine and resolves to nothing in a
+    // container: measured 0 models with a clean HOME versus 7 with explicit paths,
+    // and the failure surfaces as "model is not available" at startup.
+    const modelRuntime = await ModelRuntime.create({
+      allowModelNetwork: false,
+      authPath: join(agentDir, "auth.json"),
+      modelsPath: join(agentDir, "models.json"),
+      // The store is a cache; keeping it beside the mounted (read-only) agent dir
+      // would make every start fail to write.
+      modelsStorePath: join(workspaceDir, "models-store.json"),
+    });
 
     // The agent dir is a human development config: it holds extensions, skills,
     // AGENTS.md and themes. Every discovery surface is switched off so the chat

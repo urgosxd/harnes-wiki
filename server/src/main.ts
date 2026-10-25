@@ -1,4 +1,7 @@
 import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { prepareWritableAgentDir } from "./pi/agent-dir.ts";
+import { Logger } from "./log.ts";
 import { loadConfig } from "./config.ts";
 import { createDatabase } from "./db/pool.ts";
 import { migrate } from "./db/migrate.ts";
@@ -18,6 +21,7 @@ const SYSTEM_PROMPT = [
 ].join(" ");
 
 async function main(): Promise<void> {
+  const log = new Logger({ level: (process.env.LOG_LEVEL as "debug" | "info" | "warn" | "error") ?? "info" });
   const config = loadConfig();
   if (!config.databaseUrl) {
     throw new Error("DATABASE_URL is required");
@@ -25,10 +29,19 @@ async function main(): Promise<void> {
 
   await mkdir(config.workspaceDir, { recursive: true });
 
+  // Pi's credential store writes beside auth.json, so the mounted agent dir cannot
+  // be used directly when it is read-only. Credentials are copied into the
+  // workspace volume, which keeps the source mount read-only.
+  const effectiveAgentDir = await prepareWritableAgentDir({
+    sourceDir: config.agentDir,
+    runtimeDir: join(config.workspaceDir, "agent"),
+  });
+  log.info("agent credentials prepared", { agentDir: effectiveAgentDir });
+
   const db = createDatabase(config.databaseUrl);
   const migration = await migrate(db);
   if (migration.applied.length > 0) {
-    console.log(`migrations applied: ${migration.applied.join(", ")}`);
+    log.info("migrations applied", { migrations: migration.applied });
   }
 
   const store = new ConversationStore(db);
@@ -37,7 +50,7 @@ async function main(): Promise<void> {
   // their conversations locked forever.
   const swept = await store.failInterruptedRuns();
   if (swept > 0) {
-    console.log(`marked ${swept} interrupted run(s) as failed`);
+    log.warn("interrupted runs swept", { count: swept });
   }
 
   // One runtime per user, built on first use and reused afterwards: it holds the
@@ -64,7 +77,7 @@ async function main(): Promise<void> {
       };
       return TenantRuntime.create({
         tenant,
-        agentDir: config.agentDir,
+        agentDir: effectiveAgentDir,
         workspaceDir: config.workspaceDir,
         systemPrompt: SYSTEM_PROMPT,
       });
@@ -98,17 +111,14 @@ async function main(): Promise<void> {
     store,
     runtimeFor,
     workspaceDir: config.workspaceDir,
-    agentDir: config.agentDir,
+    agentDir: effectiveAgentDir,
     modelFor,
     thinkingLevel: config.thinkingLevel,
   });
 
   const authenticator = createAuthenticator({ devToken: process.env.DEV_AUTH_TOKEN });
   if (!process.env.DEV_AUTH_TOKEN) {
-    console.warn(
-      "DEV_AUTH_TOKEN is not set: every request will be refused. " +
-        "This is intentional until real authentication is wired.",
-    );
+    log.warn("no DEV_AUTH_TOKEN: every request will be refused until real authentication is wired");
   }
 
   const router = createRouter({ authenticate: authenticator });
@@ -116,10 +126,10 @@ async function main(): Promise<void> {
 
   const port = Number(process.env.PORT ?? 8080);
   const server = await router.listen(port, "0.0.0.0");
-  console.log(`agent server listening on ${port}`);
+  log.info("agent server listening", { port });
 
   const shutdown = async (signal: string) => {
-    console.log(`${signal} received, shutting down`);
+    log.info("shutting down", { signal });
     server.close();
     await Promise.allSettled([...runtimes.values()].map(async (p) => (await p).close()));
     await db.close();
@@ -130,6 +140,14 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error("fatal:", error instanceof Error ? error.message : error);
+  // A structured fatal line, so a crash is greppable like everything else.
+  process.stdout.write(
+    `${JSON.stringify({
+      time: new Date().toISOString(),
+      level: "error",
+      message: "fatal",
+      error: error instanceof Error ? error.message : String(error),
+    })}\n`,
+  );
   process.exit(1);
 });

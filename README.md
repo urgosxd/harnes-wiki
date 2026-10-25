@@ -137,6 +137,47 @@ seven tests fail, and rebuilding the tenant runtime per turn fails the process
 count with "6 MCP process(es) were spawned for turns". A passing run therefore
 means something.
 
+## Running the full stack
+
+```bash
+export PI_AGENT_DIR=~/.pi/agent          # read-only mount, holds models.json
+export DEV_AUTH_TOKEN=dev                 # development authentication
+docker compose up -d --build
+open http://localhost:8088/?token=dev&user=alice
+node scripts/smoke.mjs                    # 7 acceptance checks
+```
+
+Services: `postgres` (loopback only), `server` (no published port), `web` (nginx on
+127.0.0.1:8088). The API is reachable only from the web container, through the
+private network.
+
+```bash
+docker compose ps                         # health of all three
+docker compose logs -f server             # structured JSON logs
+docker compose down                       # keeps the data volume
+docker compose down -v                    # destroys conversations
+```
+
+Logs are one JSON object per line and redact secrets by key name. Set `LOG_LEVEL`
+to `debug`, `info`, `warn` or `error`.
+
+### Two deployment traps this stack solves
+
+**Credentials must live somewhere writable.** Pi's credential store takes a lock
+beside `auth.json` and recreates the file when missing, so pointing it at a
+read-only mount fails with `EROFS: read-only file system, mkdir
+'<agentDir>/auth.json.lock'`. The server copies `models.json` and `auth.json` into
+the data volume at boot, with mode 0600, and never copies `AGENTS.md`, skills or
+extensions.
+
+**The credential lookup does not follow the agent dir you pass it.**
+`ModelRuntime.create()` without explicit paths resolves through `HOME` and
+`PI_CODING_AGENT_DIR`. That matches `~/.pi/agent` on a developer machine, so the
+bug is invisible until deployment, where it resolved to 0 models and every start
+died with "model is not available". The runtime now passes `authPath`,
+`modelsPath` and `modelsStorePath` explicitly, and
+`test/agent-dir-portability.test.ts` runs it with a clean `HOME` to keep it that way.
+
 ## Design constraints that are not negotiable
 
 These were established by running the SDK, not by reading its docs. Changing any of

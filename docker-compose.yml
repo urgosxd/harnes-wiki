@@ -2,12 +2,14 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: agentdoc-postgres
+    restart: unless-stopped
     environment:
       POSTGRES_USER: agentdocumentor
-      POSTGRES_PASSWORD: agentdocumentor
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentdocumentor}
       POSTGRES_DB: agentdocumentor
     ports:
-      # 5432 is free on this machine; 5434 belongs to another project.
+      # Published on loopback only: the database is reachable for development
+      # tooling, never from the network. 5434 belongs to another project.
       - "127.0.0.1:5432:5432"
     volumes:
       - agentdoc-pgdata:/var/lib/postgresql/data
@@ -16,6 +18,74 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+    networks:
+      - internal
+
+  server:
+    build:
+      context: ./server
+    container_name: agentdoc-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # The Pi agent directory holds provider credentials. It is mounted read-only
+      # below, never baked into the image.
+      PI_AGENT_DIR: /pi-agent
+      # A neutral workspace: Pi appends a <cwd> section to the system prompt even
+      # with an override, so this must never be a real project directory.
+      PI_WORKSPACE_DIR: /data/workspace
+      CHAT_PROVIDER: ${CHAT_PROVIDER:-synthetic}
+      CHAT_MODEL: ${CHAT_MODEL:-syn:large:text}
+      CHAT_THINKING_LEVEL: ${CHAT_THINKING_LEVEL:-medium}
+      DATABASE_URL: postgres://agentdocumentor:${POSTGRES_PASSWORD:-agentdocumentor}@postgres:5432/agentdocumentor
+      # Development authentication only. Without it the server refuses every
+      # request, which is the intended failing-closed behaviour.
+      DEV_AUTH_TOKEN: ${DEV_AUTH_TOKEN:-dev}
+      PORT: "8080"
+      NODE_ENV: production
+    volumes:
+      - ${PI_AGENT_DIR:-~/.pi/agent}:/pi-agent:ro
+      - agentdoc-workspace:/data/workspace
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          fetch("http://127.0.0.1:8080/health", {
+            headers: { "x-dev-token": process.env.DEV_AUTH_TOKEN ?? "", "x-user-id": "healthcheck" },
+          })
+            .then((response) => process.exit(response.ok ? 0 : 1))
+            .catch(() => process.exit(1));
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    # No published port: only the web container reaches the API, through the
+    # internal network. Exposing it would put the dev auth token on the host.
+    networks:
+      - internal
+
+  web:
+    build:
+      context: ./web
+    container_name: agentdoc-web
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8088:80"
+    networks:
+      - internal
+
+networks:
+  # Private network: Postgres and the agent server are not reachable from outside.
+  internal:
+    driver: bridge
 
 volumes:
   agentdoc-pgdata:
+  agentdoc-workspace:
