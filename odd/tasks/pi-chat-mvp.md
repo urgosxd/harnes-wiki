@@ -53,7 +53,7 @@ Worked in order. Each task closes with at least one work-unit commit on
   - A guard test that fails if any `@earendil-works/*` dependency is not exact.
   - Commit: `chore(server): scaffold with pinned pi 1.4.0`
 
-- [ ] T2. Vertical slice: one conversation, two turns, recall across processes
+- [x] T2. Vertical slice: one conversation, two turns, recall across processes
   - `pi/tenant-runtime.ts`: shared `DefaultResourceLoader` (all five resource flags
     off), `ModelRuntime`, per-tenant `McpClient` proxies, business tools with scope.
   - `pi/session-factory.ts`: rebuild from entries, `createAgentSession`
@@ -118,4 +118,6 @@ Worked in order. Each task closes with at least one work-unit commit on
 |---|---|---|
 | 2026-10-25 | decisions | Spikes in `/tmp/pispike` (0.86.1) and `/tmp/picheck` (1.4.0); findings recorded above. |
 | 2026-10-25 | T1 | `857a210`. 7 dep @earendil-works/* all 1.4.0 exact (verified installed tree). 7/7 tests pass, `tsc --noEmit` clean. Pin guard verified both ways: green with exact pins, red (`not ok 1`, `not ok 2`) with a `^1.4.0` range reintroduced. |
+| 2026-10-25 | T2 | `62f12b0`. 23/23 tests, `tsc --noEmit` clean. Recall across a rebuilt session verified WITH a negative control: same question with the real store answers `4417`, with an empty store answers `No code was provided`. Streaming verified WITH a mutation check: replay-at-the-end implementation fails the test (`first delta arrived 0ms before the turn ended`), and the original passes. Dev-surface test confirms zero of read/bash/edit/write/grep/find/ls are active. |
+| 2026-10-25 | T2 chore | The harness safety policy blocked a `.env.example` file; variables live in `README.md` instead. |
 | 2026-10-25 | T1 note | `.env.example` is blocked by the harness safety policy (sensitive path). Variables are documented in `README.md` instead; no `.env` file exists in the repo. |
