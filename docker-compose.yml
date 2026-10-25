@@ -39,7 +39,10 @@ services:
       CHAT_MODEL: ${CHAT_MODEL:-syn:large:text}
       CHAT_API: ${CHAT_API:-openai-completions}
       CHAT_BASE_URL: ${CHAT_BASE_URL:-https://api.synthetic.new/openai/v1}
-      CHAT_API_KEY: ${CHAT_API_KEY:?CHAT_API_KEY must be set - the provider key the container uses}
+      # No `:?` here on purpose. Compose interpolates the whole file for every
+      # command, so a required variable would make `docker compose down`, `ps` and
+      # `logs` fail too. The server validates it at startup instead and names it.
+      CHAT_API_KEY: ${CHAT_API_KEY:-}
       CHAT_CONTEXT_WINDOW: ${CHAT_CONTEXT_WINDOW:-524288}
       CHAT_MAX_TOKENS: ${CHAT_MAX_TOKENS:-65536}
       CHAT_REASONING: ${CHAT_REASONING:-true}

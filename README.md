@@ -195,7 +195,7 @@ Every variable has a working default; the two below are only needed to override 
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CHAT_API_KEY` | **required** | Provider key. `scripts/up.sh` fills it from `~/.pi/agent/models.json`. |
+| `CHAT_API_KEY` | **required** | Provider key. `scripts/up.sh` fills it from `~/.pi/agent/models.json`. The server validates it at startup, not Compose: a `:?` in the compose file would break `down`, `ps` and `logs` too. |
 | `CHAT_PROVIDER` | `synthetic` | Provider id written into the generated config. |
 | `CHAT_MODEL` | `syn:large:text` | Model id. |
 | `CHAT_BASE_URL` | `https://api.synthetic.new/openai/v1` | Provider endpoint. |
