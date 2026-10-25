@@ -114,6 +114,29 @@ Vite is pinned to 7.x because `@vitejs/plugin-react` does not support Vite 8 yet
 Installing Vite 8 fails on a peer conflict; do not paper over it with
 `--legacy-peer-deps`.
 
+## Acceptance: isolation and concurrency
+
+`server/test/isolation.test.ts` is the MVP's definition of done. It defaults to 2
+users (`ISOLATION_USERS=5` for the full run) and nothing in it is specific to that
+number:
+
+```bash
+cd server && node --experimental-strip-types --test test/isolation.test.ts
+ISOLATION_USERS=5 node --experimental-strip-types --test test/isolation.test.ts
+```
+
+It asserts, for real users over HTTP: concurrent turns keep separate histories
+(each recalls its own secret and never another's), a foreign conversation is 404
+for read/write/rename/delete, sidebars never show another user's rows, two
+simultaneous turns on one conversation yield exactly one 200 and one 409, MCP
+connections are per tenant and do not grow with turns, each tenant's MCP tool runs
+against its own connection, and a business tool enforces only its tenant's scope.
+
+Both properties were mutation-checked: removing the ownership predicate makes all
+seven tests fail, and rebuilding the tenant runtime per turn fails the process
+count with "6 MCP process(es) were spawned for turns". A passing run therefore
+means something.
+
 ## Design constraints that are not negotiable
 
 These were established by running the SDK, not by reading its docs. Changing any of
