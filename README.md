@@ -142,9 +142,12 @@ means something.
 The fastest path, which is what this build is for:
 
 ```bash
-export PI_AGENT_DIR=~/.pi/agent
-docker compose up -d --build
+docker compose up -d --build      # no environment variables needed
 ```
+
+The Pi agent directory defaults to `~/.pi/agent`, which Compose expands for you.
+`PI_AGENT_DIR` exists only to point at a different directory when yours is not
+there.
 
 Then open **<http://localhost:8088/?token=dev&user=alice>** and start chatting.
 Change `user=` to get a separate account: that parameter IS the whole identity
@@ -182,12 +185,20 @@ than in the UI. The remaining production gaps are listed at the end of
 ## Running the full stack
 
 ```bash
-export PI_AGENT_DIR=~/.pi/agent          # read-only mount, holds models.json
-export DEV_AUTH_TOKEN=dev                 # development authentication
 docker compose up -d --build
 open http://localhost:8088/?token=dev&user=alice
 node scripts/smoke.mjs                    # 7 acceptance checks
 ```
+
+Every variable has a working default; the two below are only needed to override it.
+
+| Variable | Default | Override when |
+|---|---|---|
+| `PI_AGENT_DIR` | `~/.pi/agent` | Your Pi credentials live somewhere else. Mounted read-only. |
+| `DEV_AUTH_TOKEN` | `dev` | You do not want `dev` as the token. |
+| `CHAT_PROVIDER` / `CHAT_MODEL` | `synthetic` / `syn:large:text` | You use a different provider or model. |
+| `POSTGRES_PASSWORD` | `agentdocumentor` | Local only; change it if the port is ever exposed. |
+
 
 Services: `postgres` (loopback only), `server` (no published port), `web` (nginx on
 127.0.0.1:8088). The API is reachable only from the web container, through the
