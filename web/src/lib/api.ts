@@ -34,17 +34,30 @@ export interface ApiClientOptions {
    *  token is picked up without rebuilding the client. */
   headers: () => Record<string, string>;
   fetchImpl?: typeof fetch;
+  /** Called once when the server rejects the credentials, so the UI can ask for
+   *  them again instead of showing an empty screen. */
+  onUnauthorized?: () => void;
 }
 
 export class ApiClient {
   private readonly baseUrl: string;
   private readonly headers: () => Record<string, string>;
   private readonly doFetch: typeof fetch;
+  private readonly onUnauthorized: (() => void) | undefined;
+  private unauthorizedReported = false;
 
   constructor(options: ApiClientOptions) {
     this.baseUrl = options.baseUrl ?? "/api";
     this.headers = options.headers;
     this.doFetch = options.fetchImpl ?? fetch.bind(globalThis);
+    this.onUnauthorized = options.onUnauthorized;
+  }
+
+  /** Announce a rejected credential once; repeated 401s must not re-prompt. */
+  private reportUnauthorized(): void {
+    if (this.unauthorizedReported) return;
+    this.unauthorizedReported = true;
+    this.onUnauthorized?.();
   }
 
   async listConversations(): Promise<Conversation[]> {
@@ -161,6 +174,7 @@ export class ApiClient {
   }
 
   private async errorFrom(response: Response): Promise<ApiError> {
+    if (response.status === 401) this.reportUnauthorized();
     let code: string | undefined;
     let message = `request failed with ${response.status}`;
     try {

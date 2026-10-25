@@ -1,30 +1,96 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { ApiClient } from "./lib/api.ts";
 import { useChat } from "./lib/use-chat.ts";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { ChatWindow } from "./components/ChatWindow.tsx";
+import { AuthGate } from "./components/AuthGate.tsx";
 
 /**
- * Development identity.
+ * Development identity, carried in the URL.
  *
- * Real authentication is not implemented yet: the server refuses everything
- * without a token. These values come from the page's query string so a developer
- * can switch users (`?token=dev&user=alice`), and they are only a development
- * convenience, not an authentication scheme.
+ * Real authentication is not implemented: the server refuses anonymous requests,
+ * which is the intended failing-closed behaviour. Until then the identity is two
+ * query parameters (`?user=alice&token=dev`) so a reload keeps working and a link
+ * can be shared. Anyone with the token can claim any name, so this is a
+ * development convenience and nothing more.
  */
-function devHeaders(): Record<string, string> {
+interface Identity {
+  user: string;
+  token: string;
+}
+
+function identityFromUrl(): Identity | null {
   const params = new URLSearchParams(window.location.search);
-  const token = params.get("token") ?? "";
-  const user = params.get("user") ?? "anonymous";
-  return { "x-dev-token": token, "x-user-id": user };
+  const user = params.get("user")?.trim();
+  const token = params.get("token")?.trim();
+  if (!user || !token) return null;
+  return { user, token };
+}
+
+function writeIdentityToUrl(identity: Identity): void {
+  const params = new URLSearchParams(window.location.search);
+  params.set("user", identity.user);
+  params.set("token", identity.token);
+  window.history.replaceState(null, "", `?${params.toString()}`);
 }
 
 export function App() {
-  // The client is built once: rebuilding it per render would recreate the fetch
-  // closures that the streaming loop depends on.
-  const client = useMemo(() => new ApiClient({ headers: devHeaders }), []);
+  const [identity, setIdentity] = useState<Identity | null>(identityFromUrl);
+
+  const continueAs = useCallback((user: string, token: string) => {
+    const next = { user, token };
+    writeIdentityToUrl(next);
+    setIdentity(next);
+  }, []);
+
+  if (!identity) {
+    return (
+      <AuthGate
+        error={null}
+        initialUser=""
+        initialToken=""
+        onContinue={continueAs}
+      />
+    );
+  }
+
+  // Remounting on identity change is deliberate: a different user must not inherit
+  // the previous user's loaded conversations or in-flight stream.
+  return <ChatApp key={`${identity.user}:${identity.token}`} identity={identity} />;
+}
+
+function ChatApp({ identity }: { identity: Identity }) {
+  const [rejected, setRejected] = useState(false);
+
+  const client = useMemo(
+    () =>
+      new ApiClient({
+        headers: () => ({ "x-dev-token": identity.token, "x-user-id": identity.user }),
+        // A 401 means the token is wrong, not that the network hiccuped. Surface it
+        // as a sign-in prompt instead of an empty chat window.
+        onUnauthorized: () => setRejected(true),
+      }),
+    [identity],
+  );
+
   const chat = useChat({ client });
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  if (rejected || chat.listError?.includes("session expired")) {
+    return (
+      <AuthGate
+        error="That token was rejected by the server."
+        initialUser={identity.user}
+        initialToken=""
+        onContinue={(user, token) => {
+          const params = new URLSearchParams(window.location.search);
+          params.set("user", user);
+          params.set("token", token);
+          window.location.replace(`?${params.toString()}`);
+        }}
+      />
+    );
+  }
 
   return (
     <div className="app">

@@ -407,3 +407,71 @@ body {
     transition: none;
   }
 }
+
+/* ---------- Sign-in gate ---------- */
+
+.gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  padding: 24px;
+}
+
+.gate__card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 360px;
+  padding: 24px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+}
+
+.gate__title {
+  margin: 0;
+  font-size: 20px;
+}
+
+.gate__hint {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.gate__error {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--error);
+  border-radius: 8px;
+  color: var(--error);
+  font-size: 13px;
+}
+
+.gate__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.gate__input {
+  padding: 10px 12px;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font: inherit;
+}
+
+.gate__input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.gate__submit {
+  margin-top: 4px;
+}

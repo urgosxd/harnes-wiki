@@ -137,6 +137,48 @@ seven tests fail, and rebuilding the tenant runtime per turn fails the process
 count with "6 MCP process(es) were spawned for turns". A passing run therefore
 means something.
 
+## Trying it out (MVP)
+
+The fastest path, which is what this build is for:
+
+```bash
+export PI_AGENT_DIR=~/.pi/agent
+docker compose up -d --build
+```
+
+Then open **<http://localhost:8088/?token=dev&user=alice>** and start chatting.
+Change `user=` to get a separate account: that parameter IS the whole identity
+model right now.
+
+| Situation | What happens |
+|---|---|
+| Open `http://localhost:8088/` with no parameters | A sign-in screen asks for a name and token. It does not leave you with an empty chat and a 401 in the console. |
+| Wrong token | The sign-in screen returns and says the token was rejected. |
+| `?token=dev&user=alice` | Straight into that user's conversations. |
+| `?token=dev&user=bob` | A different, empty list. Conversation histories never mix. |
+
+The token is whatever `DEV_AUTH_TOKEN` was set to (default `dev`). Anyone who has
+it can claim any name, so treat this as a local development mode.
+
+### How authentication would work for real
+
+The current scheme is a deliberate seam, not a design:
+
+- The server refuses every request without a resolvable identity. There is no
+  anonymous fallback, because an anonymous fallback is how one user ends up
+  reading another's conversation.
+- The user id comes **only** from the request headers, never from a body field or
+  query parameter that a client could set to someone else's id.
+- Conversation lookups fold `user_id` into the SQL predicate, so a foreign
+  conversation is indistinguishable from a missing one (404, never 403).
+
+Replacing the seam means implementing `createAuthenticator` in
+`server/src/http/auth.ts` to return a user id from a real credential: a signed
+session cookie, or a JWT verified against an identity provider. Nothing else in
+the system changes, because ownership is already enforced at the data layer rather
+than in the UI. The remaining production gaps are listed at the end of
+`odd/tasks/pi-chat-mvp.md`.
+
 ## Running the full stack
 
 ```bash
