@@ -70,7 +70,7 @@ Worked in order. Each task closes with at least one work-unit commit on
   - Title persistence via `appendSessionInfo` / `getSessionName`.
   - Commit: `feat(db): conversation catalog and append-only transcript`
 
-- [ ] T4. HTTP + SSE API with ownership and idempotency
+- [x] T4. HTTP + SSE API with ownership and idempotency
   - `POST /conversations`, `GET /conversations`, `GET /conversations/:id`
   - `PATCH`/`DELETE` for rename and delete
   - `POST /conversations/:id/turns` with `Idempotency-Key`
@@ -120,7 +120,13 @@ Worked in order. Each task closes with at least one work-unit commit on
 | 2026-10-25 | T1 | `857a210`. 7 dep @earendil-works/* all 1.4.0 exact (verified installed tree). 7/7 tests pass, `tsc --noEmit` clean. Pin guard verified both ways: green with exact pins, red (`not ok 1`, `not ok 2`) with a `^1.4.0` range reintroduced. |
 | 2026-10-25 | T2 | `62f12b0`. 23/23 tests, `tsc --noEmit` clean. Recall across a rebuilt session verified WITH a negative control: same question with the real store answers `4417`, with an empty store answers `No code was provided`. Streaming verified WITH a mutation check: replay-at-the-end implementation fails the test (`first delta arrived 0ms before the turn ended`), and the original passes. Dev-surface test confirms zero of read/bash/edit/write/grep/find/ls are active. |
 | 2026-10-25 | T3 | 40/40 tests, `tsc --noEmit` clean. Postgres 16 via Compose (127.0.0.1:5432; 5434 belongs to another project). Append-only verified against the real database: `UPDATE` refused, direct `DELETE` refused, CASCADE from `conversations` allowed. Idempotency proven under a race: 8 simultaneous `startRun` on one key -> exactly 1 row created, all attempts agree on the run id. |
+| 2026-10-25 | T4 | 61/61 tests, `tsc --noEmit` clean. SSE streaming measured end to end: 35 frames, first delta at 1577ms, last at 2352ms (775ms lead, 13 distinct arrival timestamps) = live, not a burst. |
+| 2026-10-25 | T4 finding | Pi's own lock does NOT protect this design. Each turn rebuilds a fresh session, so two concurrent turns read the same snapshot: measured both report "ok", append 5 entries each, and the second model call never receives the first user message. Fixed with a partial unique index `agent_runs (conversation_id) WHERE status='running'`; 8 concurrent distinct turns now yield exactly 1 run. |
+| 2026-10-25 | T4 finding | First `TurnService.stream` buffered hook frames into a never-drained array: exactly the replay-at-the-end bug. Replaced with a `FrameQueue` bridging push hooks to an async iterator, with its own tests (including wake-on-push while draining). |
 | 2026-10-25 | T3 finding | The append-only trigger initially blocked the ON DELETE CASCADE, making conversation deletion impossible. Probed the ordering: during a cascade the parent row is already gone (`parent_exists=f`), so the trigger distinguishes a history rewrite from a legitimate delete. Covered by test so an ordering change fails loudly. |
+| 2026-10-25 | T4 | 61/61 tests, `tsc --noEmit` clean. SSE streaming measured end to end: 35 frames, first delta at 1577ms, last at 2352ms (775ms lead, 13 distinct arrival timestamps) = live, not a burst. |
+| 2026-10-25 | T4 finding | Pi's own lock does NOT protect this design. Each turn rebuilds a fresh session, so two concurrent turns read the same snapshot: measured both report "ok", append 5 entries each, and the second model call never receives the first user message. Fixed with a partial unique index `agent_runs (conversation_id) WHERE status='running'`; 8 concurrent distinct turns now yield exactly 1 run. |
+| 2026-10-25 | T4 finding | First `TurnService.stream` buffered hook frames into a never-drained array: exactly the replay-at-the-end bug. Replaced with a `FrameQueue` bridging push hooks to an async iterator, with its own tests (including wake-on-push while draining). |
 | 2026-10-25 | T3 finding | node's strip-only TypeScript rejects constructor parameter properties (`constructor(private db: T)`). Runtime limitation, not a type error: `tsc` accepts it and node fails with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`. Documented in README. |
 | 2026-10-25 | T2 chore | The harness safety policy blocked a `.env.example` file; variables live in `README.md` instead. |
 | 2026-10-25 | T1 note | `.env.example` is blocked by the harness safety policy (sensitive path). Variables are documented in `README.md` instead; no `.env` file exists in the repo. |

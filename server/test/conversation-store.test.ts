@@ -151,8 +151,8 @@ test("the same idempotency key never starts a second run", { skip }, async () =>
   const first = await store.startRun({ id: randomUUID(), conversationId: conv.id, idempotencyKey: key });
   const second = await store.startRun({ id: randomUUID(), conversationId: conv.id, idempotencyKey: key });
 
-  assert.equal(first.created, true);
-  assert.equal(second.created, false, "the second attempt must not create a run");
+  assert.equal(first.status, "created");
+  assert.equal(second.status, "replay", "the second attempt must not create a run");
   assert.equal(second.run.id, first.run.id, "it must return the original run");
   assert.equal(second.run.status, "running");
 });
@@ -167,15 +167,79 @@ test("a race on one idempotency key produces exactly one run", { skip }, async (
     ),
   );
 
-  const created = attempts.filter((a) => a.created);
+  const created = attempts.filter((a) => a.status === "created");
   assert.equal(created.length, 1, `exactly one run must be created, got ${created.length}`);
-  assert.equal(new Set(attempts.map((a) => a.run.id)).size, 1, "all attempts must agree on the run id");
+  assert.equal(
+    new Set(attempts.map((a) => (a.status === "busy" ? "none" : a.run.id))).size,
+    1,
+    "all attempts must agree on the run id",
+  );
 
   const rows = await db.query<{ count: string }>(
     "SELECT COUNT(*)::text AS count FROM agent_runs WHERE conversation_id = $1",
     [conv.id],
   );
   assert.equal(rows[0]?.count, "1");
+});
+
+test("a second turn on a busy conversation is refused, not run in parallel", { skip }, async () => {
+  const conv = await newConversation(testUser("busy"));
+
+  const first = await store.startRun({
+    id: randomUUID(),
+    conversationId: conv.id,
+    idempotencyKey: "turn-1",
+  });
+  assert.equal(first.status, "created");
+
+  // Different key: this is a second turn, not a replay.
+  const second = await store.startRun({
+    id: randomUUID(),
+    conversationId: conv.id,
+    idempotencyKey: "turn-2",
+  });
+
+  assert.equal(second.status, "busy", "a second turn must be refused while one is running");
+  if (second.status !== "busy") throw new Error("unreachable");
+  assert.equal(second.running?.idempotencyKey, "turn-1", "it must name the run that holds the lock");
+});
+
+test("the conversation frees up once the running turn finishes", { skip }, async () => {
+  const conv = await newConversation(testUser("freed"));
+  const first = await store.startRun({ id: randomUUID(), conversationId: conv.id, idempotencyKey: "a" });
+  assert.equal(first.status, "created");
+  if (first.status !== "created") throw new Error("unreachable");
+
+  await store.finishRun(first.run.id, { status: "ok" });
+
+  const next = await store.startRun({ id: randomUUID(), conversationId: conv.id, idempotencyKey: "b" });
+  assert.equal(next.status, "created", "a finished run must not keep the conversation locked");
+});
+
+test("a race of distinct turns on one conversation produces exactly one run", { skip }, async () => {
+  const conv = await newConversation(testUser("turn-race"));
+
+  // Eight simultaneous first-turns with distinct keys. Without the partial unique
+  // index this is the shape that corrupts a transcript: each turn would rebuild
+  // from the same snapshot and append.
+  const attempts = await Promise.all(
+    Array.from({ length: 8 }, (_unused, index) =>
+      store.startRun({
+        id: randomUUID(),
+        conversationId: conv.id,
+        idempotencyKey: `turn-${index}`,
+      }),
+    ),
+  );
+
+  const created = attempts.filter((a) => a.status === "created");
+  assert.equal(created.length, 1, `exactly one turn may start, got ${created.length}`);
+
+  const rows = await db.query<{ count: string }>(
+    "SELECT COUNT(*)::text AS count FROM agent_runs WHERE conversation_id = $1",
+    [conv.id],
+  );
+  assert.equal(rows[0]?.count, "1", "the database must hold one run, not eight");
 });
 
 test("different conversations may reuse the same idempotency key", { skip }, async () => {
@@ -186,19 +250,21 @@ test("different conversations may reuse the same idempotency key", { skip }, asy
   const first = await store.startRun({ id: randomUUID(), conversationId: a.id, idempotencyKey: "1" });
   const second = await store.startRun({ id: randomUUID(), conversationId: b.id, idempotencyKey: "1" });
 
-  assert.equal(first.created, true);
-  assert.equal(second.created, true, "the uniqueness is per conversation, not global");
+  assert.equal(first.status, "created");
+  assert.equal(second.status, "created", "the uniqueness is per conversation, not global");
 });
 
 test("a run records its outcome, tokens and cost", { skip }, async () => {
   const conv = await newConversation(testUser("outcome"));
-  const started = await store.startRun({
+  const startedResult = await store.startRun({
     id: randomUUID(),
     conversationId: conv.id,
     idempotencyKey: "k",
   });
 
-  await store.finishRun(started.run.id, {
+  assert.equal(startedResult.status, "created");
+  if (startedResult.status !== "created") throw new Error("unreachable");
+  await store.finishRun(startedResult.run.id, {
     status: "error",
     stopReason: "error",
     errorMessage: "400 bad model",
@@ -206,7 +272,7 @@ test("a run records its outcome, tokens and cost", { skip }, async () => {
     costTotal: 0.000001,
   });
 
-  const finished = await store.findRun(started.run.id);
+  const finished = await store.findRun(startedResult.run.id);
   assert.equal(finished?.status, "error");
   assert.equal(finished?.stopReason, "error");
   assert.equal(finished?.errorMessage, "400 bad model");
@@ -216,16 +282,19 @@ test("a run records its outcome, tokens and cost", { skip }, async () => {
 
 test("runs left running by a crash are marked interrupted", { skip }, async () => {
   const conv = await newConversation(testUser("crash"));
-  const started = await store.startRun({
+  const startedResult = await store.startRun({
     id: randomUUID(),
     conversationId: conv.id,
     idempotencyKey: "crashed",
   });
 
+  assert.equal(startedResult.status, "created");
+  if (startedResult.status !== "created") throw new Error("unreachable");
+
   const fixed = await store.failInterruptedRuns();
   assert.ok(fixed >= 1, "the interrupted run must be swept");
 
-  const run = await store.findRun(started.run.id);
+  const run = await store.findRun(startedResult.run.id);
   assert.equal(run?.status, "error");
   assert.match(run?.errorMessage ?? "", /server stopped/);
 });

@@ -19,6 +19,35 @@ odd/tasks/      Feature plan and evidence for the current work
 - A Pi agent directory holding provider credentials (`models.json`, and `auth.json`
   for OAuth providers)
 
+## API
+
+Every request needs an identity. Until real authentication is wired, the server
+refuses everything unless `DEV_AUTH_TOKEN` is set, and then accepts
+`x-dev-token: <token>` plus `x-user-id: <user>`. The user id is read from the
+request headers only, never from a body or query parameter.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness |
+| `GET` | `/conversations` | The caller's conversations, newest first |
+| `POST` | `/conversations` | Create one |
+| `GET` | `/conversations/:id` | Conversation plus projected messages |
+| `PATCH` | `/conversations/:id` | Rename |
+| `DELETE` | `/conversations/:id` | Archive |
+| `POST` | `/conversations/:id/turns` | Run a turn, streaming SSE |
+
+`POST /conversations/:id/turns` **requires** an `Idempotency-Key` header. Responses:
+
+- `200` + `text/event-stream` when the turn starts. Frames: `run_started`,
+  `text_delta`, `tool_started`, `tool_finished`, then `run_finished` or
+  `run_failed`. The run id is in the `x-run-id` header.
+- `409 turn_in_progress` when another turn holds the conversation.
+- `200 duplicate_turn` when the key was already used; it returns the original run id
+  instead of running again.
+- `404` for a conversation that does not exist **or belongs to someone else**.
+  Never `403`: a distinguishable answer would confirm someone else's conversation
+  exists.
+
 ## Configuration
 
 The server reads only these variables. There is deliberately no `.env` file in this

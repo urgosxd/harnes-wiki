@@ -12,6 +12,20 @@ export interface Conversation {
   archivedAt: Date | null;
 }
 
+/**
+ * Outcome of trying to start a turn.
+ *
+ * The three cases are distinct variants rather than a `created` boolean with an
+ * optional `busy` field, so a caller cannot forget the busy case: reading `.run`
+ * is a type error until the branch is handled.
+ */
+export type StartRunResult =
+  | { status: "created"; run: RunRecord }
+  /** The same idempotency key was already used: replay the original run. */
+  | { status: "replay"; run: RunRecord }
+  /** A different turn is already running on this conversation. */
+  | { status: "busy"; running: RunRecord | undefined };
+
 export interface RunRecord {
   id: string;
   conversationId: string;
@@ -205,26 +219,42 @@ export class ConversationStore implements EntryStore {
    *
    * `created` is false when the key was already used, which is how a reconnecting
    * client learns it must not expect a second answer.
+   *
+   * A different key on a conversation that already has a running turn is refused:
+   * two concurrent turns would each rebuild from the same snapshot, so the second
+   * model call would not see the first user message and both would append.
    */
   async startRun(input: {
     id: string;
     conversationId: string;
     idempotencyKey: string;
-  }): Promise<{ run: RunRecord; created: boolean }> {
+  }): Promise<StartRunResult> {
     const inserted = await this.db.query<RunRow>(
       `INSERT INTO agent_runs (id, conversation_id, idempotency_key, status)
        VALUES ($1, $2, $3, 'running')
-       ON CONFLICT (conversation_id, idempotency_key) DO NOTHING
+       ON CONFLICT DO NOTHING
        RETURNING *`,
       [input.id, input.conversationId, input.idempotencyKey],
     );
-    if (inserted[0]) return { run: toRunRecord(inserted[0]), created: true };
+    if (inserted[0]) return { status: "created", run: toRunRecord(inserted[0]) };
 
     const existing = await this.db.query<RunRow>(
       `SELECT * FROM agent_runs WHERE conversation_id = $1 AND idempotency_key = $2`,
       [input.conversationId, input.idempotencyKey],
     );
-    return { run: toRunRecord(existing[0]!), created: false };
+    // Same key: a replay, not a new turn. Hand back the original run.
+    if (existing[0]) return { status: "replay", run: toRunRecord(existing[0]) };
+
+    // Different key, and something is already running on this conversation.
+    const running = await this.db.query<RunRow>(
+      `SELECT * FROM agent_runs WHERE conversation_id = $1 AND status = 'running'`,
+      [input.conversationId],
+    );
+    if (running[0]) return { status: "busy", running: toRunRecord(running[0]) };
+
+    // The conflict came from a race that has since resolved; report it as busy
+    // rather than inventing a run.
+    return { status: "busy", running: undefined };
   }
 
   async finishRun(

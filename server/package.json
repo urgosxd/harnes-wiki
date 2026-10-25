@@ -9,9 +9,8 @@
   "scripts": {
     "dev": "node --experimental-strip-types --watch src/main.ts",
     "start": "node --experimental-strip-types src/main.ts",
-    "test": "node --experimental-strip-types --test test/**/*.test.ts",
-    "typecheck": "tsc --noEmit",
-    "check:pins": "node test/pins.test.ts"
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "1.4.0",
