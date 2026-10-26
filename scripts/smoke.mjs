@@ -10,11 +10,47 @@
  * measure the provider's chunking, not this system, and it reports a false failure
  * on short answers. Streaming is checked with a long answer instead.
  */
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 const base = `${process.argv[2] ?? "http://127.0.0.1:8088"}/api`;
-const token = process.env.DEV_AUTH_TOKEN ?? "dev";
+
+/**
+ * The roster: `id:token,id:token`.
+ *
+ * Taken from CHAT_USERS, or from the .chat-users file that up.sh generates, so the
+ * smoke test uses the same identities the product does instead of a shared token
+ * the server no longer accepts.
+ */
+function loadRoster() {
+  const raw = process.env.CHAT_USERS?.trim();
+  const file = join(dirname(fileURLToPath(import.meta.url)), "..", ".chat-users");
+  const source = raw || readFileSync(file, "utf8").trim();
+
+  const users = new Map();
+  for (const entry of source.split(",")) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const separator = trimmed.indexOf(":");
+    if (separator === -1) continue;
+    users.set(trimmed.slice(0, separator).trim(), trimmed.slice(separator + 1).trim());
+  }
+  if (users.size < 2) {
+    throw new Error(
+      `need two users to check isolation, found ${users.size}. ` +
+        "Set CHAT_USERS=alice:...,bob:... or run scripts/up.sh first.",
+    );
+  }
+  return users;
+}
+
+const USERS = loadRoster();
+const [ALICE, ALICE_TOKEN] = [...USERS][0];
+const [BOB, BOB_TOKEN] = [...USERS][1];
 
 const headers = (user) => ({
-  "x-dev-token": token,
+  "x-dev-token": USERS.get(user),
   "x-user-id": user,
   "content-type": "application/json",
 });
@@ -74,8 +110,9 @@ function check(name, ok, detail) {
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
 }
 
-const alice = `smoke-alice-${Date.now()}`;
-const bob = `smoke-bob-${Date.now()}`;
+// Real roster users, so isolation is checked against the identities the product has.
+const alice = ALICE;
+const bob = BOB;
 
 // 1. Streaming: a long answer must arrive in pieces, not one burst.
 const convStream = await createConversation(alice, "streaming");
@@ -107,6 +144,16 @@ const aliceList = await (await fetch(`${base}/conversations`, { headers: headers
 check(
   "the sidebar hides other users' conversations",
   !aliceList.conversations.some((conversation) => conversation.id === convBob),
+);
+
+// The impersonation check: bob's token claiming to be alice must be refused.
+const impostor = await fetch(`${base}/conversations/${convBob}`, {
+  headers: { "x-dev-token": BOB_TOKEN, "x-user-id": alice },
+});
+check(
+  "a token cannot claim another user's identity",
+  impostor.status === 401,
+  `status ${impostor.status}`,
 );
 
 // 4. Idempotency: the same key must not append a second turn.

@@ -156,7 +156,7 @@ docker compose ps                 # three services must be healthy
 docker compose logs -f server     # structured JSON
 docker compose down               # stops, keeps conversations
 docker compose down -v            # stops and deletes everything
-node scripts/smoke.mjs            # 7 acceptance checks against the running stack
+node scripts/smoke.mjs            # 8 acceptance checks against the running stack
 ```
 
 The container is self-contained: it generates its own Pi model configuration from
