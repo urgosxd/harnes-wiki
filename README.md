@@ -70,20 +70,26 @@ starts the server with zero credentials and every turn fails with
 
 ## Development
 
+Two pieces run separately, plus Postgres from Docker.
+
 ```bash
-docker compose up -d postgres      # Postgres on 127.0.0.1:5432
+# 1. Database only
+docker compose up -d postgres
 
-# agent server (port 8080)
+# 2. Agent server on :8080  (env derived from ~/.pi/agent/models.json)
 cd server
-PI_AGENT_DIR=~/.pi/agent PI_WORKSPACE_DIR=/tmp/agentdoc-ws \
-CHAT_PROVIDER=synthetic CHAT_MODEL=syn:large:text \
-DATABASE_URL=postgres://agentdocumentor:agentdocumentor@127.0.0.1:5432/agentdocumentor \
-DEV_AUTH_TOKEN=dev PORT=8080 npm start
+source ../scripts/dev-env.sh
+npm start
 
-# chat client (port 5173, proxies /api to 8080)
-cd web && npm run dev
-# open http://localhost:5173/?token=dev&user=alice
+# 3. Chat client on :5173, proxying /api to :8080
+cd web
+npm run dev
 ```
+
+Open <http://localhost:5173/?token=dev&user=alice>.
+
+`source scripts/dev-env.sh` reads the provider key, the `api` type and the base URL
+from your Pi config. It is sourced, not executed, so the variables reach `npm start`.
 
 Tests:
 
@@ -92,13 +98,44 @@ cd server && node --experimental-strip-types --test test/*.test.ts && npx tsc --
 cd web    && npx vitest run && npx tsc --noEmit
 ```
 
-TypeScript runs directly through node's **strip-only** type support, so there is no
-build step. Strip-only means syntax that emits JavaScript is rejected: no
-`constructor(private x: T)` parameter properties, no `enum`, no `namespace`, no
-decorators. Use a field and an explicit assignment instead. `tsc` still typechecks.
+## Production (containers)
 
-Tests that need Postgres or provider credentials skip (and are reported as
-skipped) when those are unavailable; they never pass silently.
+```bash
+./scripts/up.sh          # builds, starts, waits for health, prints the URL
+```
+
+Then open <http://localhost:8088/?token=dev&user=alice>.
+
+Or by hand:
+
+```bash
+CHAT_API_KEY=sk-... docker compose up -d --build
+docker compose ps                 # three services must be healthy
+docker compose logs -f server     # structured JSON
+docker compose down               # stops, keeps conversations
+docker compose down -v            # stops and deletes everything
+node scripts/smoke.mjs            # 7 acceptance checks against the running stack
+```
+
+The container is self-contained: it generates its own Pi model configuration from
+`CHAT_*` variables and mounts nothing from the host. `scripts/up.sh` takes the key
+(and the api type and base URL) from `~/.pi/agent/models.json` so you do not retype
+them; the file itself is never mounted.
+
+### Dev vs production at a glance
+
+| | Development | Production |
+|---|---|---|
+| Command | `source scripts/dev-env.sh` + `npm start` | `./scripts/up.sh` |
+| Client | Vite dev server on :5173 (HMR) | nginx static build on :8088 |
+| Server | local Node on :8080 | container, no published port |
+| Database | container, port 127.0.0.1:5432 | container, private network |
+| Pi config | generated into `/tmp`, beside the workspace | generated into the data volume, beside the workspace |
+| TypeScript | run directly by Node | run directly by Node (same) |
+| Restart policy | none | `unless-stopped` |
+
+Both paths run the same source: there is no build step for the server, because Node
+executes the TypeScript directly.
 
 ## Client
 
@@ -136,120 +173,6 @@ Both properties were mutation-checked: removing the ownership predicate makes al
 seven tests fail, and rebuilding the tenant runtime per turn fails the process
 count with "6 MCP process(es) were spawned for turns". A passing run therefore
 means something.
-
-## Trying it out (MVP)
-
-The fastest path, which is what this build is for:
-
-```bash
-docker compose up -d --build      # no environment variables needed
-```
-
-The container is self-contained: it generates its own Pi model configuration from
-environment variables, and **no host directory is mounted**. `CHAT_API_KEY` is the
-only value it needs, and `scripts/up.sh` reads it from your existing
-`~/.pi/agent/models.json` so you do not have to retype it.
-
-Then open **<http://localhost:8088/?token=dev&user=alice>** and start chatting.
-Change `user=` to get a separate account: that parameter IS the whole identity
-model right now.
-
-| Situation | What happens |
-|---|---|
-| Open `http://localhost:8088/` with no parameters | A sign-in screen asks for a name and token. It does not leave you with an empty chat and a 401 in the console. |
-| Wrong token | The sign-in screen returns and says the token was rejected. |
-| `?token=dev&user=alice` | Straight into that user's conversations. |
-| `?token=dev&user=bob` | A different, empty list. Conversation histories never mix. |
-
-The token is whatever `DEV_AUTH_TOKEN` was set to (default `dev`). Anyone who has
-it can claim any name, so treat this as a local development mode.
-
-### How authentication would work for real
-
-The current scheme is a deliberate seam, not a design:
-
-- The server refuses every request without a resolvable identity. There is no
-  anonymous fallback, because an anonymous fallback is how one user ends up
-  reading another's conversation.
-- The user id comes **only** from the request headers, never from a body field or
-  query parameter that a client could set to someone else's id.
-- Conversation lookups fold `user_id` into the SQL predicate, so a foreign
-  conversation is indistinguishable from a missing one (404, never 403).
-
-Replacing the seam means implementing `createAuthenticator` in
-`server/src/http/auth.ts` to return a user id from a real credential: a signed
-session cookie, or a JWT verified against an identity provider. Nothing else in
-the system changes, because ownership is already enforced at the data layer rather
-than in the UI. The remaining production gaps are listed at the end of
-`odd/tasks/pi-chat-mvp.md`.
-
-## Running the full stack
-
-```bash
-docker compose up -d --build
-open http://localhost:8088/?token=dev&user=alice
-node scripts/smoke.mjs                    # 7 acceptance checks
-```
-
-Every variable has a working default; the two below are only needed to override it.
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `CHAT_API_KEY` | **required** | Provider key. `scripts/up.sh` fills it from `~/.pi/agent/models.json`. The server validates it at startup, not Compose: a `:?` in the compose file would break `down`, `ps` and `logs` too. |
-| `CHAT_PROVIDER` | `synthetic` | Provider id written into the generated config. |
-| `CHAT_MODEL` | `syn:large:text` | Model id. |
-| `CHAT_BASE_URL` | `https://api.synthetic.new/openai/v1` | Provider endpoint. |
-| `CHAT_API` | `openai-completions` | One of `openai-completions`, `openai-responses`, `anthropic-messages`, `google-generative-ai`. |
-| `CHAT_CONTEXT_WINDOW` / `CHAT_MAX_TOKENS` / `CHAT_REASONING` | `524288` / `65536` / `true` | Model capabilities. |
-| `DEV_AUTH_TOKEN` | `dev` | Token the app asks for. |
-| `AGENT_READ_TOOLS` | `true` | `read`, `grep`, `find`, `ls`: reference material the model can consult. Confined to the workspace. |
-| `AGENT_SKILLS` | `true` | Skill files the model can read. |
-| `AGENT_BASH` | **`false`** | The shell. Cannot be confined; enabling it exposes the container. |
-| `AGENT_WRITES` | **`false`** | `write` and `edit`. |
-| `POSTGRES_PASSWORD` | `agentdocumentor` | Local only. |
-
-### Self-contained container
-
-The service writes `/data/workspace/agent/models.json` (mode 0600) at boot from the
-`CHAT_*` variables, then uses it as its Pi agent directory. The SDK ships no
-built-in model catalog - measured: zero models with empty configuration - so this
-generated file is what makes the container work without any host state.
-
-`PI_AGENT_CONFIG_MODE=mounted` remains available for a team secret: it takes an
-agent directory read-only and copies `models.json` and `auth.json` into the data
-volume, because Pi's credential store needs a writable location for its lock.
-
-
-Services: `postgres` (loopback only), `server` (no published port), `web` (nginx on
-127.0.0.1:8088). The API is reachable only from the web container, through the
-private network.
-
-```bash
-docker compose ps                         # health of all three
-docker compose logs -f server             # structured JSON logs
-docker compose down                       # keeps the data volume
-docker compose down -v                    # destroys conversations
-```
-
-Logs are one JSON object per line and redact secrets by key name. Set `LOG_LEVEL`
-to `debug`, `info`, `warn` or `error`.
-
-### Two deployment traps this stack solves
-
-**Credentials must live somewhere writable.** Pi's credential store takes a lock
-beside `auth.json` and recreates the file when missing, so pointing it at a
-read-only mount fails with `EROFS: read-only file system, mkdir
-'<agentDir>/auth.json.lock'`. The server copies `models.json` and `auth.json` into
-the data volume at boot, with mode 0600, and never copies `AGENTS.md`, skills or
-extensions.
-
-**The credential lookup does not follow the agent dir you pass it.**
-`ModelRuntime.create()` without explicit paths resolves through `HOME` and
-`PI_CODING_AGENT_DIR`. That matches `~/.pi/agent` on a developer machine, so the
-bug is invisible until deployment, where it resolved to 0 models and every start
-died with "model is not available". The runtime now passes `authPath`,
-`modelsPath` and `modelsStorePath` explicitly, and
-`test/agent-dir-portability.test.ts` runs it with a clean `HOME` to keep it that way.
 
 ## Activity while the assistant works
 

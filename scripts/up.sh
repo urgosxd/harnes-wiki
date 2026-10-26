@@ -19,21 +19,24 @@ PROVIDER="${CHAT_PROVIDER:-synthetic}"
 
 if [ -z "${CHAT_API_KEY:-}" ]; then
   if [ -f "$HOST_MODELS" ]; then
-    CHAT_API_KEY="$(PROVIDER="$PROVIDER" MODELS="$HOST_MODELS" node -e '
+    # Read the key AND the api type AND the base URL from the host config. The api
+    # value is not guessable: "synthetic" is a provider name, not an API type, and
+    # using it fails at the first turn with "No API provider registered for api".
+    read -r CHAT_API_KEY CHAT_API_HOST CHAT_BASE_URL_HOST <<EOF2
+$(PROVIDER="$PROVIDER" MODELS="$HOST_MODELS" node -e '
       const { readFileSync } = require("node:fs");
       try {
         const doc = JSON.parse(readFileSync(process.env.MODELS, "utf8"));
-        const provider = doc?.providers?.[process.env.PROVIDER];
-        const key = provider?.apiKey;
-        if (typeof key === "string" && key.trim()) {
-          process.stdout.write(key.trim());
-        } else {
-          process.exit(1);
-        }
+        const p = doc?.providers?.[process.env.PROVIDER];
+        if (!p || typeof p.apiKey !== "string" || !p.apiKey.trim()) process.exit(1);
+        process.stdout.write([p.apiKey.trim(), p.api ?? "", p.baseUrl ?? ""].join(" "));
       } catch {
         process.exit(1);
       }
-    ')" || true
+    ')
+EOF2
+    CHAT_API_HOST="${CHAT_API_HOST:-}"
+    CHAT_BASE_URL_HOST="${CHAT_BASE_URL_HOST:-}"
   fi
 fi
 
@@ -51,23 +54,29 @@ MESSAGE
   exit 1
 fi
 
-# Keep the base URL and api type aligned with the provider actually used.
+# Prefer what the host config declares; fall back only when it said nothing.
+if [ -z "${CHAT_API:-}" ] && [ -n "${CHAT_API_HOST:-}" ]; then
+  CHAT_API="$CHAT_API_HOST"
+fi
+if [ -z "${CHAT_BASE_URL:-}" ] && [ -n "${CHAT_BASE_URL_HOST:-}" ]; then
+  CHAT_BASE_URL="$CHAT_BASE_URL_HOST"
+fi
 if [ "$PROVIDER" = "synthetic" ] && [ -z "${CHAT_BASE_URL:-}" ]; then
   CHAT_BASE_URL="https://api.synthetic.new/openai/v1"
 fi
 
 export CHAT_API_KEY CHAT_PROVIDER="$PROVIDER"
 export CHAT_BASE_URL="${CHAT_BASE_URL:-}"
+export CHAT_API="${CHAT_API:-openai-completions}"
 export DEV_AUTH_TOKEN="${DEV_AUTH_TOKEN:-dev}"
 
 echo "provider: $PROVIDER"
+echo "api:      ${CHAT_API}"
 echo "model:    ${CHAT_MODEL:-syn:large:text}"
 echo "key:      ${CHAT_API_KEY:0:8}... (passed as an environment variable)"
 
-# Only pass CHAT_BASE_URL when it has a value, so the compose default applies.
-if [ -z "$CHAT_BASE_URL" ]; then
-  unset CHAT_BASE_URL
-fi
+# Only pass these when they have a value, so the compose defaults apply.
+if [ -z "$CHAT_BASE_URL" ]; then unset CHAT_BASE_URL; fi
 
 docker compose up -d --build "$@"
 

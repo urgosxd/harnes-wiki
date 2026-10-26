@@ -101,9 +101,11 @@ export class TenantRuntime {
       allowModelNetwork: false,
       authPath: join(agentDir, "auth.json"),
       modelsPath: join(agentDir, "models.json"),
-      // The store is a cache; keeping it beside the mounted (read-only) agent dir
-      // would make every start fail to write.
-      modelsStorePath: join(workspaceDir, "models-store.json"),
+      // The store is a cache and must stay OUT of the workspace: anything inside it
+      // is visible to the model's read/ls tools. Measured - with the cache in the
+      // workspace the assistant reported "models-store.json" as one of the user's
+      // files. It lives beside the agent dir instead, which is already outside.
+      modelsStorePath: join(workspaceDir, "..", "models-store.json"),
     });
 
     // The agent dir is a human development config: it holds extensions, skills,
