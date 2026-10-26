@@ -6,6 +6,8 @@ export interface SidebarProps {
   loading: boolean;
   error: string | null;
   open: boolean;
+  /** Shown at the bottom so a user can tell which account they are in. */
+  user: string;
   onSelect(id: string): void;
   onNew(): void;
   onDelete(id: string): void;
@@ -18,6 +20,7 @@ export function Sidebar({
   loading,
   error,
   open,
+  user,
   onSelect,
   onNew,
   onDelete,
@@ -71,6 +74,12 @@ export function Sidebar({
             ))}
           </nav>
         )}
+
+        <footer className="sidebar__footer">
+          <span className="sidebar__user" title={`Signed in as ${user}`}>
+            {user}
+          </span>
+        </footer>
       </aside>
     </>
   );

@@ -148,9 +148,17 @@ async function main(): Promise<void> {
     thinkingLevel: config.thinkingLevel,
   });
 
-  const authenticator = createAuthenticator({ devToken: process.env.DEV_AUTH_TOKEN });
-  if (!process.env.DEV_AUTH_TOKEN) {
-    log.warn("no DEV_AUTH_TOKEN: every request will be refused until real authentication is wired");
+  const authenticator = createAuthenticator({
+    users: process.env.CHAT_USERS,
+    devToken: process.env.DEV_AUTH_TOKEN,
+  });
+  if (!process.env.CHAT_USERS && !process.env.DEV_AUTH_TOKEN) {
+    log.warn("no CHAT_USERS or DEV_AUTH_TOKEN: every request will be refused");
+  } else if (!process.env.CHAT_USERS) {
+    log.warn(
+      "DEV_AUTH_TOKEN is set but CHAT_USERS is not: one shared token means any client " +
+        "can claim any user id. Set CHAT_USERS=id:token,id:token for per-user identities.",
+    );
   }
 
   const router = createRouter({ authenticate: authenticator });

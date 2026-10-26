@@ -68,6 +68,48 @@ inline in `models.json` and `auth.json` is empty, so mounting only `auth.json`
 starts the server with zero credentials and every turn fails with
 `No API key found for the selected model.`
 
+## Two users: how the link works
+
+The URL carries both halves of an identity:
+
+```
+http://localhost:8088/?user=alice&token=<alice's token>
+http://localhost:8088/?user=bob&token=<bob's token>
+```
+
+**The token identifies the caller, not the `user` parameter.** Each user has a
+secret of their own, configured once in `CHAT_USERS=id:token,id:token`.
+`scripts/up.sh` and `scripts/dev-env.sh` generate that file (`.chat-users`, mode
+0600, git-ignored) on first run and print both links.
+
+Why this matters, and why it was a bug before: with a single shared token, the
+`user` parameter was only a claim. Measured on the running stack, one user could
+open another's conversation with their own token and get **200 with the title
+visible**. Now:
+
+| Attempt | Before | Now |
+|---|---|---|
+| bob's token, claiming `user=alice` | `200`, title visible | `401` |
+| bob's token, `user=bob`, alice's conversation | `404` | `404` |
+| `/me` with a mismatched pair | n/a | `401` |
+
+Rules the server enforces:
+
+- A token that matches nobody is refused, whatever the `user` parameter says.
+- A token that matches one user but claims another id is refused.
+- The `user` parameter is optional: the token alone identifies the caller. It is
+  kept in the link so the interface can show whose account is open.
+- Tokens shorter than 16 characters are rejected at startup, because with two users
+  guessing is the whole attack.
+
+This is still not production authentication: it is a fixed local roster. Replacing
+it with a session cookie or a verified JWT means implementing the same
+`Authenticator` contract (`server/src/http/auth.ts`) and changing nothing else —
+ownership is already enforced in the data layer.
+
+The sidebar shows the signed-in account at the bottom, so a user can tell which
+link they opened.
+
 ## Development
 
 Two pieces run separately, plus Postgres from Docker.
@@ -86,7 +128,7 @@ cd web
 npm run dev
 ```
 
-Open <http://localhost:5173/?token=dev&user=alice>.
+Open the link printed by `up.sh` (see **Two users** below).
 
 `source scripts/dev-env.sh` reads the provider key, the `api` type and the base URL
 from your Pi config. It is sourced, not executed, so the variables reach `npm start`.
@@ -104,7 +146,7 @@ cd web    && npx vitest run && npx tsc --noEmit
 ./scripts/up.sh          # builds, starts, waits for health, prints the URL
 ```
 
-Then open <http://localhost:8088/?token=dev&user=alice>.
+Then open the links printed by the script (see **Two users** below).
 
 Or by hand:
 

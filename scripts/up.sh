@@ -68,7 +68,21 @@ fi
 export CHAT_API_KEY CHAT_PROVIDER="$PROVIDER"
 export CHAT_BASE_URL="${CHAT_BASE_URL:-}"
 export CHAT_API="${CHAT_API:-openai-completions}"
-export DEV_AUTH_TOKEN="${DEV_AUTH_TOKEN:-dev}"
+# Two users with distinct secrets. Generated once per machine and kept in a local
+# file so the same links keep working across restarts: the token IS the identity.
+USERS_FILE=".chat-users"
+if [ -z "${CHAT_USERS:-}" ]; then
+  if [ -f "$USERS_FILE" ]; then
+    CHAT_USERS="$(cat "$USERS_FILE")"
+  else
+    gen() { node -e 'process.stdout.write(require("node:crypto").randomBytes(12).toString("hex"))'; }
+    CHAT_USERS="alice:$(gen),bob:$(gen)"
+    printf '%s' "$CHAT_USERS" > "$USERS_FILE"
+    chmod 600 "$USERS_FILE"
+    echo "generated two user tokens in $USERS_FILE (keep the links private)"
+  fi
+fi
+export CHAT_USERS
 
 echo "provider: $PROVIDER"
 echo "api:      ${CHAT_API}"
@@ -87,7 +101,14 @@ for _ in $(seq 1 60); do
   web="$(docker inspect --format '{{.State.Health.Status}}' agentdoc-web 2>/dev/null || echo starting)"
   if [ "$server" = "healthy" ] && [ "$web" = "healthy" ]; then
     echo
-    echo "Ready:  http://localhost:8088/?token=${DEV_AUTH_TOKEN}&user=alice"
+    echo "Links (each user has their own token):"
+    # A here-string, not a pipe: inside a pipeline the loop runs in a subshell and
+    # only the first line survives when combined with `read`.
+    while IFS=: read -r id token; do
+      if [ -n "$id" ]; then
+        echo "  ${id}:  http://localhost:8088/?user=${id}&token=${token}"
+      fi
+    done <<< "$(printf '%s' "$CHAT_USERS" | tr ',' '\n')"
     exit 0
   fi
   sleep 2

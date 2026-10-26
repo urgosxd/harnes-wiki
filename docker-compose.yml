@@ -50,7 +50,11 @@ services:
       # Neutral workspace: Pi appends a <cwd> section to the system prompt.
       PI_WORKSPACE_DIR: /data/workspace
       DATABASE_URL: postgres://agentdocumentor:${POSTGRES_PASSWORD:-agentdocumentor}@postgres:5432/agentdocumentor
-      DEV_AUTH_TOKEN: ${DEV_AUTH_TOKEN:-dev}
+      # Two users, each with their own secret: `id:token,id:token`. The token is
+      # what identifies the caller, so holding bob's token does not let anyone act
+      # as alice. Tokens must be at least 16 characters; the server refuses
+      # anything shorter at startup.
+      CHAT_USERS: ${CHAT_USERS:?CHAT_USERS must be set, e.g. alice:token-alice-1234567890,bob:token-bob-1234567890}
       # Capabilities the model gets. Invisible in the UI either way.
       # AGENT_BASH stays off by default: a shell cannot be confined to the
       # workspace, and the provider key lives one directory above it.
@@ -65,14 +69,13 @@ services:
       # Only the service's own data volume: generated config, session workspace.
       - agentdoc-workspace:/data/workspace
     healthcheck:
+      # /health needs no credentials, so container health does not depend on a secret.
       test:
         - CMD
         - node
         - -e
         - |
-          fetch("http://127.0.0.1:8080/health", {
-            headers: { "x-dev-token": process.env.DEV_AUTH_TOKEN ?? "", "x-user-id": "healthcheck" },
-          })
+          fetch("http://127.0.0.1:8080/health")
             .then((response) => process.exit(response.ok ? 0 : 1))
             .catch(() => process.exit(1));
       interval: 5s

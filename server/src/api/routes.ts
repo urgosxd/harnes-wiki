@@ -36,8 +36,21 @@ export function registerRoutes(router: Router, deps: RouteDeps): void {
   // Catalog
   // ---------------------------------------------------------------------------
 
+  // Liveness only: no data, no credentials. Kept unauthenticated so a container
+  // healthcheck does not depend on holding a user token.
   router.get("/health", async ({ res }) => {
     sendJson(res, 200, { ok: true });
+  });
+
+  /**
+   * Who the caller is.
+   *
+   * The client needs this to show "signed in as alice" without keeping the token in
+   * a place it can be read back, and to prove that a link carried the right secret
+   * rather than only the right name.
+   */
+  router.get("/me", async ({ res, userId }) => {
+    sendJson(res, 200, { id: userId, displayName: userId });
   });
 
   router.get("/conversations", async ({ res, userId }) => {

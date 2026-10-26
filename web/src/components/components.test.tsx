@@ -16,6 +16,7 @@ describe("Sidebar", () => {
     loading: false,
     error: null,
     open: false,
+    user: "alice",
     onSelect: () => {},
     onNew: () => {},
     onDelete: () => {},
@@ -75,6 +76,11 @@ describe("Sidebar", () => {
     render(<Sidebar {...base} onNew={onNew} />);
     fireEvent.click(screen.getByText("New chat"));
     expect(onNew).toHaveBeenCalled();
+  });
+
+  it("shows which account is signed in", () => {
+    render(<Sidebar {...base} user="bob" />);
+    expect(screen.getByText("bob")).toBeDefined();
   });
 });
 

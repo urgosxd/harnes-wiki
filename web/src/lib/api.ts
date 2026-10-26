@@ -1,5 +1,10 @@
 import { SseParser, parseChatFrame, type ChatFrame } from "./sse.ts";
 
+export interface Identity {
+  id: string;
+  displayName: string;
+}
+
 export interface Conversation {
   id: string;
   title: string | null;
@@ -58,6 +63,11 @@ export class ApiClient {
     if (this.unauthorizedReported) return;
     this.unauthorizedReported = true;
     this.onUnauthorized?.();
+  }
+
+  /** Who these credentials belong to. Proves a link carried a real secret. */
+  async me(): Promise<Identity> {
+    return this.json<Identity>("GET", "/me");
   }
 
   async listConversations(): Promise<Conversation[]> {

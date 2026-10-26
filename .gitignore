@@ -16,3 +16,6 @@ dist/
 
 # Vite
 web/dist/
+
+# Generated per machine; contains user tokens
+.chat-users

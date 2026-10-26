@@ -1,4 +1,5 @@
 import type { IncomingMessage } from "node:http";
+import { parseRoster, resolveRosterUser, type RosterUser } from "./users.ts";
 
 /**
  * Resolve the caller's user id.
@@ -17,26 +18,49 @@ export type Authenticator = (req: IncomingMessage) => Promise<string | undefined
 
 export interface AuthConfig {
   /**
-   * Development authenticator: trusts a shared token and takes the user id from a
-   * header. Refused unless explicitly enabled, and never valid in production.
+   * `id:token,id:token`. Each user has their own secret, so claiming another name
+   * with your own token is refused. This is the local roster for trying the product
+   * with a couple of people, not real authentication.
+   */
+  users?: string | undefined;
+  /**
+   * Legacy single shared token. Still honoured when `users` is absent, and it keeps
+   * the old weakness: anyone holding it can claim any user id.
    */
   devToken?: string | undefined;
 }
 
+function header(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name];
+  return Array.isArray(value) ? value[0] : value;
+}
+
 export function createAuthenticator(config: AuthConfig): Authenticator {
-  if (!config.devToken) {
-    // Fail closed. Every request is unauthorized until real auth is wired.
+  const roster: RosterUser[] = parseRoster(config.users);
+  if (roster.length > 0) {
+    return async (req) => {
+      const user = resolveRosterUser({
+        users: roster,
+        token: header(req, "x-dev-token"),
+        claimedUserId: header(req, "x-user-id"),
+      });
+      return user?.id;
+    };
+  }
+
+  const sharedToken = config.devToken;
+  if (!sharedToken) {
+    // Fail closed. Every request is unauthorized until identity is configured.
     return async () => undefined;
   }
 
-  const token = config.devToken;
+  // Legacy mode: one token for everyone, so the claimed id is trusted. Kept only so
+  // an existing setup keeps working; the roster is the recommended path.
   return async (req) => {
-    const provided = req.headers["x-dev-token"];
-    const value = Array.isArray(provided) ? provided[0] : provided;
-    if (value !== token) return undefined;
+    const provided = header(req, "x-dev-token");
+    if (provided !== sharedToken) return undefined;
 
-    const user = req.headers["x-user-id"];
-    const userId = Array.isArray(user) ? user[0] : user;
+    const userId = header(req, "x-user-id");
     if (!userId || !/^[A-Za-z0-9._@-]{1,128}$/.test(userId)) return undefined;
     return userId;
   };

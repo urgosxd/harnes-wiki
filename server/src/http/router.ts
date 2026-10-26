@@ -127,11 +127,14 @@ export function createRouter(options: {
         void options
           .authenticate(req)
           .then(async (userId) => {
-            if (!userId) {
+            // Liveness is deliberately public: a healthcheck that needs a user
+            // token couples container health to a secret.
+            const path = new URL(req.url ?? "/", "http://localhost").pathname;
+            if (!userId && path !== "/health") {
               sendJson(res, 401, { error: "unauthorized" });
               return;
             }
-            await this.handle(req, res, userId);
+            await this.handle(req, res, userId ?? "");
           })
           .catch((error: unknown) => {
             if (!res.headersSent) sendJson(res, 500, { error: "internal_error", message: messageOf(error) });

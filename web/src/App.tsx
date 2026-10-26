@@ -1,25 +1,23 @@
-import { useCallback, useMemo, useState } from "react";
-import { ApiClient } from "./lib/api.ts";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ApiClient, ApiError, type Identity } from "./lib/api.ts";
 import { useChat } from "./lib/use-chat.ts";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { ChatWindow } from "./components/ChatWindow.tsx";
 import { AuthGate } from "./components/AuthGate.tsx";
 
 /**
- * Development identity, carried in the URL.
+ * Identity from the URL: `?user=alice&token=...`.
  *
- * Real authentication is not implemented: the server refuses anonymous requests,
- * which is the intended failing-closed behaviour. Until then the identity is two
- * query parameters (`?user=alice&token=dev`) so a reload keeps working and a link
- * can be shared. Anyone with the token can claim any name, so this is a
- * development convenience and nothing more.
+ * The token, not the name, is what identifies the caller. Each user has their own
+ * secret (`CHAT_USERS`), so a link carrying the wrong pair is refused by the server
+ * rather than silently acting as somebody else.
  */
-interface Identity {
+interface Credentials {
   user: string;
   token: string;
 }
 
-function identityFromUrl(): Identity | null {
+function credentialsFromUrl(): Credentials | null {
   const params = new URLSearchParams(window.location.search);
   const user = params.get("user")?.trim();
   const token = params.get("token")?.trim();
@@ -27,60 +25,71 @@ function identityFromUrl(): Identity | null {
   return { user, token };
 }
 
-function writeIdentityToUrl(identity: Identity): void {
+function writeCredentialsToUrl(credentials: Credentials): void {
   const params = new URLSearchParams(window.location.search);
-  params.set("user", identity.user);
-  params.set("token", identity.token);
+  params.set("user", credentials.user);
+  params.set("token", credentials.token);
   window.history.replaceState(null, "", `?${params.toString()}`);
 }
 
 export function App() {
-  const [identity, setIdentity] = useState<Identity | null>(identityFromUrl);
+  const [credentials, setCredentials] = useState<Credentials | null>(credentialsFromUrl);
 
   const continueAs = useCallback((user: string, token: string) => {
     const next = { user, token };
-    writeIdentityToUrl(next);
-    setIdentity(next);
+    writeCredentialsToUrl(next);
+    setCredentials(next);
   }, []);
 
-  if (!identity) {
-    return (
-      <AuthGate
-        error={null}
-        initialUser=""
-        initialToken=""
-        onContinue={continueAs}
-      />
-    );
+  if (!credentials) {
+    return <AuthGate error={null} initialUser="" initialToken="" onContinue={continueAs} />;
   }
 
   // Remounting on identity change is deliberate: a different user must not inherit
-  // the previous user's loaded conversations or in-flight stream.
-  return <ChatApp key={`${identity.user}:${identity.token}`} identity={identity} />;
+  // the previous user's conversations or in-flight stream.
+  return <ChatApp key={`${credentials.user}:${credentials.token}`} credentials={credentials} />;
 }
 
-function ChatApp({ identity }: { identity: Identity }) {
-  const [rejected, setRejected] = useState(false);
+function ChatApp({ credentials }: { credentials: Credentials }) {
+  const [identity, setIdentity] = useState<Identity | null>(null);
+  const [rejected, setRejected] = useState<string | null>(null);
 
   const client = useMemo(
     () =>
       new ApiClient({
-        headers: () => ({ "x-dev-token": identity.token, "x-user-id": identity.user }),
-        // A 401 means the token is wrong, not that the network hiccuped. Surface it
-        // as a sign-in prompt instead of an empty chat window.
-        onUnauthorized: () => setRejected(true),
+        headers: () => ({ "x-dev-token": credentials.token, "x-user-id": credentials.user }),
+        onUnauthorized: () => setRejected("That token was rejected by the server."),
       }),
-    [identity],
+    [credentials],
   );
 
-  const chat = useChat({ client });
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  // Confirm the credentials before rendering the chat, so a wrong token shows the
+  // sign-in screen instead of an empty conversation list.
+  useEffect(() => {
+    let cancelled = false;
+    client
+      .me()
+      .then((who) => {
+        if (!cancelled) setIdentity(who);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setRejected(
+          error instanceof ApiError && error.status === 401
+            ? "That user and token do not match. Ask for your own link."
+            : "Could not reach the server.",
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [client]);
 
-  if (rejected || chat.listError?.includes("session expired")) {
+  if (rejected) {
     return (
       <AuthGate
-        error="That token was rejected by the server."
-        initialUser={identity.user}
+        error={rejected}
+        initialUser={credentials.user}
         initialToken=""
         onContinue={(user, token) => {
           const params = new URLSearchParams(window.location.search);
@@ -92,6 +101,17 @@ function ChatApp({ identity }: { identity: Identity }) {
     );
   }
 
+  if (!identity) {
+    return <div className="boot">Connecting…</div>;
+  }
+
+  return <Chat identity={identity} client={client} />;
+}
+
+function Chat({ identity, client }: { identity: Identity; client: ApiClient }) {
+  const chat = useChat({ client });
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
   return (
     <div className="app">
       <Sidebar
@@ -100,6 +120,7 @@ function ChatApp({ identity }: { identity: Identity }) {
         loading={chat.loadingList}
         error={chat.listError}
         open={sidebarOpen}
+        user={identity.displayName}
         onSelect={(id) => {
           setSidebarOpen(false);
           void chat.openConversation(id);
