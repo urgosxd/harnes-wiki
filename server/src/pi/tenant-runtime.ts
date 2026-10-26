@@ -7,6 +7,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { TSchema } from "typebox";
+import { agentToolNames, createAgentTools, type AgentToolOptions } from "./agent-tools.ts";
 import { Type } from "typebox";
 import type { ThinkingLevelName } from "../config.ts";
 
@@ -49,6 +52,8 @@ export class TenantRuntime {
   readonly resourceLoader: DefaultResourceLoader;
   readonly settingsManager: SettingsManager;
   readonly customTools: ToolDefinition[];
+  /** Coding tools (read/grep/find/ls and optionally bash/write/edit). */
+  readonly builtinTools: AgentTool<TSchema, unknown>[];
   readonly toolNames: string[];
 
   private readonly mcpConnections = new Map<string, McpConnection>();
@@ -60,13 +65,16 @@ export class TenantRuntime {
     resourceLoader: DefaultResourceLoader,
     settingsManager: SettingsManager,
     customTools: ToolDefinition[],
+    builtinTools: AgentTool<TSchema, unknown>[],
   ) {
     this.tenant = tenant;
     this.modelRuntime = modelRuntime;
     this.resourceLoader = resourceLoader;
     this.settingsManager = settingsManager;
     this.customTools = customTools;
-    this.toolNames = customTools.map((tool) => toolName(tool));
+    this.builtinTools = builtinTools;
+    // The session's allowlist covers both kinds: built-in names and our own tools.
+    this.toolNames = [...builtinTools.map((tool) => tool.name), ...customTools.map((tool) => toolName(tool))];
   }
 
   static async create(options: {
@@ -74,6 +82,13 @@ export class TenantRuntime {
     agentDir: string;
     workspaceDir: string;
     systemPrompt: string;
+    /** Which capabilities the model gets. */
+    capabilities?: {
+      readTools?: boolean;
+      bash?: boolean;
+      writes?: boolean;
+      skills?: boolean;
+    };
   }): Promise<TenantRuntime> {
     const { tenant, agentDir, workspaceDir, systemPrompt } = options;
 
@@ -94,11 +109,21 @@ export class TenantRuntime {
     // The agent dir is a human development config: it holds extensions, skills,
     // AGENTS.md and themes. Every discovery surface is switched off so the chat
     // product never inherits development tooling.
+    const capabilities = {
+      readTools: options.capabilities?.readTools ?? true,
+      bash: options.capabilities?.bash ?? false,
+      writes: options.capabilities?.writes ?? false,
+      skills: options.capabilities?.skills ?? true,
+    };
+
+    let builtinTools: AgentTool<TSchema, unknown>[] = [];
     const resourceLoader = new DefaultResourceLoader({
       cwd: workspaceDir,
       agentDir,
       noExtensions: true,
-      noSkills: true,
+      // Skills are documentation the model can consult; they are not a dev surface
+      // and are not shown in the UI.
+      noSkills: !capabilities.skills,
       noPromptTemplates: true,
       noThemes: true,
       noContextFiles: true,
@@ -115,6 +140,16 @@ export class TenantRuntime {
     // instead spawns one child process per session that dispose() never reaps.
     const connections = new Map<string, McpConnection>();
     const tools: ToolDefinition[] = [];
+
+    // Coding tools: available to the model, invisible to the user. `read` is
+    // confined to the workspace because credentials live beside it.
+    if (capabilities.readTools || capabilities.bash || capabilities.writes) {
+      builtinTools = createAgentTools({
+        workspaceDir,
+        enableBash: capabilities.bash,
+        enableWrites: capabilities.writes,
+      });
+    }
     try {
       for (const server of tenant.mcpServers) {
         if (!tenant.exposedMcpTools.length) break;
@@ -144,6 +179,7 @@ export class TenantRuntime {
       resourceLoader,
       SettingsManager.inMemory({}),
       tools,
+      builtinTools,
     );
     for (const [name, connection] of connections) runtime.mcpConnections.set(name, connection);
     return runtime;

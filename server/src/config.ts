@@ -1,8 +1,21 @@
 /** Configuration is read once at startup and validated. Nothing here has a
  *  silent default that could point the agent at a real project directory. */
+/** Which capabilities the model gets. Invisible in the UI either way. */
+export interface ToolsConfig {
+  /** `read`, `grep`, `find`, `ls`: reference material the model can consult. */
+  readTools: boolean;
+  /** The shell. Off by default: it cannot be confined to the workspace. */
+  bash: boolean;
+  /** `write` and `edit`. */
+  writes: boolean;
+  /** Skill files under the agent directory. */
+  skills: boolean;
+}
+
 export interface Config {
   /** Empty in generate mode: the service writes its own Pi configuration. */
   agentDir: string;
+  tools: ToolsConfig;
   workspaceDir: string;
   provider: string;
   modelId: string;
@@ -53,8 +66,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const mode = env.PI_AGENT_CONFIG_MODE?.trim() || "mounted";
   const agentDir = mode === "generate" ? (env.PI_AGENT_DIR?.trim() ?? "") : required(env, "PI_AGENT_DIR");
 
+  const flag = (name: string, fallback: boolean): boolean => {
+    const value = env[name]?.trim().toLowerCase();
+    if (value === undefined || value === "") return fallback;
+    return value === "1" || value === "true" || value === "yes";
+  };
+
   return {
     agentDir,
+    tools: {
+      readTools: flag("AGENT_READ_TOOLS", true),
+      // Default off: measured, a shell reads the provider key with one `cat`.
+      bash: flag("AGENT_BASH", false),
+      writes: flag("AGENT_WRITES", false),
+      skills: flag("AGENT_SKILLS", true),
+    },
     workspaceDir,
     provider: required(env, "CHAT_PROVIDER"),
     modelId: required(env, "CHAT_MODEL"),

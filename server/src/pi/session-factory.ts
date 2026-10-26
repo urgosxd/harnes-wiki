@@ -86,9 +86,11 @@ export async function runTurn(options: {
     resourceLoader: runtime.resourceLoader,
     settingsManager: runtime.settingsManager,
     sessionManager,
-    // No read/bash/edit/write: this is a chat product, not a coding tool.
+    // The coding tools the runtime allows are supplied explicitly, already confined
+    // to the workspace; the SDK's own defaults are suppressed so nothing arrives
+    // that the runtime did not choose.
     noTools: "builtin",
-    customTools: runtime.customTools,
+    customTools: [...(runtime.builtinTools as never[]), ...runtime.customTools],
     tools: runtime.toolNames,
   });
 

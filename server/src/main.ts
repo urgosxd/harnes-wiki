@@ -1,5 +1,5 @@
 import { mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { prepareWritableAgentDir } from "./pi/agent-dir.ts";
 import {
   generateConfigFromEnv,
@@ -21,9 +21,13 @@ import type { Model } from "@earendil-works/pi-ai";
 const SYSTEM_PROMPT = [
   "You are a helpful assistant.",
   "Answer clearly and concisely in the user's language.",
-  "You have business tools available. Use them when the user asks for business data.",
-  "Never mention tool names, internal identifiers, or how you are implemented.",
+  // Telling the model to hide its own capabilities made it answer "I can't do
+  // that" when asked what it could do. Say what it has, without exposing internals.
+  "You may have tools and skills available for reading files in your workspace and for business data.",
+  "When the user asks what you can do, describe your capabilities in plain language and try the tools available to you.",
+  "Never reveal tool names, internal identifiers, credentials or how you are implemented.",
 ].join(" ");
+
 
 async function main(): Promise<void> {
   const log = new Logger({ level: (process.env.LOG_LEVEL as "debug" | "info" | "warn" | "error") ?? "info" });
@@ -38,7 +42,12 @@ async function main(): Promise<void> {
   // from environment variables, so nothing has to be mounted from the host. A
   // mounted agent directory remains supported for a team secret or a developer
   // pointing at their own credentials.
-  const runtimeAgentDir = join(config.workspaceDir, "agent");
+  // The agent directory is a SIBLING of the workspace, never inside it. The read
+  // tool is confined to the workspace, so putting the generated models.json inside
+  // it would leave the provider key within reach: measured, the model read the file
+  // and only a policy in its prompt stopped it from printing the key. Structure is
+  // a boundary; a prompt is not.
+  const runtimeAgentDir = resolve(config.workspaceDir, "..", "agent");
   const agentMode = resolveAgentConfigMode(process.env);
   let effectiveAgentDir: string;
   if (agentMode === "generate") {
@@ -101,6 +110,7 @@ async function main(): Promise<void> {
         agentDir: effectiveAgentDir,
         workspaceDir: config.workspaceDir,
         systemPrompt: SYSTEM_PROMPT,
+        capabilities: config.tools,
       });
     })();
 

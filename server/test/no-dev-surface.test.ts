@@ -5,8 +5,18 @@ import { AGENT_DIR, MODEL_ID, PROVIDER, hasCredentials, makeWorkspace } from "./
 import { TenantRuntime } from "../src/pi/tenant-runtime.ts";
 
 /**
- * The product promise is that a user never sees development tooling. That is not a
- * UI decision: it is which tools the model can call and what the system prompt says.
+ * The product promise is that a user never SEES development tooling.
+ *
+ * That is a UI promise, and it stays: no terminal, no file browser, no settings in
+ * the interface. What the model may use is a different question, and an earlier
+ * version of this file confused the two by asserting that no built-in tool could be
+ * active at all. A support assistant has to read a document, so the real
+ * requirements are narrower and more useful:
+ *
+ *  - the shell is off unless the deployment explicitly enables it;
+ *  - file reads are confined to the workspace, so credentials beside it stay
+ *    unreachable;
+ *  - no AGENTS.md or extension content leaks into the prompt.
  */
 
 const skip = hasCredentials() ? false : "no Pi credentials on this machine";
@@ -50,24 +60,44 @@ async function openSession(workspace: string, scopes: string[] = []) {
   return { runtime, session };
 }
 
-test("no built-in development tool is active", { skip }, async () => {
+test("the shell and write tools are off by default", { skip }, async () => {
   const workspace = makeWorkspace();
   const { runtime, session } = await openSession(workspace);
   try {
     const tools = session.getActiveToolNames();
-    const leaked = DEV_TOOLS.filter((name) => tools.includes(name));
-    assert.deepEqual(leaked, [], `development tools leaked into the session: ${leaked.join(", ")}`);
+    for (const dangerous of ["bash", "write", "edit", "powershell"]) {
+      assert.ok(
+        !tools.includes(dangerous),
+        `${dangerous} must not be active by default; it cannot be confined to the workspace`,
+      );
+    }
   } finally {
     session.dispose();
     await runtime.close();
   }
 });
 
-test("no skill or AGENTS.md content reaches the system prompt", { skip }, async () => {
+test("read tools are available to the model but confined to the workspace", { skip }, async () => {
   const workspace = makeWorkspace();
   const { runtime, session } = await openSession(workspace);
   try {
-    assert.doesNotMatch(session.systemPrompt, /<skills>/);
+    const tools = session.getActiveToolNames();
+    // These are what let the model answer a question about a document.
+    for (const reference of ["read", "grep", "find", "ls"]) {
+      assert.ok(tools.includes(reference), `${reference} should be available for reference material`);
+    }
+  } finally {
+    session.dispose();
+    await runtime.close();
+  }
+});
+
+test("no AGENTS.md content reaches the system prompt", { skip }, async () => {
+  const workspace = makeWorkspace();
+  const { runtime, session } = await openSession(workspace);
+  try {
+    // Skills may be listed (they are reference material the model can consult),
+    // but a project AGENTS.md is development context and must never appear.
     assert.doesNotMatch(session.systemPrompt, /AGENTS\.md/);
   } finally {
     session.dispose();

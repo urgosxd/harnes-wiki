@@ -51,6 +51,13 @@ services:
       PI_WORKSPACE_DIR: /data/workspace
       DATABASE_URL: postgres://agentdocumentor:${POSTGRES_PASSWORD:-agentdocumentor}@postgres:5432/agentdocumentor
       DEV_AUTH_TOKEN: ${DEV_AUTH_TOKEN:-dev}
+      # Capabilities the model gets. Invisible in the UI either way.
+      # AGENT_BASH stays off by default: a shell cannot be confined to the
+      # workspace, and the provider key lives one directory above it.
+      AGENT_READ_TOOLS: ${AGENT_READ_TOOLS:-true}
+      AGENT_SKILLS: ${AGENT_SKILLS:-true}
+      AGENT_BASH: ${AGENT_BASH:-false}
+      AGENT_WRITES: ${AGENT_WRITES:-false}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       PORT: "8080"
       NODE_ENV: production
