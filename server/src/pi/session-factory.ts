@@ -6,6 +6,7 @@ import type { AgentSession, SessionEntry } from "@earendil-works/pi-coding-agent
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { TenantRuntime } from "./tenant-runtime.ts";
+import { skillsInOutput } from "./activity.ts";
 
 /** Ledger of persisted entries for one conversation. The only storage contract the
  *  agent needs: read all entries, append new ones. */
@@ -41,10 +42,14 @@ export interface TurnUsage {
 export interface TurnHooks {
   /** Called for every streamed text chunk. */
   onTextDelta?(delta: string): void;
+  /** The model's reasoning, when the provider exposes it. */
+  onThinkingDelta?(delta: string): void;
   /** Called when the agent starts executing a tool. */
   onToolStart?(toolName: string): void;
   /** Called when a tool finishes. */
   onToolEnd?(toolName: string, isError: boolean): void;
+  /** Called once per skill the model consulted during this turn. */
+  onSkillUsed?(name: string): void;
 }
 
 export const SESSION_HEADER_VERSION = 3;
@@ -113,17 +118,30 @@ export async function runTurn(options: {
   });
 
   let streamed = "";
+  const reportedSkills = new Set<string>();
   const startedAt = Date.now();
 
   const settled = new Promise<void>((resolve) => {
     session.subscribe((event) => {
       switch (event.type) {
-        case "message_update":
-          if (event.assistantMessageEvent.type === "text_delta") {
-            streamed += event.assistantMessageEvent.delta;
-            hooks?.onTextDelta?.(event.assistantMessageEvent.delta);
+        case "message_update": {
+          const assistantEvent = event.assistantMessageEvent;
+          if (assistantEvent.type === "text_delta") {
+            streamed += assistantEvent.delta;
+            hooks?.onTextDelta?.(assistantEvent.delta);
+            // A skill's content can arrive inside the text stream; report the name
+            // once so the client can show which documentation was consulted.
+            for (const skill of skillsInOutput(assistantEvent.delta)) {
+              if (!reportedSkills.has(skill)) {
+                reportedSkills.add(skill);
+                hooks?.onSkillUsed?.(skill);
+              }
+            }
+          } else if (assistantEvent.type === "thinking_delta") {
+            hooks?.onThinkingDelta?.(assistantEvent.delta);
           }
           break;
+        }
         case "tool_execution_start":
           hooks?.onToolStart?.(event.toolName);
           break;

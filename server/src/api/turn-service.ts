@@ -4,6 +4,7 @@ import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ChatFrame, RunOutcomeName } from "../pi/events.ts";
 import { closingFrames } from "../pi/events.ts";
 import { FrameQueue } from "./frame-queue.ts";
+import { toolLabel } from "../pi/activity.ts";
 import type { TurnResult } from "../pi/session-factory.ts";
 import { runTurn } from "../pi/session-factory.ts";
 import type { TenantRuntime } from "../pi/tenant-runtime.ts";
@@ -122,8 +123,12 @@ export class TurnService {
         thinkingLevel,
         hooks: {
           onTextDelta: (delta) => queue.push({ type: "text_delta", delta }),
-          onToolStart: (tool) => queue.push({ type: "tool_started", tool }),
-          onToolEnd: (tool, isError) => queue.push({ type: "tool_finished", tool, isError }),
+          onThinkingDelta: (delta) => queue.push({ type: "thinking_delta", delta }),
+          onSkillUsed: (name) => queue.push({ type: "skill_used", name }),
+          onToolStart: (tool) =>
+            queue.push({ type: "tool_started", tool, label: toolLabel(tool) }),
+          onToolEnd: (tool, isError) =>
+            queue.push({ type: "tool_finished", tool, label: toolLabel(tool), isError }),
         },
       });
     } catch (error) {

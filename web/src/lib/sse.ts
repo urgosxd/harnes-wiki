@@ -72,8 +72,10 @@ function parseBlock(raw: string): SseFrame | undefined {
 export type ChatFrame =
   | { type: "run_started"; runId: string }
   | { type: "text_delta"; delta: string }
-  | { type: "tool_started"; tool: string }
-  | { type: "tool_finished"; tool: string; isError: boolean }
+  | { type: "thinking_delta"; delta: string }
+  | { type: "skill_used"; name: string }
+  | { type: "tool_started"; tool: string; label: string }
+  | { type: "tool_finished"; tool: string; label: string; isError: boolean }
   | { type: "run_finished"; outcome: string; usage?: unknown }
   | { type: "run_failed"; outcome: string; message: string }
   | { type: "error"; message: string };
@@ -90,6 +92,8 @@ export function isChatFrame(value: unknown): value is ChatFrame {
   return (
     type === "run_started" ||
     type === "text_delta" ||
+    type === "thinking_delta" ||
+    type === "skill_used" ||
     type === "tool_started" ||
     type === "tool_finished" ||
     type === "run_finished" ||

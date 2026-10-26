@@ -475,3 +475,66 @@ body {
 .gate__submit {
   margin-top: 4px;
 }
+
+/* ---------- Assistant activity ---------- */
+
+.activity {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 6px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.activity__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.activity__row--failed {
+  color: var(--error);
+}
+
+.activity__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.activity__row--failed .activity__icon {
+  color: var(--error);
+}
+
+.activity__label {
+  overflow-wrap: anywhere;
+}
+
+.spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border-top-color: var(--border);
+    border-left-color: var(--accent);
+  }
+}

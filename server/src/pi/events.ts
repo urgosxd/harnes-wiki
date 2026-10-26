@@ -8,8 +8,20 @@
 export type ChatFrame =
   | { type: "run_started"; runId: string }
   | { type: "text_delta"; delta: string }
-  | { type: "tool_started"; tool: string }
-  | { type: "tool_finished"; tool: string; isError: boolean }
+  /**
+   * The model's reasoning. Sent separately from the answer so the client can show
+   * activity without mixing deliberation into what the user asked for. Empty when
+   * the provider does not expose it, which is why the client cannot rely on it as
+   * the only progress signal.
+   */
+  | { type: "thinking_delta"; delta: string }
+  /**
+   * A skill the model loaded. Emitted when a skill block is parsed out of its
+   * output, so the user sees which documentation it consulted.
+   */
+  | { type: "skill_used"; name: string }
+  | { type: "tool_started"; tool: string; label: string }
+  | { type: "tool_finished"; tool: string; label: string; isError: boolean }
   | { type: "run_finished"; outcome: RunOutcomeName; usage?: FrameUsage }
   | { type: "run_failed"; outcome: RunOutcomeName; message: string }
   | { type: "error"; message: string };

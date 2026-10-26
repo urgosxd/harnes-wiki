@@ -117,9 +117,22 @@ export function useChat({ client }: UseChatOptions) {
             case "text_delta":
               dispatch({ type: "delta", delta: frame.delta });
               break;
+            case "thinking_delta":
+              dispatch({ type: "thinking", delta: frame.delta });
+              break;
+            case "skill_used":
+              dispatch({ type: "skill", name: frame.name });
+              break;
             case "tool_started":
+              dispatch({ type: "tool_started", tool: frame.tool, label: frame.label });
+              break;
             case "tool_finished":
-              dispatch({ type: "tool", tool: frame.tool });
+              dispatch({
+                type: "tool_finished",
+                tool: frame.tool,
+                label: frame.label,
+                isError: frame.isError,
+              });
               break;
             case "run_finished":
               dispatch({ type: "finished", outcome: frame.outcome });

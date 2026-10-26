@@ -251,6 +251,31 @@ died with "model is not available". The runtime now passes `authPath`,
 `modelsPath` and `modelsStorePath` explicitly, and
 `test/agent-dir-portability.test.ts` runs it with a clean `HOME` to keep it that way.
 
+## Activity while the assistant works
+
+The answer does not appear out of nowhere. While a turn runs, the window shows what
+the assistant is doing, in plain language:
+
+```
+✓ Checking the workspace
+✓ Reading a document
+● Searching the workspace      (spinner while it runs)
+✓ Thinking…
+```
+
+- Reasoning arrives as `thinking_delta`, kept **out of the answer text**: the user
+  asked for an answer, not the model's deliberation.
+- Every tool call gets a readable label from the server (`Searching the workspace`,
+  `Looking up an order`). The tool's internal name is never shown.
+- A skill the model consults is reported once, however many chunks mention it.
+- Finished steps stay after the turn; the list clears when the next one starts.
+- With nothing reported yet, the client shows a plain "Working…" rather than
+  inventing which step is happening.
+
+Measured on the live stack: a turn that uses tools emits
+`run_started → text_delta → tool_started → tool_finished → thinking_delta → text_delta → run_finished`,
+with 99–132 characters of reasoning per turn.
+
 ## Capabilities are invisible, not absent
 
 The user never sees development tooling: no terminal, no file browser, no settings.

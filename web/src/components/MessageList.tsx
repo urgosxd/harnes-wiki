@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { ChatState } from "../lib/chat-reducer.ts";
+import { ActivityList } from "./ActivityList.tsx";
 
 export interface MessageListProps {
   state: ChatState;
@@ -38,6 +39,10 @@ export function MessageList({ state }: MessageListProps) {
         </article>
       )}
 
+      {(streaming || state.activity.length > 0) && (
+        <ActivityList items={state.activity} streaming={streaming} />
+      )}
+
       {streaming && (
         <article className="message message--assistant">
           {state.streamingText ? (
@@ -46,11 +51,9 @@ export function MessageList({ state }: MessageListProps) {
               <span className="caret" aria-hidden="true" />
             </div>
           ) : (
-            <div className="message__thinking" aria-label="Thinking">
-              <span className="dot" />
-              <span className="dot" />
-              <span className="dot" />
-            </div>
+            // The ActivityList above already says what is happening; a second
+            // "thinking" row here would be redundant.
+            null
           )}
         </article>
       )}

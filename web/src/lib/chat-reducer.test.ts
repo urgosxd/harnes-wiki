@@ -108,18 +108,119 @@ describe("chatReducer", () => {
     expect(reloaded.status).toBe("idle");
   });
 
+  it("shows a single Thinking step however many thinking chunks arrive", () => {
+    const state = run([
+      { type: "send", text: "hi" },
+      { type: "thinking", delta: "let me " },
+      { type: "thinking", delta: "consider " },
+      { type: "thinking", delta: "this" },
+    ]);
+
+    expect(state.activity).toHaveLength(1);
+    expect(state.activity[0]).toMatchObject({ kind: "thinking", label: "Thinking…" });
+  });
+
+  it("does not mix reasoning into the answer", () => {
+    const state = run([
+      { type: "send", text: "hi" },
+      { type: "thinking", delta: "secret deliberation" },
+      { type: "delta", delta: "the answer" },
+    ]);
+
+    expect(state.streamingText).toBe("the answer");
+    expect(JSON.stringify(state.messages)).not.toContain("secret deliberation");
+  });
+
+  it("reports a skill once even when it appears repeatedly", () => {
+    const state = run([
+      { type: "send", text: "hi" },
+      { type: "skill", name: "support-guide" },
+      { type: "skill", name: "support-guide" },
+    ]);
+
+    expect(state.activity).toEqual([
+      { id: "skill-0", kind: "skill", label: "Reading support-guide", done: true },
+    ]);
+  });
+
+  it("keeps a running tool visible until it finishes", () => {
+    const running = run([
+      { type: "send", text: "hi" },
+      { type: "tool_started", tool: "read", label: "Reading a document" },
+    ]);
+    expect(running.activity[0]).toMatchObject({ done: false });
+
+    const finished = run(
+      [{ type: "tool_finished", tool: "read", label: "Reading a document", isError: false }],
+      running,
+    );
+    expect(finished.activity[0]).toMatchObject({ done: true, failed: false });
+  });
+
+  it("closes the right call when the same tool runs twice", () => {
+    const state = run([
+      { type: "send", text: "hi" },
+      { type: "tool_started", tool: "read", label: "Reading a document" },
+      { type: "tool_started", tool: "read", label: "Reading a document" },
+      { type: "tool_finished", tool: "read", label: "Reading a document", isError: false },
+    ]);
+
+    expect(state.activity).toHaveLength(2);
+    // The first call opened is the first one closed.
+    expect(state.activity[0]?.done).toBe(true);
+    expect(state.activity[1]).toMatchObject({ done: false });
+  });
+
+  it("marks a failed tool call", () => {
+    const state = run([
+      { type: "send", text: "hi" },
+      { type: "tool_started", tool: "read", label: "Reading a document" },
+      { type: "tool_finished", tool: "read", label: "Reading a document", isError: true },
+    ]);
+
+    expect(state.activity[0]).toMatchObject({ done: true, failed: true });
+  });
+
+  it("keeps the activity after the turn so the user can see what was done", () => {
+    const state = run([
+      { type: "send", text: "hi" },
+      { type: "tool_started", tool: "ls", label: "Checking the workspace" },
+      { type: "tool_finished", tool: "ls", label: "Checking the workspace", isError: false },
+      { type: "delta", delta: "done" },
+      { type: "finished", outcome: "ok" },
+    ]);
+
+    expect(state.status).toBe("idle");
+    expect(state.activity).toHaveLength(1);
+  });
+
+  it("clears the activity when a new turn starts", () => {
+    const afterTurn = run([
+      { type: "send", text: "hi" },
+      { type: "tool_started", tool: "ls", label: "Checking the workspace" },
+      { type: "finished", outcome: "ok" },
+    ]);
+    const next = run([{ type: "send", text: "again" }], afterTurn);
+    expect(next.activity).toEqual([]);
+  });
+
   it("records the run id when the server reports it", () => {
     const state = run([{ type: "send", text: "hi" }, { type: "run_started", runId: "r-9" }]);
     expect(state.runId).toBe("r-9");
   });
 
-  it("ignores tool frames without disturbing the text", () => {
+  it("records tool activity without disturbing the text", () => {
     const state = run([
       { type: "send", text: "hi" },
       { type: "delta", delta: "a" },
-      { type: "tool", tool: "get_order" },
+      { type: "tool_started", tool: "get_order", label: "Looking up an order" },
       { type: "delta", delta: "b" },
+      { type: "tool_finished", tool: "get_order", label: "Looking up an order", isError: false },
     ]);
+
     expect(state.streamingText).toBe("ab");
+    expect(state.activity).toEqual([
+      { id: "tool-get_order-0", kind: "tool", label: "Looking up an order", done: true, failed: false },
+    ]);
   });
 });

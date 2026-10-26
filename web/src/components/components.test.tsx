@@ -97,7 +97,9 @@ describe("MessageList", () => {
   it("shows the pending user message before the reply arrives", () => {
     render(<MessageList state={state({ status: "streaming", pendingUserText: "waiting" })} />);
     expect(screen.getByText("waiting")).toBeDefined();
-    expect(screen.getByLabelText("Thinking")).toBeDefined();
+    // The activity list now owns the progress indicator, so the old anonymous
+    // "thinking" dots are gone on purpose.
+    expect(screen.getByText("Working…")).toBeDefined();
   });
 
   it("shows the streaming text while it grows", () => {
