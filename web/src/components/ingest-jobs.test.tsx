@@ -106,6 +106,65 @@ describe("IngestJobView: progress is never invented", () => {
     expect(screen.getByTestId("dimension-compile").textContent).toMatch(/does not report a total/);
   });
 
+  it("shows NO indicator once the compile has settled, even with progress null", () => {
+    // The root of a real defect: `skipped` and `failed` also carry `progress: null`,
+    // so a bar keyed on null alone animated "Working" for a compile that had already
+    // ended. Guarding the blocked case specifically fixed one instance of the rule
+    // violation instead of the rule, and the next settled status would have reopened
+    // it.
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "failed", attempts: [] },
+          compile: { status: "skipped", progress: null },
+        })}
+      />,
+    );
+
+    expect(screen.queryByTestId("progress-indeterminate")).toBeNull();
+    expect(screen.queryByTestId("progress-exact")).toBeNull();
+    expect(screen.queryByRole("progressbar")).toBeNull();
+  });
+
+  it("says the compile never started, and what to do about it", () => {
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "failed", attempts: [] },
+          compile: { status: "skipped", progress: null },
+        })}
+      />,
+    );
+
+    const hint = screen.getByTestId("compile-blocked");
+    // Waiting is the wrong action here, so the copy must say what the right one is.
+    expect(hint.textContent).toMatch(/Saving the source again|never started/i);
+  });
+
+  it("shows NO indicator for a compile skipped on request", () => {
+    // THIS is the test that actually pins the rule, and I only found that by mutation
+    // checking: the blocked case above never reaches ProgressIndicator at all, because
+    // the view renders its hint instead. So deleting the settled guard left that test
+    // green — a vacuous fixture, exactly the vice this project already has a lesson
+    // about. This case DOES reach the indicator, with `progress: null`, after a
+    // successful ingest where the caller declined to compile.
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "succeeded", attempts: [] },
+          compile: {
+            status: "skipped",
+            progress: null,
+            message: "Compile skipped on request.",
+          },
+        })}
+      />,
+    );
+
+    expect(screen.queryByTestId("progress-indeterminate")).toBeNull();
+    expect(screen.queryByTestId("progress-exact")).toBeNull();
+  });
+
   it("shows the exact pair when the stage knows its total", () => {
     render(
       <IngestJobView

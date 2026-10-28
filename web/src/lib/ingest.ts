@@ -150,7 +150,10 @@ export function isJobSettled(job: IngestJob): boolean {
  * user acting.
  */
 export function compileBlockedByIngestFailure(job: IngestJob): boolean {
-  return job.ingest.status === "failed" && job.compile.status === "queued";
+  return (
+    job.ingest.status === "failed" &&
+    (job.compile.status === "queued" || job.compile.status === "skipped")
+  );
 }
 
 /**

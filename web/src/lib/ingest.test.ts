@@ -438,13 +438,37 @@ describe("compileBlockedByIngestFailure", () => {
     expect(compileBlockedByIngestFailure(job)).toBe(true);
   });
 
-  it("is false when the ingest failed but the compile settled on its own", () => {
-    // A retryable compile is a different story: the source may be saved, so the user
-    // is told to retry rather than that the stage is dead.
+  it("is true for the settled shape the service now reports", () => {
+    // The service changed under my feet and the change is visible here: after the peer
+    // fixed the frozen state upstream, a failed ingest now settles the compile as
+    // `skipped` with its own message instead of leaving it `queued` forever. Both
+    // shapes mean the same thing, so the guard covers both — a UI pinned to the old
+    // shape would have started animating again the moment the fix landed.
     const job = {
       ...base,
       ingest: { status: "failed" as const, attempts: [] },
-      compile: { status: "skipped" as const, progress: null },
+      compile: {
+        status: "skipped" as const,
+        progress: null,
+        message: "Compile never started: the ingest failed, so there was nothing to compile.",
+      },
+    };
+    expect(compileBlockedByIngestFailure(job)).toBe(true);
+  });
+
+  it("is false for a compile skipped ON REQUEST after a successful ingest", () => {
+    // `skipped` alone does NOT mean blocked: the service also reports it when the
+    // caller asked not to compile. The discriminator is the ingestion outcome, not
+    // the compile status, and testing only `skipped` would have conflated two
+    // opposite situations into one message.
+    const job = {
+      ...base,
+      ingest: { status: "succeeded" as const, attempts: [] },
+      compile: {
+        status: "skipped" as const,
+        progress: null,
+        message: "Compile skipped on request.",
+      },
     };
     expect(compileBlockedByIngestFailure(job)).toBe(false);
   });

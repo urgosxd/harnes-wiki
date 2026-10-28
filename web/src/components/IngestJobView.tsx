@@ -150,6 +150,14 @@ function StageRow({ stage }: { stage: string | undefined }) {
  * broken.
  */
 function ProgressIndicator({ compile }: { compile: CompileDimension }) {
+  // A bar only means something while the work is MOVING. An animation on a settled
+  // compile invents motion for a job that already ended, which is the one thing this
+  // surface must not do — and it is not only the blocked case: `skipped` and `failed`
+  // also arrive with `progress: null`, so a guard on `queued` alone was fixing one
+  // instance of a rule violation instead of the rule. Settled states say what
+  // happened in words; there is nothing left to measure.
+  if (isCompileSettled(compile)) return null;
+
   if (compile.progress === null) {
     return (
       <div className="progress" data-testid="progress-indeterminate">
