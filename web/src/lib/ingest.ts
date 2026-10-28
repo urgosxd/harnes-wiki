@@ -241,10 +241,10 @@ export function nextPollDelay(current: number): number {
 /**
  * Why a poll loop can stop.
  *
- * `unavailable` and `unknown` are kept apart on purpose. `503` means the host does
- * not track jobs at all — retrying later might work after a restart with `--root`,
- * and the job may well exist. `404` means this host tracks jobs and has never seen
- * this id, which is what an expired job (1 h / 200 entries retention) looks like.
+ * `unavailable` and `unknown` are kept apart on purpose. `503` means the service
+ * does not track jobs at all — a deployment fact that may change, and the job may
+ * well exist regardless. `404` means it tracks jobs and has never seen this id,
+ * which is what an expired job looks like under the service's own retention.
  * Treating the first as the second would make the UI declare a live job dead.
  */
 export type PollStopReason = "settled" | "unavailable" | "unknown" | "aborted" | "error";
