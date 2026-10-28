@@ -395,6 +395,28 @@ them reintroduces a bug that was already observed.
 Implementation in progress. See `odd/tasks/pi-chat-mvp.md` for the task list, the
 acceptance checklist, and the evidence log.
 
+## Provisioning the MCP tools
+
+`tenant_mcp` is per user, so the external MCP server has to be granted to each one:
+
+```bash
+cd server
+MCP_SERVER_URL=http://172.17.0.1:4173/mcp \
+DATABASE_URL=postgres://... \
+node scripts/provision-mcp.mjs            # add --dry-run to preview
+```
+
+It reads the roster from `CHAT_USERS` (or `.chat-users`), upserts one row per user,
+and is idempotent: running it twice is the same as running it once, and a corrected
+`MCP_SERVER_URL` replaces the old address instead of adding a second server.
+
+It exposes three tools — `list_stacks`, `ingest_jobs_list`, `ingest_job_status`.
+The other twelve the service offers are filesystem-scoped, and exposing them would
+allow operations this project never decided to permit.
+
+Without this step the agent sees no stack tools, the stack picker stays empty, and
+nothing below can be exercised.
+
 ## Reaching an MCP server over HTTP
 
 The tenant MCP seam has two transports, and a `tenant_mcp` row states which it

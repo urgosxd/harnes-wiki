@@ -48,6 +48,16 @@ export interface UseIngestResult {
   stacks: StackOption[];
   /** Set when the stack list could not be read — never merely because it was empty. */
   stacksProblem: string | null;
+  /**
+   * True when the job view is showing the BOUND stack's jobs regardless of what the
+   * picker says.
+   *
+   * The read path does not take a stack yet: `GET /api/ingest/jobs` answers for the
+   * stack its endpoint is bound to. Showing that list under a different selection
+   * would attribute another stack's jobs to the chosen one, so the view says which
+   * stack it is actually showing instead of pretending to follow the picker.
+   */
+  stackFilterUnsupported: boolean;
   /** The stack selected in the picker, or null when none was chosen. */
   selectedStackId: string | null;
   selectStack(id: string | null): void;
@@ -74,6 +84,9 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
   const [stacks, setStacks] = useState<StackOption[]>([]);
   const [stacksProblem, setStacksProblem] = useState<string | null>(null);
   const [selectedStackId, setSelectedStackId] = useState<string | null>(null);
+  // Set while the HTTP read cannot honour a stack filter. Flipped once the service
+  // accepts `?stackId=`; until then the UI must not imply it does.
+  const stackFilterUnsupported = true;
   const [documents, setDocuments] = useState<UploadedDocument[]>([]);
   const [uploading, setUploading] = useState(false);
   const [documentsNotice, setDocumentsNotice] = useState<IngestNotice>(null);
@@ -274,6 +287,7 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
   return {
     stacks,
     stacksProblem,
+    stackFilterUnsupported,
     selectedStackId,
     selectStack: setSelectedStackId,
     observeStacks,

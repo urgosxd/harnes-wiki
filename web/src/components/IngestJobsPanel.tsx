@@ -97,6 +97,18 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
             Ask the assistant to list the stacks and they will appear here.
           </p>
         )}
+        {/*
+          The selection and the list below it can disagree, and saying so is the
+          honest option: the read path still answers for the bound stack, so a page
+          that silently showed those jobs under another selection would attribute
+          one stack's work to another.
+        */}
+        {ingest.stackFilterUnsupported && ingest.stacks.length > 1 && (
+          <p className="jobs-panel__notice jobs-panel__notice--warn" role="status">
+            The job list below still comes from this endpoint&rsquo;s own stack, not the
+            selection above.
+          </p>
+        )}
       </section>
 
       <section className="jobs-panel__upload" aria-label="Upload a document">
