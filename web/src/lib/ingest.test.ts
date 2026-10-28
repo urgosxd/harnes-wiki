@@ -106,13 +106,40 @@ describe("settling", () => {
     });
     expect(describeJob(busy)).not.toMatch(/failed/i);
     expect(describeJob(busy)).toMatch(/retry the compile/i);
-    expect(compileRetryable(busy.compile)).toBe(true);
+    expect(compileRetryable(busy)).toBe(true);
   });
 
-  it("does not offer a compile retry after one succeeded", () => {
-    expect(compileRetryable({ status: "succeeded", progress: null })).toBe(false);
-    expect(compileRetryable({ status: "skipped", progress: null })).toBe(false);
-    expect(compileRetryable({ status: "failed", progress: null })).toBe(true);
+  it("does not offer a compile retry when there is nothing to retry", () => {
+    const withCompile = (status: "succeeded" | "skipped" | "failed") =>
+      job({
+        ingest: { status: "succeeded", attempts: [] },
+        compile: { status, progress: null },
+      });
+    expect(compileRetryable(withCompile("succeeded"))).toBe(false);
+    expect(compileRetryable(withCompile("skipped"))).toBe(false);
+    expect(compileRetryable(withCompile("failed"))).toBe(true);
+  });
+
+  it("does NOT claim the source is saved when the ingest failed", () => {
+    // Found in a live run against real jobs, not in this suite: a lock-contention
+    // failure reports `ingest: failed` with `compile: busy` and the service's own
+    // message "Compile did not start". Checking the compile status alone made the UI
+    // print "The source is saved. Only the compile needs a retry." directly beneath a
+    // message saying the compile never started — two sentences contradicting each
+    // other, and the wrong one told the user their file was safe.
+    const lockFailure = job({
+      ingest: {
+        status: "failed",
+        attempts: [],
+        error: "Another mutation holds the project lock; retry.",
+      },
+      compile: {
+        status: "busy",
+        progress: null,
+        message: "Compile did not start: another mutation held the project lock.",
+      },
+    });
+    expect(compileRetryable(lockFailure)).toBe(false);
   });
 
   it("names which half is moving instead of reporting one status", () => {

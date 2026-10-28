@@ -104,7 +104,7 @@ export function IngestJobView({ job }: IngestJobViewProps) {
               {job.compile.error}
             </p>
           )}
-          {compileRetryable(job.compile) && (
+          {compileRetryable(job) && (
             <p className="dimension__hint">
               {job.compile.status === "busy"
                 ? "The source is saved. Only the compile needs a retry."

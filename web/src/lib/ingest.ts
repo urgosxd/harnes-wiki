@@ -233,13 +233,26 @@ export function stageLabel(stage: string | undefined): string {
 }
 
 /**
- * Whether a compile can be retried without re-ingesting.
+ * Whether a compile can be retried WITHOUT re-ingesting.
  *
- * `busy` and `failed` leave the source on disk, so the answer is yes. A skipped
- * compile was not requested, and a succeeded one has nothing left to do.
+ * The answer depends on BOTH halves, not on the compile alone. `busy` and `failed`
+ * leave the compile work outstanding, but "retry the compile" is only true advice if
+ * the ingest actually stored the source — and a job whose ingest failed has nothing on
+ * disk to compile. Verified against real jobs: a lock-contention failure reports
+ * `ingest: failed` with `compile: busy` and the message "Compile did not start", so a
+ * check on the compile status alone tells the user "the source is saved" directly
+ * beneath a message saying the compile never started. Reading one half and asserting
+ * about both is the same defect this surface already had twice today.
+ *
+ * `unchanged` counts as stored: the source is already in the wiki, which is why the
+ * compile still has work to do.
  */
-export function compileRetryable(compile: CompileDimension): boolean {
-  return compile.status === "busy" || compile.status === "failed";
+export function compileRetryable(job: IngestJob): boolean {
+  const sourceStored =
+    job.ingest.status === "succeeded" || job.ingest.status === "unchanged";
+  const compileOutstanding =
+    job.compile.status === "busy" || job.compile.status === "failed";
+  return sourceStored && compileOutstanding;
 }
 
 /** How long a snapshot may stay byte-identical before the job is called stalled. */
