@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   describeJob,
   isUnchanged,
+  MISSING_TOLERANCE,
   STALL_AFTER_MS,
   isJobSettled,
   nextPollDelay,
@@ -318,6 +319,75 @@ describe("stop reasons that are not failures", () => {
     expect(isUnchanged(a, a)).toBe(true);
     expect(isUnchanged(a, b)).toBe(false);
     expect(STALL_AFTER_MS).toBeGreaterThan(2_000);
+  });
+
+  it("tolerates an early 404, because a foreign Stack's mirror can lag", async () => {
+    // A foreign-Stack read is durable-only and the mirror write is fire-and-forget,
+    // so a job started a moment ago can be missing for a tick. Reporting it as
+    // expired on the first read would call a running job gone.
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call += 1;
+      if (call <= 2) return jsonResponse({ error: { code: "job_not_found" } }, 404);
+      return jsonResponse(
+        job({
+          ingest: { status: "succeeded", attempts: [] },
+          compile: { status: "skipped", progress: null },
+        }),
+      );
+    });
+    const { delays, sleep } = recordingSleep();
+
+    const outcome = await pollJob("ing_1", {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      headers: () => ({}),
+      onUpdate: () => {},
+      sleep,
+    });
+
+    expect(outcome.reason).toBe("settled");
+    expect(call).toBe(3);
+    // It waited rather than stopping: three reads means two tolerated 404s.
+    expect(delays).toEqual([250, 500]);
+  });
+
+  it("still reports expired when the 404 persists past the tolerance", async () => {
+    // The bound on the tolerance: an unbounded one would make an expired job look
+    // like a slow one forever.
+    const fetchMock = vi.fn(async () => jsonResponse({ error: { code: "job_not_found" } }, 404));
+    const outcome = await pollJob("ing_1", {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      headers: () => ({}),
+      onUpdate: () => {},
+      sleep: async () => {},
+    });
+
+    expect(outcome.reason).toBe("unknown");
+    expect(outcome.message).toMatch(/one hour/);
+    // Exactly tolerance+1 reads before giving up.
+    expect((fetchMock as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(
+      MISSING_TOLERANCE + 1,
+    );
+  });
+
+  it("does not tolerate a 404 once a snapshot has arrived", async () => {
+    // A job seen and then dropped is expired, not late.
+    let call = 0;
+    const fetchMock = vi.fn(async () => {
+      call += 1;
+      if (call === 1) return jsonResponse(job());
+      return jsonResponse({ error: { code: "job_not_found" } }, 404);
+    });
+
+    const outcome = await pollJob("ing_1", {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      headers: () => ({}),
+      onUpdate: () => {},
+      sleep: async () => {},
+    });
+
+    expect(outcome.reason).toBe("unknown");
+    expect(outcome.job?.ingest.stage).toBe("fetching");
   });
 
   it("stops when aborted instead of polling a cancelled view", async () => {

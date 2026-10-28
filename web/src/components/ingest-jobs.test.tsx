@@ -517,6 +517,13 @@ describe("useIngest wiring", () => {
     await waitFor(() => expect(latest?.loadingList).toBe(false));
     latest!.follow("ing_1");
 
-    await waitFor(() => expect(screen.getByTestId("notice").textContent).toBe("unknown"));
+    // A single 404 is TOLERATED now: a foreign Stack's durable mirror can lag by a
+    // tick, and reporting the first one as expired would call a running job gone.
+    // The notice only appears once the 404 persists, so this asserts the eventual
+    // outcome rather than the first read.
+    await waitFor(
+      () => expect(screen.getByTestId("notice").textContent).toBe("unknown"),
+      { timeout: 5_000 },
+    );
   });
 });

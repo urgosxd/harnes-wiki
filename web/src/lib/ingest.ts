@@ -242,6 +242,15 @@ export function isUnchanged(previous: IngestJob | undefined, snapshot: IngestJob
 // Polling
 // ---------------------------------------------------------------------------
 
+/**
+ * Leading 404s tolerated before a job is called unknown.
+ *
+ * Three reads at 250/500/1000 ms is the mirror's realistic landing window; beyond
+ * that a 404 is the truth. Bounded on purpose: an unbounded tolerance would make an
+ * expired job look like a slow one forever.
+ */
+export const MISSING_TOLERANCE = 3;
+
 /** First delay: fast enough that a short job does not visibly stall. */
 export const POLL_INITIAL_MS = 250;
 
@@ -339,6 +348,16 @@ export async function pollJob(jobId: string, options: PollOptions): Promise<Poll
   // property. A job whose timestamp is old but which is still advancing here is
   // working fine.
   let unchangedSince: number | undefined;
+  /**
+   * How many leading 404s this loop has tolerated.
+   *
+   * A foreign-Stack read is served from durable rows only, and the mirror write is
+   * fire-and-forget, so a job started a moment ago can be missing for a tick. An
+   * immediate 404 therefore means "not landed yet" just as plausibly as "expired",
+   * and stopping on the first one would report a job that is running as gone. A
+   * 404 that PERSISTS is still expired, so the tolerance is bounded.
+   */
+  let missingReads = 0;
 
   for (;;) {
     if (options.signal?.aborted) return { reason: "aborted", ...(last ? { job: last } : {}) };
@@ -370,14 +389,26 @@ export async function pollJob(jobId: string, options: PollOptions): Promise<Poll
       };
     }
     if (response.status === 404) {
-      return {
-        reason: "unknown",
-        message:
-          "This job is no longer known to the host. Settled jobs are kept for one hour " +
-          "and at most 200 per host, so it may have expired.",
-        ...(last ? { job: last } : {}),
-      };
+      // Tolerated only while NOTHING has been seen on this job: a snapshot that
+      // arrived and then vanished is expired, not late. Bounded too, so an unknown id
+      // is still reported rather than watched forever.
+      const mayLag = last === undefined && missingReads < MISSING_TOLERANCE;
+      if (!mayLag) {
+        return {
+          reason: "unknown",
+          message:
+            "This job is no longer known to the host. Settled jobs are kept for one hour " +
+            "and at most 200 per host, so it may have expired.",
+          ...(last ? { job: last } : {}),
+        };
+      }
+      // Wait out the mirror write, then ask again.
+      missingReads += 1;
+      await sleep(delay, options.signal);
+      delay = nextPollDelay(delay);
+      continue;
     }
+
     if (!response.ok) {
       const body = await safeJson(response);
       return {
