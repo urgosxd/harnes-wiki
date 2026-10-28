@@ -30,9 +30,36 @@ class FakeMcpHttpServer {
   /** Every request the server saw, so a test can prove headers arrived. */
   readonly seen: Array<{ method: string; accept: string | undefined; auth: string | undefined }> = [];
   /** Tool names this server advertises. */
-  tools = ["ingest_job_status", "ingest_jobs_list", "compile_wiki"];
+  /**
+   * Tool descriptors this server advertises.
+   *
+   * `stackId` is part of the schema on purpose: contract `job-tools.ts@2` added it
+   * so a caller names the Stack instead of inheriting one from the host process,
+   * and a proxy that drops the schema makes that unreachable for the model.
+   */
+  tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }> = [
+    {
+      name: "ingest_jobs_list",
+      description: "List this Stack's recent async ingest jobs.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: { type: "integer", minimum: 1, maximum: 200 },
+          stackId: { type: "string" },
+        },
+      },
+    },
+    {
+      name: "ingest_job_status",
+      description: "Read one async ingest job by id.",
+      inputSchema: { type: "object", properties: { jobId: { type: "string" }, stackId: { type: "string" } } },
+    },
+    { name: "compile_wiki", description: "Compile the wiki.", inputSchema: { type: "object", properties: {} } },
+  ];
   /** When set, refuse every POST with 406 as a real server does without Accept. */
   requireAccept = true;
+  /** Stack ids this server considers real, so the unknown-Stack guard is testable. */
+  knownStacks = ["11111111-1111-1111-1111-111111111111"];
 
   async start(): Promise<void> {
     this.server = createServer(async (req, res) => {
@@ -86,14 +113,25 @@ class FakeMcpHttpServer {
           });
           return;
         case "tools/list":
-          this.sse(res, {
-            jsonrpc: "2.0",
-            id: rpc.id,
-            result: { tools: this.tools.map((name) => ({ name, inputSchema: { type: "object" } })) },
-          });
+          this.sse(res, { jsonrpc: "2.0", id: rpc.id, result: { tools: this.tools } });
           return;
         case "tools/call": {
-          const params = (rpc.params ?? {}) as { name?: string; arguments?: unknown };
+          const params = (rpc.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
+          const stackId = params.arguments?.stackId;
+          // Mirror the real guard: an id this server does not know is an ERROR, not
+          // an empty listing. Without this distinction a caller cannot tell "no
+          // jobs" from "no such Stack", and a picker would render a fiction.
+          if (typeof stackId === "string" && !this.knownStacks.includes(stackId)) {
+            this.sse(res, {
+              jsonrpc: "2.0",
+              id: rpc.id,
+              result: {
+                content: [{ type: "text", text: `No Stack '${stackId}' exists.` }],
+                isError: true,
+              },
+            });
+            return;
+          }
           this.sse(res, {
             jsonrpc: "2.0",
             id: rpc.id,
@@ -187,6 +225,136 @@ describe("the tenant MCP seam can speak streamable HTTP", () => {
         posts.every((entry) => (entry.accept ?? "").includes("text/event-stream")),
         "every POST must carry the Accept the server demands",
       );
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  /**
+   * Contract `src/mcp/job-tools.ts@2`: the model names the Stack.
+   *
+   * These three tests are the client half of that agreement. The server half — that
+   * an unknown id is an error rather than an empty list — is its own guard; what
+   * can break HERE is the proxy dropping the schema or swallowing `isError`, and
+   * either failure makes the model's argument unreachable while everything still
+   * looks connected.
+   */
+  test("the proxied schema declares stackId, so the model can see it", { skip }, async () => {
+    const runtime = await TenantRuntime.create({
+      tenant: {
+        id: "schema-tenant",
+        mcpServers: [
+          {
+            transport: "http",
+            name: "wiki",
+            url: fake.url,
+            headers: { accept: "application/json, text/event-stream" },
+          },
+        ],
+        exposedMcpTools: ["ingest_jobs_list"],
+        scopes: [],
+      },
+      agentDir: AGENT_DIR,
+      workspaceDir: makeWorkspace(),
+      systemPrompt: "You are concise.",
+    });
+
+    try {
+      const tool = runtime.customTools[0] as unknown as { parameters: Record<string, unknown> };
+      const properties = (tool.parameters as { properties?: Record<string, unknown> }).properties ?? {};
+      assert.ok("stackId" in properties, "a dropped schema makes stackId unreachable for the model");
+      assert.ok("limit" in properties);
+      // The server's own description travels too: it is the only text that knows
+      // what the tool does.
+      const described = runtime.customTools[0] as unknown as { description?: string };
+      assert.match(described.description ?? "", /ingest jobs/i);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  test("stackId reaches the server, and an unknown one stays an error", { skip }, async () => {
+    const runtime = await TenantRuntime.create({
+      tenant: {
+        id: "stack-arg",
+        mcpServers: [
+          {
+            transport: "http",
+            name: "wiki",
+            url: fake.url,
+            headers: { accept: "application/json, text/event-stream" },
+          },
+        ],
+        exposedMcpTools: ["ingest_jobs_list"],
+        scopes: [],
+      },
+      agentDir: AGENT_DIR,
+      workspaceDir: makeWorkspace(),
+      systemPrompt: "You are concise.",
+    });
+
+    try {
+      const tool = runtime.customTools[0] as unknown as {
+        execute: (...args: unknown[]) => Promise<{ content: Array<{ text?: string }>; isError?: boolean }>;
+      };
+
+      // A known Stack: the argument must arrive intact.
+      const known = await tool.execute(
+        "c1",
+        { stackId: "11111111-1111-1111-1111-111111111111" },
+        undefined,
+        undefined,
+        undefined,
+      );
+      assert.match(
+        known.content.map((b) => b.text ?? "").join(""),
+        /11111111-1111-1111-1111-111111111111/,
+        "the stackId must reach the server, not be dropped by the proxy",
+      );
+      assert.ok(!known.isError);
+
+      // An unknown Stack: an error, NOT an empty listing. If the proxy swallowed
+      // isError, a picker would show a non-existent Stack as a valid empty one.
+      const unknown = await tool.execute(
+        "c2",
+        { stackId: "00000000-0000-0000-0000-000000000000" },
+        undefined,
+        undefined,
+        undefined,
+      );
+      assert.equal(unknown.isError, true, "isError must survive the proxy");
+      assert.match(unknown.content.map((b) => b.text ?? "").join(""), /No Stack/);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  test("omitting stackId still works: the contract is backward compatible", { skip }, async () => {
+    const runtime = await TenantRuntime.create({
+      tenant: {
+        id: "no-stack",
+        mcpServers: [
+          {
+            transport: "http",
+            name: "wiki",
+            url: fake.url,
+            headers: { accept: "application/json, text/event-stream" },
+          },
+        ],
+        exposedMcpTools: ["ingest_jobs_list"],
+        scopes: [],
+      },
+      agentDir: AGENT_DIR,
+      workspaceDir: makeWorkspace(),
+      systemPrompt: "You are concise.",
+    });
+
+    try {
+      const tool = runtime.customTools[0] as unknown as {
+        execute: (...args: unknown[]) => Promise<{ isError?: boolean }>;
+      };
+      const result = await tool.execute("c1", {}, undefined, undefined, undefined);
+      assert.ok(!result.isError, "a call with no stackId must behave exactly as before");
     } finally {
       await runtime.close();
     }

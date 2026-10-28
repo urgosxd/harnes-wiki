@@ -177,9 +177,14 @@ export class TenantRuntime {
         if (!tenant.exposedMcpTools.length) break;
         const client = new McpClient({ name: "agentdocumentor", version: "0.1.0" });
         await client.connect(transportFor(server));
-        const available = new Set((await client.listTools()).map((tool) => tool.name));
-        const wanted = tenant.exposedMcpTools.filter((name) => available.has(name));
-        tools.push(...proxyMcpTools(tenant.id, client, wanted));
+        // Keep the whole tool descriptor, not just its name: the model needs the
+        // real parameter schema to know a tool takes `stackId`, a `limit`, or
+        // anything else. A proxy that discards the schema forces the model to guess
+        // and then produces calls the server rejects.
+        const available = await client.listTools();
+        const byName = new Map(available.map((tool) => [tool.name, tool]));
+        const wanted = tenant.exposedMcpTools.filter((name) => byName.has(name));
+        tools.push(...proxyMcpTools(tenant.id, client, wanted.map((name) => byName.get(name)!)));
         connections.set(server.name, { server, client, toolNames: wanted });
       }
     } catch (error) {
@@ -269,20 +274,26 @@ function toolName(tool: ToolDefinition): string {
 function proxyMcpTools(
   tenantId: string,
   client: McpClient,
-  names: readonly string[],
+  tools: readonly { name: string; description?: string; inputSchema?: Record<string, unknown> }[],
 ): ToolDefinition[] {
-  return names.map((name) =>
+  return tools.map((tool) =>
     defineTool({
-      name,
-      label: name,
-      description: `Tenant ${tenantId} MCP tool ${name}`,
-      parameters: Type.Unsafe<Record<string, unknown>>({
-        type: "object",
-        properties: {},
-        additionalProperties: true,
-      }),
+      name: tool.name,
+      label: tool.name,
+      // The server's own description when it has one, because it is the only text
+      // that knows what the tool actually does. The tenant prefix stays so a
+      // multi-server deployment can tell two same-named tools apart.
+      description: tool.description ?? `Tenant ${tenantId} MCP tool ${tool.name}`,
+      // The server's parameter schema, passed through. `additionalProperties: true`
+      // is kept so a caller can still send a field this build does not know about —
+      // but the declared properties are what let the model see `stackId` at all.
+      parameters: Type.Unsafe<Record<string, unknown>>(
+        tool.inputSchema && Object.keys(tool.inputSchema).length > 0
+          ? { ...tool.inputSchema, additionalProperties: true }
+          : { type: "object", properties: {}, additionalProperties: true },
+      ),
       execute: async (_toolCallId: string, params: Record<string, unknown>) => {
-        const result = await client.callTool(name, params ?? {});
+        const result = await client.callTool(tool.name, params ?? {});
         const text = (result.content ?? [])
           .filter((block) => block.type === "text")
           .map((block) => ({ type: "text" as const, text: block.text }));
