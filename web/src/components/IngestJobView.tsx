@@ -1,4 +1,5 @@
 import {
+  compileBlockedByIngestFailure,
   compileRetryable,
   isCompileSettled,
   isIngestSettled,
@@ -32,6 +33,8 @@ export interface IngestJobViewProps {
  *  - It never renders an unknown stage as blank: the raw name is shown.
  */
 export function IngestJobView({ job }: IngestJobViewProps) {
+  const blockedCompile = compileBlockedByIngestFailure(job);
+
   return (
     <section className="job" aria-label={`Ingest job ${job.id}`}>
       <header className="job__header">
@@ -71,7 +74,19 @@ export function IngestJobView({ job }: IngestJobViewProps) {
             <StatusBadge status={job.compile.status} settled={isCompileSettled(job.compile)} />
           </h3>
           <StageRow stage={job.compile.stage} />
-          <ProgressIndicator compile={job.compile} />
+          {/*
+            No progress indicator when the compile can never start: an animated
+            indeterminate bar reads as "working", and the ingest that feeds this stage
+            already failed. The absence of motion is the message.
+          */}
+          {blockedCompile ? (
+            <p className="dimension__hint" data-testid="compile-blocked">
+              The compile never started: the ingest it depends on failed. Saving the
+              source again is what clears this, not waiting.
+            </p>
+          ) : (
+            <ProgressIndicator compile={job.compile} />
+          )}
           {job.compile.message && <p className="dimension__message">{job.compile.message}</p>}
           {job.compile.error && (
             <p className="dimension__error" role="alert">

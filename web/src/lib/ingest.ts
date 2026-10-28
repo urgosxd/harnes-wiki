@@ -138,6 +138,22 @@ export function isJobSettled(job: IngestJob): boolean {
 }
 
 /**
+ * Whether the compile will never run because the ingest that feeds it failed.
+ *
+ * Verified against the live service: a job whose ingest fails keeps `compile` at
+ * `queued` with a frozen `updatedAt` forever — nothing will ever start it. Rendering
+ * that as "Working" is an indeterminate bar animating for a job that is dead, which
+ * is the one thing this surface must never do: invent progress.
+ *
+ * The compile is not "failed", because it never ran. It is blocked by something that
+ * already failed, and the honest word is the difference between a user waiting and a
+ * user acting.
+ */
+export function compileBlockedByIngestFailure(job: IngestJob): boolean {
+  return job.ingest.status === "failed" && job.compile.status === "queued";
+}
+
+/**
  * The single line a job reduces to in a list.
  *
  * Deliberately not a status: it names which half is still moving, because

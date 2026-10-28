@@ -8,6 +8,7 @@ import {
   nextPollDelay,
   pollJob,
   compileRetryable,
+  compileBlockedByIngestFailure,
   POLL_INITIAL_MS,
   POLL_MAX_MS,
   stageLabel,
@@ -408,5 +409,52 @@ describe("stop reasons that are not failures", () => {
 
     expect(outcome.reason).toBe("aborted");
     expect(delays).toEqual([]);
+  });
+});
+
+describe("compileBlockedByIngestFailure", () => {
+  const base = {
+    id: "ing_x",
+    source: "/tmp/x.md",
+    createdAt: "2026-10-28T19:31:06.447Z",
+    updatedAt: "2026-10-28T19:31:06.448Z",
+  };
+
+  it("is true for the exact shape the live service leaves behind", () => {
+    // Copied from a real job: a source that does not exist fails the ingest and the
+    // service leaves the compile at `queued` with a frozen updatedAt forever. Nothing
+    // will ever start it, so an animated "Working" bar would be a lie about motion.
+    const job = {
+      ...base,
+      ingest: {
+        status: "failed" as const,
+        attempts: [],
+        stage: "fetching" as const,
+        endedAt: "2026-10-28T19:31:06.448Z",
+        error: "ENOENT: no such file or directory, open '/tmp/x.md'",
+      },
+      compile: { status: "queued" as const, progress: null },
+    };
+    expect(compileBlockedByIngestFailure(job)).toBe(true);
+  });
+
+  it("is false when the ingest failed but the compile settled on its own", () => {
+    // A retryable compile is a different story: the source may be saved, so the user
+    // is told to retry rather than that the stage is dead.
+    const job = {
+      ...base,
+      ingest: { status: "failed" as const, attempts: [] },
+      compile: { status: "skipped" as const, progress: null },
+    };
+    expect(compileBlockedByIngestFailure(job)).toBe(false);
+  });
+
+  it("is false for a healthy queued job, which really is about to run", () => {
+    const job = {
+      ...base,
+      ingest: { status: "running" as const, attempts: [], stage: "fetching" as const },
+      compile: { status: "queued" as const, progress: null },
+    };
+    expect(compileBlockedByIngestFailure(job)).toBe(false);
   });
 });
