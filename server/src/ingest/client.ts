@@ -101,8 +101,14 @@ export class IngestClient {
    * @param input - Source identity, resolved on the SERVICE's filesystem, and
    *   whether to compile afterwards.
    */
-  async createJob(input: { source: string; compile: boolean }): Promise<UpstreamResponse> {
-    return this.request("POST", "/api/ingest", {
+  async createJob(input: {
+    source: string;
+    compile: boolean;
+    stackId?: string | undefined;
+  }): Promise<UpstreamResponse> {
+    // `stackId` travels in the QUERY, matching the read routes, so a caller always
+    // names the Stack in the same place regardless of the verb.
+    return this.request("POST", `/api/ingest${stackQuery(input.stackId)}`, {
       source: input.source,
       async: true,
       compile: input.compile,

@@ -60,6 +60,8 @@ class FakeHost {
   port = 0;
   /** Job registry this fake reports, keyed by id. */
   jobs = new Map<string, unknown>();
+  /** The `stackId` the proxy actually sent on the last create, or null. */
+  lastCreateQuery: string | null = null;
   /** When set, `/api/ingest/jobs` answers 503 as a host without a registry does. */
   trackJobs = true;
   /** Scripted answers for `GET /api/ingest/jobs/:id`, to pin 404 handling. */
@@ -122,8 +124,13 @@ class FakeHost {
         return;
       }
 
-      const path = new URL(req.url ?? "/", "http://placeholder").pathname;
+      const url = new URL(req.url ?? "/", "http://placeholder");
+      const path = url.pathname;
       if (req.method === "POST" && path === "/api/ingest") {
+        // Recorded so a test can prove the PROXY sent the Stack, not just that the
+        // upstream accepted the call. An assertion on the response alone cannot see
+        // a dropped query parameter.
+        this.lastCreateQuery = url.searchParams.get("stackId");
         const body = text ? JSON.parse(text) : {};
         if (body.async !== true) {
           // The synchronous path blocks for minutes in reality; a test must never
@@ -627,5 +634,36 @@ describe("the server proxy preserves what the codes mean", () => {
   test("the routes need identity like everything else", async () => {
     const res = await fetch(`${baseUrl}/ingest/jobs`);
     assert.equal(res.status, 401);
+  });
+
+  test("a create carries the caller's stackId to the upstream", async () => {
+    // FOUND IN A LIVE RUN, not by this suite: the picker sent `stackId`, the proxy
+    // parsed it and then dropped it, so every upload landed in the endpoint's bound
+    // Stack while the UI showed the one the user picked. Nothing failed — the job
+    // was created and the response was a cheerful 202, which is why it survived a
+    // green suite. Asserting the SENT query is the only way to see it; the response
+    // looks identical either way.
+    const stackId = "22222222-2222-2222-2222-222222222222";
+    host.lastCreateQuery = null;
+    const res = await fetch(`${baseUrl}/ingest/jobs`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ source: "https://example.com/x", stackId }),
+    });
+    assert.equal(res.status, 202);
+    assert.equal(host.lastCreateQuery, stackId);
+  });
+
+  test("a create without a stackId sends none, leaving the endpoint's own Stack", async () => {
+    // The complement: omitting it must not become an empty `?stackId=`, which would
+    // name a Stack called "".
+    host.lastCreateQuery = null;
+    const res = await fetch(`${baseUrl}/ingest/jobs`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ source: "https://example.com/y" }),
+    });
+    assert.equal(res.status, 202);
+    assert.equal(host.lastCreateQuery, null);
   });
 });

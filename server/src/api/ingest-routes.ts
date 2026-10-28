@@ -74,6 +74,8 @@ interface CreateJobBody {
   source?: unknown;
   documentId?: unknown;
   compile?: unknown;
+  /** Which Stack the job belongs to, when it is not the endpoint's own. */
+  stackId?: unknown;
 }
 
 /**
@@ -85,11 +87,22 @@ interface CreateJobBody {
  */
 function requireTarget(
   body: unknown,
-): { kind: "source"; source: string; compile: boolean } | { kind: "document"; documentId: string; compile: boolean } {
+): (
+  | { kind: "source"; source: string; compile: boolean }
+  | { kind: "document"; documentId: string; compile: boolean }
+) & { stackId?: string | undefined } {
   const parsed = (body ?? {}) as CreateJobBody;
   // Anything other than an explicit `false` compiles, matching the upstream
   // default: omitting the field must not silently skip the compile.
   const compile = parsed.compile !== false;
+
+  // A malformed Stack id is the SERVICE's to reject: it owns the UUID rule and the
+  // error code a client branches on. Passing it through verbatim keeps one authority
+  // instead of two that can drift.
+  const stackId =
+    typeof parsed.stackId === "string" && parsed.stackId.trim().length > 0
+      ? parsed.stackId.trim()
+      : undefined;
 
   const hasSource = typeof parsed.source === "string" && parsed.source.trim().length > 0;
   const hasDocument = typeof parsed.documentId === "string" && parsed.documentId.trim().length > 0;
@@ -102,7 +115,7 @@ function requireTarget(
     );
   }
   if (hasDocument) {
-    return { kind: "document", documentId: (parsed.documentId as string).trim(), compile };
+    return { kind: "document", documentId: (parsed.documentId as string).trim(), compile, stackId };
   }
   if (!hasSource) {
     throw new HttpError(
@@ -115,7 +128,7 @@ function requireTarget(
   if (source.length > 4096) {
     throw new HttpError(400, "invalid_source", "source is too long");
   }
-  return { kind: "source", source, compile };
+  return { kind: "source", source, compile, stackId };
 }
 
 export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): void {
@@ -202,7 +215,7 @@ export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): voi
     // A document reference has to become a URL before the service can read it, and
     // the resolver is the only part that knows storage. Refusing here keeps the
     // failure honest: without a public address there is no URL to hand over.
-    let input: { source: string; compile: boolean };
+    let input: { source: string; compile: boolean; stackId?: string | undefined };
     if (target.kind === "document") {
       const resolver = deps.documents;
       if (!resolver) {
@@ -214,9 +227,9 @@ export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): voi
       }
       const url = await resolver.urlFor(target.documentId, ctx.userId);
       if (!url) throw new HttpError(404, "not_found", "no such document");
-      input = { source: url, compile: target.compile };
+      input = { source: url, compile: target.compile, stackId: target.stackId };
     } else {
-      input = { source: target.source, compile: target.compile };
+      input = { source: target.source, compile: target.compile, stackId: target.stackId };
     }
 
     let upstream: { status: number; body: unknown };
