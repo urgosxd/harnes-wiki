@@ -129,6 +129,8 @@ export class TurnService {
             queue.push({ type: "tool_started", tool, label: toolLabel(tool) }),
           onToolEnd: (tool, isError) =>
             queue.push({ type: "tool_finished", tool, label: toolLabel(tool), isError }),
+          onToolResult: (tool, text, isError) =>
+            queue.push({ type: "tool_result", tool, text, isError }),
         },
       });
     } catch (error) {

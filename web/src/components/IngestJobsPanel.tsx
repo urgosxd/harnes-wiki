@@ -63,6 +63,42 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
         without being uploaded twice, and a file can be stored before anyone decides
         whether it belongs in the wiki.
       */}
+      {/*
+        The stack list arrives from the AGENT, so this picker can be empty until a
+        turn asked for it. That is stated rather than hidden: an empty dropdown with
+        no explanation reads as a bug.
+      */}
+      <section className="jobs-panel__stacks" aria-label="Stack selection">
+        <label className="jobs-panel__stackfield" htmlFor="stack-select">
+          <span className="jobs-panel__label">Stack</span>
+          <select
+            id="stack-select"
+            className="jobs-panel__select"
+            value={ingest.selectedStackId ?? ""}
+            onChange={(event) => ingest.selectStack(event.target.value || null)}
+            disabled={ingest.stacks.length === 0}
+          >
+            {ingest.stacks.length === 0 && <option value="">No stacks known yet</option>}
+            {ingest.stacks.map((stack) => (
+              <option key={stack.id} value={stack.id}>
+                {stack.name}
+                {stack.isCurrent ? " (bound)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        {ingest.stacksProblem && (
+          <p className="jobs-panel__notice jobs-panel__notice--warn" role="alert">
+            {ingest.stacksProblem}
+          </p>
+        )}
+        {ingest.stacks.length === 0 && !ingest.stacksProblem && (
+          <p className="jobs-panel__hint">
+            Ask the assistant to list the stacks and they will appear here.
+          </p>
+        )}
+      </section>
+
       <section className="jobs-panel__upload" aria-label="Upload a document">
         <label className="jobs-panel__filebutton">
           <input

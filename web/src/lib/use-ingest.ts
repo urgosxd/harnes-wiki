@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiClient, ApiError, type UploadedDocument } from "./api.ts";
+import { defaultStackId, parseStacksPayload, type StackOption } from "./stacks.ts";
 import { pollJob, type IngestJob, type PollOutcome, type PollStopReason } from "./ingest.ts";
 
 /**
@@ -37,6 +38,22 @@ export interface UseIngestResult {
   /** Set when an upload or listing failed. Distinct from a poll notice. */
   documentsNotice: IngestNotice;
 
+  /**
+   * Stacks offered by the picker.
+   *
+   * Populated from the AGENT's `list_stacks` result, not from a direct call: this
+   * server holds no registry of them, and a stack offered here but unknown to the
+   * agent would produce calls the service rejects.
+   */
+  stacks: StackOption[];
+  /** Set when the stack list could not be read — never merely because it was empty. */
+  stacksProblem: string | null;
+  /** The stack selected in the picker, or null when none was chosen. */
+  selectedStackId: string | null;
+  selectStack(id: string | null): void;
+  /** Feed a `list_stacks` payload from the agent's turn. */
+  observeStacks(text: string, isError: boolean): void;
+
   jobs: IngestJob[];
   activeJob: IngestJob | null;
   activeId: string | null;
@@ -54,6 +71,9 @@ export interface UseIngestResult {
 }
 
 export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
+  const [stacks, setStacks] = useState<StackOption[]>([]);
+  const [stacksProblem, setStacksProblem] = useState<string | null>(null);
+  const [selectedStackId, setSelectedStackId] = useState<string | null>(null);
   const [documents, setDocuments] = useState<UploadedDocument[]>([]);
   const [uploading, setUploading] = useState(false);
   const [documentsNotice, setDocumentsNotice] = useState<IngestNotice>(null);
@@ -230,7 +250,33 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
     [client, follow, refreshList, starting],
   );
 
+  /**
+   * Read a `list_stacks` payload the agent produced.
+   *
+   * The service answers `isError` for an id that does not exist so that "no such
+   * stack" and "no stacks" cannot be confused; the same distinction is kept here,
+   * because a picker that showed emptiness for a failure would invite the user to
+   * pick from nothing.
+   */
+  const observeStacks = useCallback((text: string, isError: boolean) => {
+    if (isError) {
+      setStacksProblem(text.trim() || "The stack list could not be read.");
+      return;
+    }
+    const parsed = parseStacksPayload(text);
+    setStacks(parsed.stacks);
+    setStacksProblem(parsed.problem);
+    // Selecting the bound stack on first sight is convenience, not a decision the
+    // user made; an explicit choice is never overwritten by a later refresh.
+    setSelectedStackId((current) => current ?? defaultStackId(parsed.stacks));
+  }, []);
+
   return {
+    stacks,
+    stacksProblem,
+    selectedStackId,
+    selectStack: setSelectedStackId,
+    observeStacks,
     documents,
     uploading,
     listDocuments,

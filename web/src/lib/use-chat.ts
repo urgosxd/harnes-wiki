@@ -10,6 +10,14 @@ import { chatReducer, initialChatState } from "./chat-reducer.ts";
 
 export interface UseChatOptions {
   client: ApiClient;
+  /**
+   * Called when a tool result the caller cares about arrives mid-turn.
+   *
+   * A callback rather than state in this hook: the chat renders activity, not data.
+   * Handing the payload out keeps the two concerns separate and lets the caller
+   * decide whether it wants it at all.
+   */
+  onToolResult?: (tool: string, text: string, isError: boolean) => void;
 }
 
 /**
@@ -19,7 +27,7 @@ export interface UseChatOptions {
  * must resend the SAME key, otherwise the server cannot tell a retry from a second
  * turn and the transcript gains a duplicate.
  */
-export function useChat({ client }: UseChatOptions) {
+export function useChat({ client, onToolResult }: UseChatOptions) {
   const [state, dispatch] = useReducer(chatReducer, initialChatState);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -134,6 +142,11 @@ export function useChat({ client }: UseChatOptions) {
                 isError: frame.isError,
               });
               break;
+            case "tool_result":
+              // The payload is handed out, not rendered: this hook owns the
+              // conversation's activity, not the data a tool happened to return.
+              onToolResult?.(frame.tool, frame.text, frame.isError);
+              break;
             case "run_finished":
               dispatch({ type: "finished", outcome: frame.outcome });
               break;
@@ -173,7 +186,7 @@ export function useChat({ client }: UseChatOptions) {
         abortRef.current = null;
       }
     },
-    [activeId, client, refreshConversations, state.status],
+    [activeId, client, onToolResult, refreshConversations, state.status],
   );
 
   const retry = useCallback(() => {

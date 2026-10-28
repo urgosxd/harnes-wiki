@@ -48,11 +48,31 @@ export interface TurnHooks {
   onToolStart?(toolName: string): void;
   /** Called when a tool finishes. */
   onToolEnd?(toolName: string, isError: boolean): void;
+  /**
+   * Called with the tool's own output, for tools whose result the caller needs.
+   *
+   * Separate from {@link onToolEnd} because almost every tool's output is the
+   * model's business and nobody else's; only a declared few are lifted out.
+   */
+  onToolResult?(toolName: string, text: string, isError: boolean): void;
   /** Called once per skill the model consulted during this turn. */
   onSkillUsed?(name: string): void;
 }
 
 export const SESSION_HEADER_VERSION = 3;
+
+/**
+ * Tools whose output is lifted out to the browser.
+ *
+ * An allowlist, not a pattern. `list_stacks` is here because that list is the only
+ * thing this server cannot obtain itself without opening a second, separately
+ * authenticated MCP connection — so asking the model's session for it is both
+ * simpler and the same data path the agent uses.
+ *
+ * Adding a name here is a privacy decision: whatever that tool returns reaches the
+ * browser, so it belongs only if the answer is not sensitive.
+ */
+export const TOOLS_WITH_OBSERVABLE_RESULT: ReadonlySet<string> = new Set(["list_stacks"]);
 
 /**
  * Run one turn in a fresh Pi session rebuilt from the stored transcript.
@@ -145,9 +165,24 @@ export async function runTurn(options: {
         case "tool_execution_start":
           hooks?.onToolStart?.(event.toolName);
           break;
-        case "tool_execution_end":
+        case "tool_execution_end": {
           hooks?.onToolEnd?.(event.toolName, event.isError);
+          // Only the tools whose output the caller needs, and never as a general
+          // channel: a tool result can contain anything the model was allowed to
+          // read, and forwarding all of them would leak that to the browser.
+          if (TOOLS_WITH_OBSERVABLE_RESULT.has(event.toolName)) {
+            const content = event.result?.content as
+              | Array<{ type?: string; text?: string }>
+              | undefined;
+            const text =
+              content
+                ?.filter((block) => block.type === "text" && typeof block.text === "string")
+                .map((block) => block.text as string)
+                .join("") ?? "";
+            if (text.length > 0) hooks?.onToolResult?.(event.toolName, text, event.isError);
+          }
           break;
+        }
         case "agent_settled":
           // The run is over only when Pi will not continue on its own. agent_end
           // can still be followed by retries or queued work.

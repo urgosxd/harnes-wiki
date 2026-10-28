@@ -22,6 +22,20 @@ export type ChatFrame =
   | { type: "skill_used"; name: string }
   | { type: "tool_started"; tool: string; label: string }
   | { type: "tool_finished"; tool: string; label: string; isError: boolean }
+  /**
+   * What a tool RETURNED, for one specific tool.
+   *
+   * Deliberately narrow: it exists because a tool can be the only way to obtain a
+   * value the browser needs — a list this server cannot read itself without a second
+   * MCP client — and no other frame carries a payload. It is NOT a general
+   * pass-through: `text` is emitted only for tools named in
+   * `TOOLS_WITH_OBSERVABLE_RESULT`, so no other tool's output reaches the browser by
+   * accident.
+   *
+   * The client must treat this as data it asked for, never as state: it is one
+   * observation of one call, and a run that fails afterwards does not invalidate it.
+   */
+  | { type: "tool_result"; tool: string; text: string; isError: boolean }
   | { type: "run_finished"; outcome: RunOutcomeName; usage?: FrameUsage }
   | { type: "run_failed"; outcome: RunOutcomeName; message: string }
   | { type: "error"; message: string };

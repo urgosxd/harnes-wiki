@@ -111,11 +111,18 @@ function ChatApp({ credentials }: { credentials: Credentials }) {
 }
 
 function Chat({ identity, client }: { identity: Identity; client: ApiClient }) {
-  const chat = useChat({ client });
   // Built once here, not inside the panel: the poll loop must survive a switch to
   // the chat tab and back, otherwise returning to the view would restart a poll
   // for a job that is already being followed.
   const ingest = useIngest({ client });
+  // The stack list comes FROM the agent: this server holds no registry of them, and
+  // a stack the picker offered but the agent could not reach would produce calls the
+  // service rejects. So the chat's tool result feeds the picker, and the ordering is
+  // deliberate — `ingest` must exist before the hook that reports into it.
+  const chat = useChat({
+    client,
+    onToolResult: (_tool, text, isError) => ingest.observeStacks(text, isError),
+  });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [view, setView] = useState<"chat" | "jobs">("chat");
 

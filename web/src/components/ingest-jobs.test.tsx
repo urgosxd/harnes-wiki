@@ -256,6 +256,11 @@ describe("noticeFor: 503 and 404 are different facts", () => {
 /** A hand-built result object, so the panel is testable without a live client. */
 function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
   return {
+    stacks: [],
+    stacksProblem: null,
+    selectedStackId: null,
+    selectStack: vi.fn(),
+    observeStacks: vi.fn(),
     documents: [],
     uploading: false,
     listDocuments: vi.fn(async () => {}),
@@ -321,6 +326,50 @@ describe("IngestJobsPanel", () => {
     expect(screen.getByText("2 KB")).toBeDefined();
     fireEvent.click(screen.getByText("Ingest"));
     expect(ingestDocument).toHaveBeenCalledWith("d1", { compile: true });
+  });
+
+  it("offers a stack picker fed by the agent, and marks the bound one", () => {
+    const selectStack = vi.fn();
+    render(
+      <IngestJobsPanel
+        ingest={fakeIngest({
+          stacks: [
+            { id: "s1", name: "Formation", isCurrent: false },
+            { id: "s2", name: "Wire", isCurrent: true },
+          ],
+          selectedStackId: "s2",
+          selectStack,
+        })}
+        onClose={() => {}}
+      />,
+    );
+
+    const select = screen.getByLabelText("Stack") as HTMLSelectElement;
+    expect(select.value).toBe("s2");
+    // The bound stack says so, because that is the one a user is most likely asking
+    // about and the fact is not otherwise visible.
+    expect(screen.getByText(/Wire \(bound\)/)).toBeDefined();
+
+    fireEvent.change(select, { target: { value: "s1" } });
+    expect(selectStack).toHaveBeenCalledWith("s1");
+  });
+
+  it("explains an empty picker instead of showing a bare dropdown", () => {
+    render(<IngestJobsPanel ingest={fakeIngest()} onClose={() => {}} />);
+    expect(screen.getByText("No stacks known yet")).toBeDefined();
+    // The list comes from the agent, so an empty one is not a bug and must not read
+    // like one.
+    expect(screen.getByText(/Ask the assistant to list the stacks/)).toBeDefined();
+  });
+
+  it("shows a stack-list problem as a failure, not as an empty list", () => {
+    render(
+      <IngestJobsPanel
+        ingest={fakeIngest({ stacksProblem: "No Stack 'x' exists." })}
+        onClose={() => {}}
+      />,
+    );
+    expect(screen.getByRole("alert").textContent).toContain("No Stack 'x' exists.");
   });
 
   it("says so when nothing has been uploaded", () => {

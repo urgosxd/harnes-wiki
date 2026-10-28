@@ -76,6 +76,8 @@ export type ChatFrame =
   | { type: "skill_used"; name: string }
   | { type: "tool_started"; tool: string; label: string }
   | { type: "tool_finished"; tool: string; label: string; isError: boolean }
+  /** A tool's output the caller asked for. One observation, not state. */
+  | { type: "tool_result"; tool: string; text: string; isError: boolean }
   | { type: "run_finished"; outcome: string; usage?: unknown }
   | { type: "run_failed"; outcome: string; message: string }
   | { type: "error"; message: string };
@@ -96,6 +98,7 @@ export function isChatFrame(value: unknown): value is ChatFrame {
     type === "skill_used" ||
     type === "tool_started" ||
     type === "tool_finished" ||
+    type === "tool_result" ||
     type === "run_finished" ||
     type === "run_failed" ||
     type === "error"
