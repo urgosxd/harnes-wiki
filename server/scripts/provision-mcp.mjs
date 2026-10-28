@@ -72,11 +72,43 @@ function loadRoster() {
 /**
  * The tools the agent may call.
  *
- * Only the Stack-scoped and discovery tools. The other twelve tools the service
- * exposes are filesystem-scoped, and exposing them here would offer the model
- * operations this project never decided to allow.
+ * ## Why this is a list and not "everything the service exposes"
+ *
+ * The service offers fifteen. Granting all of them would hand the model operations
+ * this project never decided to allow — compiling, ingesting, running evals, writing
+ * bundle files. A tool grant is a decision, and the default has to be that someone
+ * made it.
+ *
+ * ## Why the earlier rationale was wrong
+ *
+ * This list used to carry three tools under the comment "the other twelve are
+ * filesystem-scoped". Checked against the live schema and that was simply false:
+ * most of the twelve are READ-ONLY queries over the compiled wiki, which is precisely
+ * the capability a user asking "what does my knowledge base say" expects. Refusing
+ * them left the assistant unable to answer the question it existed to answer.
+ *
+ * ## The split that replaced it
+ *
+ * Reading the wiki is allowed. Changing it is not. That is a rule someone can audit,
+ * unlike "which of these look filesystem-y".
+ *
+ * `read_page` is deliberately absent: verified live that the slugs `search_pages`
+ * returns are rejected by it with "Page not found", with and without an explicit
+ * `stackId`. Granting a tool that cannot succeed would teach the model that its own
+ * capabilities are unreliable.
  */
-export const TOOLS = ["list_stacks", "ingest_jobs_list", "ingest_job_status"];
+export const READ_ONLY_WIKI_TOOLS = [
+  "query_wiki",
+  "search_pages",
+  "wiki_status",
+  "lint_wiki",
+  "get_context_pack",
+  "verify_artifact",
+];
+
+export const STACK_TOOLS = ["list_stacks", "ingest_jobs_list", "ingest_job_status"];
+
+export const TOOLS = [...STACK_TOOLS, ...READ_ONLY_WIKI_TOOLS];
 
 /**
  * Headers the endpoint requires on every request.
