@@ -223,6 +223,21 @@ export function compileRetryable(compile: CompileDimension): boolean {
   return compile.status === "busy" || compile.status === "failed";
 }
 
+/** How long a snapshot may stay byte-identical before the job is called stalled. */
+export const STALL_AFTER_MS = 90_000;
+
+/**
+ * True when `snapshot` has not advanced since `previous`.
+ *
+ * Compares `updatedAt`, which the service writes on every transition, so a job
+ * that is genuinely working always looks different. Anything derived from wall
+ * clock on the client would break across a tab being throttled in the background.
+ */
+export function isUnchanged(previous: IngestJob | undefined, snapshot: IngestJob): boolean {
+  if (!previous) return false;
+  return previous.updatedAt === snapshot.updatedAt;
+}
+
 // ---------------------------------------------------------------------------
 // Polling
 // ---------------------------------------------------------------------------
@@ -247,7 +262,23 @@ export function nextPollDelay(current: number): number {
  * which is what an expired job looks like under the service's own retention.
  * Treating the first as the second would make the UI declare a live job dead.
  */
-export type PollStopReason = "settled" | "unavailable" | "unknown" | "aborted" | "error";
+export type PollStopReason =
+  | "settled"
+  | "unavailable"
+  | "unknown"
+  | "aborted"
+  | "error"
+  /**
+   * The job stopped moving and will not move again.
+   *
+   * Reachable now that the service persists job state: a process killed mid-job
+   * leaves its last snapshot behind, frozen mid-pipeline. The mirror write is
+   * fire-and-forget, so nothing ever rewrites that row to a terminal state. This is
+   * not `settled` (both dimensions never finished) and not `error` (no request
+   * failed); it is a job whose owner died, and the UI must say so rather than
+   * spinning forever.
+   */
+  | "stalled";
 
 export interface PollOutcome {
   reason: PollStopReason;
@@ -268,6 +299,11 @@ export interface PollOptions {
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** First delay, exposed so a test can prove the curve without waiting. */
   initialDelay?: number;
+  /**
+   * How long an unmoving snapshot is tolerated before the job is called stalled.
+   * `Infinity` disables it, which is only correct for a test.
+   */
+  stallAfterMs?: number;
 }
 
 /** An error carrying the HTTP status, so the UI can tell 404 from 503. */
@@ -294,7 +330,13 @@ export async function pollJob(jobId: string, options: PollOptions): Promise<Poll
   const doFetch = options.fetchImpl ?? fetch.bind(globalThis);
   const sleep = options.sleep ?? defaultSleep;
   let delay = options.initialDelay ?? POLL_INITIAL_MS;
+  const stallAfterMs = options.stallAfterMs ?? STALL_AFTER_MS;
   let last: IngestJob | undefined;
+  // Monotonic and injected nowhere on purpose: this measures how long THIS loop
+  // has watched an unchanged snapshot, which is a client-side fact, not a job
+  // property. A job whose timestamp is old but which is still advancing here is
+  // working fine.
+  let unchangedSince: number | undefined;
 
   for (;;) {
     if (options.signal?.aborted) return { reason: "aborted", ...(last ? { job: last } : {}) };
@@ -345,10 +387,28 @@ export async function pollJob(jobId: string, options: PollOptions): Promise<Poll
     }
 
     const job = (await response.json()) as IngestJob;
+    const moved = !isUnchanged(last, job);
     last = job;
     options.onUpdate(job);
 
     if (isJobSettled(job)) return { reason: "settled", job };
+
+    // A snapshot that has not advanced for long enough is not slow, it is orphaned:
+    // the process that owned it is gone and nothing will ever finish it.
+    const now = Date.now();
+    if (moved) {
+      unchangedSince = undefined;
+    } else if (unchangedSince === undefined) {
+      unchangedSince = now;
+    } else if (now - unchangedSince >= stallAfterMs) {
+      return {
+        reason: "stalled",
+        job,
+        message:
+          "This job has not moved for a while, which usually means the process " +
+          "running it stopped mid-way. Its last state is shown below; it will not advance.",
+      };
+    }
     // An abort that arrived while this read was in flight must not schedule
     // another wait: the view it was polling for is gone.
     if (options.signal?.aborted) return { reason: "aborted", job };

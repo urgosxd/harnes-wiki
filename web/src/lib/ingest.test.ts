@@ -1,6 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   describeJob,
+  isUnchanged,
+  STALL_AFTER_MS,
   isJobSettled,
   nextPollDelay,
   pollJob,
@@ -247,6 +249,75 @@ describe("stop reasons that are not failures", () => {
 
     expect(outcome.reason).toBe("unknown");
     expect(outcome.job?.ingest.stage).toBe("fetching");
+  });
+
+  it("stops when a snapshot stops advancing, instead of polling forever", async () => {
+    // The case the service's persistence makes reachable: a process killed mid-job
+    // leaves its last snapshot frozen. Nothing will ever finish it, and a poller
+    // without this check spins for as long as the tab stays open.
+    const frozen = job({
+      ingest: { status: "running", stage: "committing", attempts: [] },
+      compile: { status: "queued", progress: null },
+    });
+    const fetchMock = vi.fn(async () => jsonResponse(frozen));
+    const { delays, sleep } = recordingSleep();
+
+    const outcome = await pollJob("ing_1", {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      headers: () => ({}),
+      onUpdate: () => {},
+      sleep,
+      // A real duration, so the check is exercised rather than mocked away.
+      stallAfterMs: 0,
+    });
+
+    expect(outcome.reason).toBe("stalled");
+    // It DID return the last state: the UI can still show where it stopped.
+    expect(outcome.job?.ingest.stage).toBe("committing");
+    expect(outcome.message).toMatch(/stopped mid-way|not advanced|will not advance/);
+    expect(delays.length).toBeLessThan(5);
+  });
+
+  it("keeps polling while the snapshot advances", async () => {
+    // The mirror of the previous test: movement must never be misread as a stall.
+    let tick = 0;
+    const fetchMock = vi.fn(async () => {
+      tick += 1;
+      const done = tick >= 5;
+      return jsonResponse(
+        job({
+          updatedAt: `2026-01-01T00:00:0${tick}.000Z`,
+          // BOTH dimensions must settle: a job whose ingest keeps "running" is
+          // still work in progress, and asserting otherwise would encode the very
+          // mistake this suite exists to prevent.
+          ingest: done
+            ? { status: "succeeded", stage: "journaling", attempts: [] }
+            : { status: "running", stage: "committing", attempts: [] },
+          compile: done
+            ? { status: "succeeded", progress: null }
+            : { status: "queued", progress: null },
+        }),
+      );
+    });
+    const outcome = await pollJob("ing_1", {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      headers: () => ({}),
+      onUpdate: () => {},
+      sleep: async () => {},
+      // Zero tolerance for stalls, yet movement must still be tolerated.
+      stallAfterMs: 0,
+    });
+
+    expect(outcome.reason).toBe("settled");
+  });
+
+  it("compares updatedAt, which every real transition rewrites", () => {
+    const a = job({ updatedAt: "2026-01-01T00:00:01.000Z" });
+    const b = job({ updatedAt: "2026-01-01T00:00:02.000Z" });
+    expect(isUnchanged(undefined, a)).toBe(false);
+    expect(isUnchanged(a, a)).toBe(true);
+    expect(isUnchanged(a, b)).toBe(false);
+    expect(STALL_AFTER_MS).toBeGreaterThan(2_000);
   });
 
   it("stops when aborted instead of polling a cancelled view", async () => {

@@ -16,8 +16,12 @@ import { pollJob, type IngestJob, type PollOutcome, type PollStopReason } from "
  */
 
 export type IngestNotice = {
-  /** `unavailable` is 503, `unknown` is 404 — different facts, different advice. */
-  kind: "unavailable" | "unknown" | "error" | "not_configured";
+  /**
+   * `unavailable` is 503, `unknown` is 404, `not_configured` is our own 503, and
+   * `stalled` is none of them: the job is known and its state is on screen, but it
+   * will not advance. Four different facts, four different pieces of advice.
+   */
+  kind: "unavailable" | "unknown" | "error" | "not_configured" | "stalled";
   message: string;
 } | null;
 
@@ -266,6 +270,16 @@ export function noticeForOutcome(outcome: PollOutcome): IngestNotice {
     return {
       kind: "unknown",
       message: outcome.message ?? "This job is no longer known to the host.",
+    };
+  }
+  if (reason === "stalled") {
+    // Not `unknown`: the job IS known, and its last state is still on screen. What
+    // stopped is progress, and the fix is a new ingest, not a reload.
+    return {
+      kind: "stalled",
+      message:
+        outcome.message ??
+        "This job stopped advancing. Its last state is shown; it will not finish.",
     };
   }
   return { kind: "error", message: outcome.message ?? "The job status could not be read." };
