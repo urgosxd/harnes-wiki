@@ -115,6 +115,16 @@ Worked in order. Each task closes with at least one work-unit commit on
     indeterminate indicator whenever `progress` is `null`.
   - Commit: `feat(ingest): ingest job status UI for an external ingest service`
 
+- [x] T14. Document uploads as a resource with identity
+  - The ingest service takes REFERENCES, not bytes, so an upload has to become an
+    address before it can be ingested. `POST /documents` stores the bytes and mints
+    a capability URL; `POST /ingest/jobs { documentId }` hands that URL over.
+  - Upload != ingest: the document keeps its identity, so a failed compile is
+    retried without re-uploading.
+  - `server/src/db/migrations/003_documents.sql`, `db/document-store.ts`,
+    `api/document-routes.ts`; UI in `IngestJobsPanel`.
+  - Commit: `feat(documents): upload as a resource the ingest service can fetch`
+
 - [ ] T13. MCP access to the external ingest service
   - The agent reaches it as MCP tools, through the existing per-user `tenant_mcp`
     seam, NOT through provider-specific code in this repository.
@@ -538,3 +548,8 @@ Worked in order. Each task closes with at least one work-unit commit on
 | 2026-10-27 | T12 finding | `Host` cannot be overridden from Node: `fetch(url, {headers:{host}})` still sends the URL's host. So "derive the address from the URL and forward nothing from the browser" is the only correct construction, not a style choice. |
 | 2026-10-27 | T12 note | Mutation checks: the poller scheduled one more sleep after an abort arrived mid-read (caught and fixed); the client's `pollIngestJob` silently fell back to global `fetch` instead of the injected transport (caught by the hook-level 503/404 tests). |
 | 2026-10-27 | T12 | Tests: server `141 / 141 pass / 0 fail / 0 skipped` (baseline `eff1585`: `121 / 121`); web `115 passed / 0 failed`. |
+| 2026-10-27 | T14 verified | End-to-end on the real server in a container on the product network: uploaded a PDF with only `x-dev-token`, got `{id, url}`; fetched that URL with **no headers at all** and got the bytes with `content-type: application/pdf` and `cache-control: no-store`; a wrong secret and an unknown id both answered an identical `404`; the listing carried no secret. A fake ingest service on the other side of the network recorded the exact `source` it received: `http://ad-doc-probe:8080/documents/<id>/<secret>/cap.pdf` with `async: true` — the extension survived into the URL, which is what decides how the bytes are parsed. |
+| 2026-10-27 | T14 finding | The service routes by FILE EXTENSION (`path.extname`), not by content type: a PDF without `.pdf` is classified `web`, JSDOM runs over binary bytes, and ingest fails with "Could not extract readable content". So the filename is part of the wire contract and travels in the path; a `Content-Disposition` header would not help. |
+| 2026-10-27 | T14 boundary | Transport risk, stated rather than hidden: the service's `fetchAndParse` is a bare `fetch(url)` with no private-address guard, so this design depends on it staying that way. That absence is the transport, which makes it fragile by definition. Mitigated by keeping resolution behind `DocumentResolver`, so a shared-volume strategy is an implementation swap and not a UI or contract change. |
+| 2026-10-27 | T14 note | Two self-inflicted defects caught by tests: the router's JSON limit would have rejected any real upload (fixed by a `bodyBytes(limit)` seam that raises the ceiling for ONE route instead of for all of them), and `ingestDocument` in the hook used declarations that appeared later, with an `eslint-disable` papering over the incomplete dependency list — reordered instead of silenced. |
+| 2026-10-27 | T14 | Tests: server `157 / 157 pass / 0 fail / 0 skipped`; web `118 passed / 0 failed`. |

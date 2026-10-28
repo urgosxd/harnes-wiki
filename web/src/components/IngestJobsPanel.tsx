@@ -1,7 +1,14 @@
-import { useState, type FormEvent } from "react";
+import { useState, type ChangeEvent, type FormEvent } from "react";
 import { describeJob, isJobSettled } from "../lib/ingest.ts";
 import type { UseIngestResult } from "../lib/use-ingest.ts";
 import { IngestJobView } from "./IngestJobView.tsx";
+
+/** Byte counts a person can read at a glance. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024) } KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 export interface IngestJobsPanelProps {
   ingest: UseIngestResult;
@@ -24,6 +31,15 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
   const [source, setSource] = useState("");
   const [compile, setCompile] = useState(true);
 
+  const pick = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    // Clear the input so picking the SAME file twice still fires a change: a user
+    // who deletes an upload and re-adds it must not be blocked by a browser that
+    // thinks nothing changed.
+    event.target.value = "";
+    if (file) void ingest.upload(file);
+  };
+
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const trimmed = source.trim();
@@ -40,6 +56,67 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
           Back to chat
         </button>
       </header>
+
+      {/*
+        Upload and ingest are separate steps on purpose. A document is a resource
+        with its own identity: it can be ingested again after a failed compile
+        without being uploaded twice, and a file can be stored before anyone decides
+        whether it belongs in the wiki.
+      */}
+      <section className="jobs-panel__upload" aria-label="Upload a document">
+        <label className="jobs-panel__filebutton">
+          <input
+            type="file"
+            onChange={pick}
+            disabled={ingest.uploading}
+            aria-label="Choose a document"
+          />
+          <span className="button">{ingest.uploading ? "Uploading…" : "Choose a document"}</span>
+        </label>
+        <p className="jobs-panel__hint">
+          The file is stored here and then handed to the ingest service by URL. Its
+          extension decides how it is parsed, so keep it.
+        </p>
+      </section>
+
+      {ingest.documentsNotice && (
+        <p className="jobs-panel__notice jobs-panel__notice--warn" role="alert">
+          {ingest.documentsNotice.message}
+        </p>
+      )}
+
+      <section className="jobs-panel__documents" aria-label="Uploaded documents">
+        <h3 className="jobs-panel__subtitle">Uploaded</h3>
+        {ingest.documents.length === 0 ? (
+          <p className="jobs-panel__empty">No documents uploaded yet.</p>
+        ) : (
+          <ul className="document-list">
+            {ingest.documents.map((document) => (
+              <li key={document.id} className="document-list__row">
+                <span className="document-list__name" title={document.filename}>
+                  {document.filename}
+                </span>
+                <span className="document-list__meta">{formatBytes(document.bytes)}</span>
+                <button
+                  type="button"
+                  className="button button--small"
+                  onClick={() => void ingest.ingestDocument(document.id, { compile })}
+                >
+                  Ingest
+                </button>
+                <button
+                  type="button"
+                  className="button button--small"
+                  aria-label={`Delete ${document.filename}`}
+                  onClick={() => void ingest.removeDocument(document.id)}
+                >
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
       <form className="jobs-panel__form" onSubmit={submit}>
         <label className="jobs-panel__field">
@@ -75,8 +152,9 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
         in place, instead of being discovered as a confusing 404.
       */}
       <p className="jobs-panel__hint">
-        A path is resolved on the machine that runs the ingest service, not inside this
-        application. Use a URL, or a path the service can see.
+        For a reference instead of an upload: a URL is fetched by the ingest service,
+        and a path is resolved on the machine that runs it, not inside this
+        application.
       </p>
 
       {ingest.listNotice && (

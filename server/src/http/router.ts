@@ -8,7 +8,18 @@ export interface RequestContext {
   url: URL;
   /** Authenticated user id. Set by the auth step before any handler runs. */
   userId: string;
+  /** Parse the body as JSON under the router's global limit. */
   body(): Promise<unknown>;
+  /**
+   * Read the body as raw bytes, bounded by the CALLER's limit rather than the
+   * router's.
+   *
+   * Uploads need this: the global limit is sized for JSON, and a document upload is
+   * legitimately larger. Sharing `body()` would either force the global limit up
+   * for every route (a wider attack surface for all of them) or reject valid
+   * uploads. Only one of the two readers may be used per request.
+   */
+  bodyBytes(limit: number): Promise<Buffer>;
 }
 
 export type Handler = (ctx: RequestContext) => Promise<void>;
@@ -88,6 +99,12 @@ export function createRouter(options: {
         });
 
         let bodyRead = false;
+        // One read per request, and only one: the stream cannot be replayed, and a
+        // handler that tried would silently get an empty second read.
+        const claimBody = () => {
+          if (bodyRead) throw new Error("body already read");
+          bodyRead = true;
+        };
         const ctx: RequestContext = {
           req,
           res,
@@ -95,9 +112,12 @@ export function createRouter(options: {
           url,
           userId,
           body: async () => {
-            if (bodyRead) throw new Error("body already read");
-            bodyRead = true;
+            claimBody();
             return readJsonBody(req, maxBodyBytes);
+          },
+          bodyBytes: async (limit: number) => {
+            claimBody();
+            return readRawBody(req, limit);
           },
         };
 
@@ -130,7 +150,7 @@ export function createRouter(options: {
             // Liveness is deliberately public: a healthcheck that needs a user
             // token couples container health to a secret.
             const path = new URL(req.url ?? "/", "http://localhost").pathname;
-            if (!userId && path !== "/health") {
+            if (!userId && path !== "/health" && !isCapabilityPath(path)) {
               sendJson(res, 401, { error: "unauthorized" });
               return;
             }
@@ -147,6 +167,21 @@ export function createRouter(options: {
   };
 }
 
+/**
+ * Paths that authorise themselves instead of carrying an identity.
+ *
+ * A capability URL is handed to another service that holds no credential of ours,
+ * so requiring one would make the handoff impossible. The path is public by
+ * construction and protected by its own secret; see `api/document-routes.ts`.
+ *
+ * Kept as an explicit allowlist rather than a prefix check on the whole API: any
+ * future exception has to be added here on purpose.
+ */
+function isCapabilityPath(pathname: string): boolean {
+  // /documents/<id>/<secret>/<filename>
+  return /^\/documents\/[^/]+\/[^/]+\/[^/]+$/.test(pathname);
+}
+
 export function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
@@ -158,6 +193,21 @@ export function sendJson(res: ServerResponse, status: number, payload: unknown):
 
 export function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function readRawBody(req: IncomingMessage, limit: number): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of req) {
+    const buffer = chunk as Buffer;
+    size += buffer.length;
+    if (size > limit) {
+      // A typed error so the handler can answer 413 instead of a generic 500.
+      throw new HttpError(413, "body_too_large", `request body exceeds ${limit} bytes`);
+    }
+    chunks.push(buffer);
+  }
+  return Buffer.concat(chunks);
 }
 
 async function readJsonBody(req: IncomingMessage, limit: number): Promise<unknown> {

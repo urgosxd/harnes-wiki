@@ -38,6 +38,16 @@ export interface Config {
   databaseUrl: string | undefined;
   /** `undefined` when this deployment consumes no external ingest service. */
   ingestApi: ExternalApiConfig | undefined;
+  /**
+   * Absolute origin THIS server is reachable at FROM the ingest service, e.g.
+   * `http://server:8080`.
+   *
+   * Needed because a capability URL is handed to another container: a relative path
+   * means nothing to it, and the browser's origin names the wrong process.
+   * `undefined` disables upload-backed ingests, since there would be no URL to hand
+   * over.
+   */
+  publicBaseUrl: string | undefined;
 }
 
 export type ThinkingLevelName = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -58,6 +68,35 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name]?.trim();
   if (!value) throw new ConfigError(`${name} is required`);
   return value;
+}
+
+/**
+ * Validate the address other CONTAINERS reach this server at.
+ *
+ * Same origin rules as any other address here (absolute, http(s), no path), because
+ * it is used to build URLs that go on the wire. Empty is allowed and means "no
+ * upload-backed ingest", which is a real deployment: a service can still be handed
+ * a plain URL or path the operator typed.
+ */
+export function parsePublicBaseUrl(raw: string | undefined): string | undefined {
+  const value = raw?.trim();
+  if (!value) return undefined;
+
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new ConfigError(`PUBLIC_BASE_URL must be an absolute URL, got "${value}"`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new ConfigError(`PUBLIC_BASE_URL must be http or https, got "${url.protocol}"`);
+  }
+  if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+    throw new ConfigError(
+      `PUBLIC_BASE_URL must be an origin with no path, query or fragment, got "${value}"`,
+    );
+  }
+  return `${url.protocol}//${url.host}`;
 }
 
 /**
@@ -158,5 +197,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       urlVar: "INGEST_API_BASE_URL",
       timeoutVar: "INGEST_API_TIMEOUT_MS",
     }),
+    publicBaseUrl: parsePublicBaseUrl(env.PUBLIC_BASE_URL),
   };
 }

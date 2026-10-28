@@ -17,6 +17,8 @@ import { createRouter } from "./http/router.ts";
 import { createAuthenticator } from "./http/auth.ts";
 import { registerRoutes } from "./api/routes.ts";
 import { registerIngestRoutes } from "./api/ingest-routes.ts";
+import { registerDocumentRoutes, capabilityPath } from "./api/document-routes.ts";
+import { DocumentStore } from "./db/document-store.ts";
 import { IngestClient } from "./ingest/client.ts";
 import type { Model } from "@earendil-works/pi-ai";
 
@@ -173,7 +175,23 @@ async function main(): Promise<void> {
   const ingest = config.ingestApi
     ? new IngestClient({ baseUrl: config.ingestApi.baseUrl, timeoutMs: config.ingestApi.timeoutMs })
     : undefined;
-  registerIngestRoutes(router, { ingest });
+
+  // Uploads. The capability URL is only meaningful when the ingest service can
+  // reach THIS server, so the public address gates the whole feature: with no
+  // address there is nothing to hand over, and the route says so instead of
+  // creating documents nobody can read.
+  const documents = new DocumentStore(db);
+  const documentResolver = config.publicBaseUrl
+    ? {
+        urlFor: async (documentId: string, userId: string) => {
+          const found = await documents.findOwned(documentId, userId);
+          if (!found) return undefined;
+          return `${config.publicBaseUrl}${capabilityPath(found)}`;
+        },
+      }
+    : undefined;
+  registerDocumentRoutes(router, { documents, publicBaseUrl: config.publicBaseUrl });
+  registerIngestRoutes(router, { ingest, documents: documentResolver });
   if (config.ingestApi) {
     log.info("ingest service adapter configured", {
       baseUrl: config.ingestApi.baseUrl,
@@ -181,6 +199,9 @@ async function main(): Promise<void> {
     });
   } else {
     log.warn("INGEST_API_BASE_URL is not set: ingest job routes will answer 503");
+  }
+  if (!config.publicBaseUrl) {
+    log.info("PUBLIC_BASE_URL is not set: uploads are listed and stored, but cannot be ingested");
   }
 
   const port = Number(process.env.PORT ?? 8080);

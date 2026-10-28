@@ -29,6 +29,23 @@ import { HttpError, sendJson } from "../http/router.ts";
 import type { IngestClient } from "../ingest/client.ts";
 import { IngestServiceUnreachable } from "../ingest/client.ts";
 
+/**
+ * Turns an uploaded document into the reference the ingest service can read.
+ *
+ * Injected rather than imported so this route stays ignorant of storage, and so a
+ * test can prove the URL-shape rule without a database.
+ */
+export interface DocumentResolver {
+  /**
+   * Resolve a document the caller owns into an absolute URL the service can fetch.
+   *
+   * `undefined` means "not this user's document", which is deliberately
+   * indistinguishable from "no such document": a distinguishable answer would
+   * confirm someone else's upload exists.
+   */
+  urlFor(documentId: string, userId: string): Promise<string | undefined>;
+}
+
 export interface IngestRouteDeps {
   /**
    * `undefined` when this deployment consumes no ingest service. The routes still
@@ -36,30 +53,56 @@ export interface IngestRouteDeps {
    * than a 404 that looks like a missing feature.
    */
   ingest: IngestClient | undefined;
+  /** `undefined` when this deployment cannot serve capability URLs. */
+  documents: DocumentResolver | undefined;
 }
 
 interface CreateJobBody {
   source?: unknown;
+  documentId?: unknown;
   compile?: unknown;
 }
 
-/** Refuse before any upstream call: a blank source is a caller bug, not a job. */
-function requireSource(body: unknown): { source: string; compile: boolean } {
+/**
+ * Refuse before any upstream call: a blank source is a caller bug, not a job.
+ *
+ * Exactly one of `source` and `documentId` identifies the work. Both together are
+ * refused rather than resolved by a precedence rule: whichever lost would be a
+ * silent surprise at exactly the moment the operator thinks they specified it.
+ */
+function requireTarget(
+  body: unknown,
+): { kind: "source"; source: string; compile: boolean } | { kind: "document"; documentId: string; compile: boolean } {
   const parsed = (body ?? {}) as CreateJobBody;
-  const source = parsed.source;
-  if (typeof source !== "string" || source.trim().length === 0) {
+  // Anything other than an explicit `false` compiles, matching the upstream
+  // default: omitting the field must not silently skip the compile.
+  const compile = parsed.compile !== false;
+
+  const hasSource = typeof parsed.source === "string" && parsed.source.trim().length > 0;
+  const hasDocument = typeof parsed.documentId === "string" && parsed.documentId.trim().length > 0;
+
+  if (hasSource && hasDocument) {
+    throw new HttpError(
+      400,
+      "ambiguous_target",
+      "send either source or documentId, not both",
+    );
+  }
+  if (hasDocument) {
+    return { kind: "document", documentId: (parsed.documentId as string).trim(), compile };
+  }
+  if (!hasSource) {
     throw new HttpError(
       400,
       "invalid_source",
-      "source must be a non-empty string: a URL, or a path the ingest service can read",
+      "send documentId (an uploaded document) or source (a URL, or a path the service can read)",
     );
   }
+  const source = parsed.source as string;
   if (source.length > 4096) {
     throw new HttpError(400, "invalid_source", "source is too long");
   }
-  // Anything other than an explicit `false` compiles, matching the upstream
-  // default: omitting the field must not silently skip the compile.
-  return { source, compile: parsed.compile !== false };
+  return { kind: "source", source, compile };
 }
 
 export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): void {
@@ -130,8 +173,28 @@ export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): voi
    * path blocks for minutes and there is no status surface to poll afterwards.
    */
   router.post("/ingest/jobs", async (ctx) => {
-    const input = requireSource(await ctx.body());
+    const target = requireTarget(await ctx.body());
     const c = requireClient();
+
+    // A document reference has to become a URL before the service can read it, and
+    // the resolver is the only part that knows storage. Refusing here keeps the
+    // failure honest: without a public address there is no URL to hand over.
+    let input: { source: string; compile: boolean };
+    if (target.kind === "document") {
+      const resolver = deps.documents;
+      if (!resolver) {
+        throw new HttpError(
+          503,
+          "documents_not_configured",
+          "this deployment has no PUBLIC_BASE_URL, so an uploaded document cannot be reached by the ingest service",
+        );
+      }
+      const url = await resolver.urlFor(target.documentId, ctx.userId);
+      if (!url) throw new HttpError(404, "not_found", "no such document");
+      input = { source: url, compile: target.compile };
+    } else {
+      input = { source: target.source, compile: target.compile };
+    }
 
     let upstream: { status: number; body: unknown };
     try {

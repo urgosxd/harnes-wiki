@@ -58,6 +58,11 @@ services:
       # instead of pretending to be fine.
       INGEST_API_BASE_URL: ${INGEST_API_BASE_URL:-}
       INGEST_API_TIMEOUT_MS: ${INGEST_API_TIMEOUT_MS:-10000}
+      # Origin the ingest service reaches THIS container at. A capability URL is
+      # handed to another container, so a relative path or the browser's origin
+      # would name the wrong process. Empty keeps uploads working but disables
+      # ingest-by-document, since there would be no URL to hand over.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://server:8080}
       # Two users, each with their own secret: `id:token,id:token`. The token is
       # what identifies the caller, so holding bob's token does not let anyone act
       # as alice. Tokens must be at least 16 characters; the server refuses

@@ -1,6 +1,19 @@
 import { SseParser, parseChatFrame, type ChatFrame } from "./sse.ts";
 import { pollJob, type IngestJob, type IngestJobAccepted, type PollOutcome } from "./ingest.ts";
 
+/**
+ * A document this user uploaded.
+ *
+ * Deliberately no `url` and no `secret`: the listing must never hand out the
+ * capability, and the bytes are reached by the ingest service, not by the browser.
+ */
+export interface UploadedDocument {
+  id: string;
+  filename: string;
+  bytes: number;
+  contentType: string;
+  createdAt: string;
+}
 
 export interface Identity {
   id: string;
@@ -183,6 +196,47 @@ export class ApiClient {
     });
   }
 
+  // -------------------------------------------------------------------------
+  // Documents
+  // -------------------------------------------------------------------------
+
+  /**
+   * Upload one document and keep its identity.
+   *
+   * The filename travels as a query parameter, not in a header, because the ingest
+   * service routes by FILE EXTENSION: the name decides whether the bytes are parsed
+   * as a PDF, an image or a web page. A header would not survive into the URL the
+   * service fetches.
+   *
+   * The body is the raw file. `content-type` is the file's own, so the stored
+   * document carries the type it actually had.
+   */
+  async uploadDocument(file: File): Promise<UploadedDocument> {
+    return this.json<UploadedDocument>(
+      "POST",
+      `/documents?filename=${encodeURIComponent(file.name)}`,
+      file,
+      { "content-type": file.type || "application/octet-stream" },
+    );
+  }
+
+  async listDocuments(): Promise<UploadedDocument[]> {
+    const body = await this.json<{ documents?: UploadedDocument[] }>("GET", "/documents");
+    return body.documents ?? [];
+  }
+
+  async deleteDocument(id: string): Promise<void> {
+    await this.request("DELETE", `/documents/${encodeURIComponent(id)}`);
+  }
+
+  /** Start an ingest for an uploaded document, by reference rather than by path. */
+  async startIngestForDocument(documentId: string, options: { compile?: boolean } = {}): Promise<IngestJobAccepted> {
+    return this.json<IngestJobAccepted>("POST", "/ingest/jobs", {
+      documentId,
+      compile: options.compile !== false,
+    });
+  }
+
   async listIngestJobs(): Promise<IngestJob[]> {
     const body = await this.json<{ jobs?: IngestJob[] }>("GET", "/ingest/jobs");
     return body.jobs ?? [];
@@ -221,21 +275,53 @@ export class ApiClient {
     });
   }
 
-  private async request(method: string, path: string, body?: unknown): Promise<Response> {
+  /**
+   * One request.
+   *
+   * `rawBody` exists for uploads: a File must be sent as bytes, not JSON. It is a
+   * separate parameter rather than a `body: unknown` overload so that sending a
+   * binary body without also setting its content type is impossible to do by
+   * accident — JSON.stringify on a File would produce `{}` and a silent empty
+   * upload.
+   */
+  private async request(
+    method: string,
+    path: string,
+    body?: unknown,
+    options: { rawBody?: BodyInit; headers?: Record<string, string> } = {},
+  ): Promise<Response> {
+    const hasRaw = options.rawBody !== undefined;
     const response = await this.doFetch(`${this.baseUrl}${path}`, {
       method,
       headers: {
         ...this.headers(),
-        ...(body === undefined ? {} : { "content-type": "application/json" }),
+        ...(hasRaw ? {} : body === undefined ? {} : { "content-type": "application/json" }),
+        ...(options.headers ?? {}),
       },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(hasRaw
+        ? { body: options.rawBody }
+        : body === undefined
+          ? {}
+          : { body: JSON.stringify(body) }),
     });
     if (!response.ok) throw await this.errorFrom(response);
     return response;
   }
 
-  private async json<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const response = await this.request(method, path, body);
+  private async json<T>(
+    method: string,
+    path: string,
+    body?: unknown,
+    headers?: Record<string, string>,
+  ): Promise<T> {
+    // A File (or any BodyInit that is not plain JSON) is sent as bytes.
+    const isRaw = typeof Blob !== "undefined" && body instanceof Blob;
+    const response = await this.request(
+      method,
+      path,
+      isRaw ? undefined : body,
+      isRaw ? { rawBody: body as BodyInit, ...(headers ? { headers } : {}) } : headers ? { headers } : {},
+    );
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
   }

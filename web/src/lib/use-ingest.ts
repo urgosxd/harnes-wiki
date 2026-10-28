@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiClient, ApiError } from "./api.ts";
+import { ApiClient, ApiError, type UploadedDocument } from "./api.ts";
 import { pollJob, type IngestJob, type PollOutcome, type PollStopReason } from "./ingest.ts";
 
 /**
@@ -22,6 +22,17 @@ export type IngestNotice = {
 } | null;
 
 export interface UseIngestResult {
+  /** Files this user has uploaded, newest first. Each is a resource, not a job. */
+  documents: UploadedDocument[];
+  uploading: boolean;
+  listDocuments(): Promise<void>;
+  upload(file: File): Promise<UploadedDocument | null>;
+  removeDocument(id: string): Promise<void>;
+  /** Start an ingest for an uploaded document, by reference. */
+  ingestDocument(id: string, options?: { compile?: boolean }): Promise<void>;
+  /** Set when an upload or listing failed. Distinct from a poll notice. */
+  documentsNotice: IngestNotice;
+
   jobs: IngestJob[];
   activeJob: IngestJob | null;
   activeId: string | null;
@@ -39,6 +50,9 @@ export interface UseIngestResult {
 }
 
 export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
+  const [documents, setDocuments] = useState<UploadedDocument[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [documentsNotice, setDocumentsNotice] = useState<IngestNotice>(null);
   const [jobs, setJobs] = useState<IngestJob[]>([]);
   const [activeJob, setActiveJob] = useState<IngestJob | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -49,6 +63,57 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
   const [following, setFollowing] = useState(false);
 
   const abortRef = useRef<AbortController | null>(null);
+
+  const listDocuments = useCallback(async () => {
+    try {
+      setDocuments(await client.listDocuments());
+      setDocumentsNotice(null);
+    } catch (error) {
+      setDocumentsNotice(noticeFor(error));
+    }
+  }, [client]);
+
+  useEffect(() => {
+    void listDocuments();
+  }, [listDocuments]);
+
+  /**
+   * Upload one file.
+   *
+   * An upload does NOT start an ingest. Keeping them apart is the point of the
+   * resource having identity: the same document can be ingested again after a
+   * failed compile without being uploaded twice, and a user can store a file now
+   * and decide later whether it belongs in the wiki.
+   */
+  const upload = useCallback(
+    async (file: File): Promise<UploadedDocument | null> => {
+      setUploading(true);
+      setDocumentsNotice(null);
+      try {
+        const stored = await client.uploadDocument(file);
+        await listDocuments();
+        return stored;
+      } catch (error) {
+        setDocumentsNotice(noticeFor(error));
+        return null;
+      } finally {
+        setUploading(false);
+      }
+    },
+    [client, listDocuments],
+  );
+
+  const removeDocument = useCallback(
+    async (id: string) => {
+      try {
+        await client.deleteDocument(id);
+        await listDocuments();
+      } catch (error) {
+        setDocumentsNotice(noticeFor(error));
+      }
+    },
+    [client, listDocuments],
+  );
 
   const refreshList = useCallback(async () => {
     try {
@@ -110,6 +175,28 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
     [client, refreshList, stopFollowing],
   );
 
+  /**
+   * Start an ingest for an uploaded document, by reference.
+   *
+   * Declared after `follow` and `refreshList` on purpose: it uses both, and
+   * depending on declarations that appear later would make the dependency list a
+   * lie told to silence a linter.
+   */
+  const ingestDocument = useCallback(
+    async (id: string, options: { compile?: boolean } = {}) => {
+      setPollNotice(null);
+      try {
+        const accepted = await client.startIngestForDocument(id, options);
+        follow(accepted.jobId);
+      } catch (error) {
+        setPollNotice(noticeFor(error));
+        return;
+      }
+      void refreshList();
+    },
+    [client, follow, refreshList],
+  );
+
   const start = useCallback(
     async (source: string, options: { compile?: boolean } = {}) => {
       const trimmed = source.trim();
@@ -140,6 +227,13 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
   );
 
   return {
+    documents,
+    uploading,
+    listDocuments,
+    upload,
+    removeDocument,
+    ingestDocument,
+    documentsNotice,
     jobs,
     activeJob,
     activeId,

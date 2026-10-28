@@ -256,6 +256,13 @@ describe("noticeFor: 503 and 404 are different facts", () => {
 /** A hand-built result object, so the panel is testable without a live client. */
 function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
   return {
+    documents: [],
+    uploading: false,
+    listDocuments: vi.fn(async () => {}),
+    upload: vi.fn(async () => null),
+    removeDocument: vi.fn(async () => {}),
+    ingestDocument: vi.fn(async () => {}),
+    documentsNotice: null,
     jobs: [],
     activeJob: null,
     activeId: null,
@@ -274,9 +281,71 @@ function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
 }
 
 describe("IngestJobsPanel", () => {
-  it("says where a path is resolved, because it is never the container", () => {
+  it("says where a path is resolved, and that an extension decides parsing", () => {
     render(<IngestJobsPanel ingest={fakeIngest()} onClose={() => {}} />);
-    expect(screen.getByText(/resolved on the machine that runs the ingest service/)).toBeDefined();
+    // A typed path never means "here": the service resolves it on its own machine.
+    expect(screen.getByText(/resolved on the machine that runs it/)).toBeDefined();
+    // And an upload's name is load-bearing, not cosmetic.
+    expect(screen.getByText(/extension decides how it is parsed/)).toBeDefined();
+  });
+
+  it("uploads a chosen file and does NOT start an ingest by itself", async () => {
+    const upload = vi.fn(async () => null);
+    const ingestDocument = vi.fn(async () => {});
+    render(<IngestJobsPanel ingest={fakeIngest({ upload, ingestDocument })} onClose={() => {}} />);
+
+    const input = screen.getByLabelText("Choose a document") as HTMLInputElement;
+    const file = new File(["%PDF-1.4"], "contrato.pdf", { type: "application/pdf" });
+    fireEvent.change(input, { target: { files: [file] } });
+
+    expect(upload).toHaveBeenCalledWith(file);
+    // Upload is storage; ingest is a separate, deliberate action.
+    expect(ingestDocument).not.toHaveBeenCalled();
+  });
+
+  it("lists uploaded documents and ingests one by reference", () => {
+    const ingestDocument = vi.fn(async () => {});
+    render(
+      <IngestJobsPanel
+        ingest={fakeIngest({
+          documents: [
+            { id: "d1", filename: "contrato.pdf", bytes: 2048, contentType: "application/pdf", createdAt: "" },
+          ],
+          ingestDocument,
+        })}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("contrato.pdf")).toBeDefined();
+    expect(screen.getByText("2 KB")).toBeDefined();
+    fireEvent.click(screen.getByText("Ingest"));
+    expect(ingestDocument).toHaveBeenCalledWith("d1", { compile: true });
+  });
+
+  it("says so when nothing has been uploaded", () => {
+    render(<IngestJobsPanel ingest={fakeIngest()} onClose={() => {}} />);
+    expect(screen.getByText("No documents uploaded yet.")).toBeDefined();
+  });
+
+  it("starts a job with the compile choice it was given", () => {
+    const start = vi.fn(async () => {});
+    render(<IngestJobsPanel ingest={fakeIngest({ start })} onClose={() => {}} />);
+
+    fireEvent.change(screen.getByLabelText("Source"), {
+      target: { value: "https://example.com/x" },
+    });
+    fireEvent.click(screen.getByLabelText(/Compile after ingesting/)); // turn it off
+    fireEvent.click(screen.getByText("Start ingest"));
+
+    expect(start).toHaveBeenCalledWith("https://example.com/x", { compile: false });
+  });
+
+  it("will not start a blank source", () => {
+    const start = vi.fn(async () => {});
+    render(<IngestJobsPanel ingest={fakeIngest({ start })} onClose={() => {}} />);
+    const button = screen.getByText("Start ingest") as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
   });
 
   it("lists jobs with a summary that names which half is moving", () => {

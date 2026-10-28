@@ -35,6 +35,10 @@ request headers only, never from a body or query parameter.
 | `PATCH` | `/conversations/:id` | Rename |
 | `DELETE` | `/conversations/:id` | Archive |
 | `POST` | `/conversations/:id/turns` | Run a turn, streaming SSE |
+| `POST` | `/documents` | Upload a document; `201` with its id and a capability URL |
+| `GET` | `/documents` | The caller's uploads, newest first. Never includes a secret |
+| `GET` | `/documents/:id/:secret/:filename` | The bytes. No identity: the URL authorises itself |
+| `DELETE` | `/documents/:id` | Remove an upload |
 | `POST` | `/ingest/jobs` | Start an async ingest job; `202` with a job id |
 | `GET` | `/ingest/jobs` | Retained jobs, newest first |
 | `GET` | `/ingest/jobs/:id` | One job snapshot; the poller's only read |
@@ -67,6 +71,7 @@ Never commit provider credentials.
 | `DATABASE_URL` | Postgres connection string. |
 | `INGEST_API_BASE_URL` | Origin of the external ingest service, e.g. `http://host:4173`. Empty answers `503 ingest_not_configured`. |
 | `INGEST_API_TIMEOUT_MS` | Deadline for one job read. Default `10000`. |
+| `PUBLIC_BASE_URL` | Origin the ingest service reaches THIS server at, e.g. `http://server:8080`. Empty still allows uploads and plain references, but not ingest-by-document. |
 
 `PI_AGENT_DIR` matters more than it looks: on many setups the provider key lives
 inline in `models.json` and `auth.json` is empty, so mounting only `auth.json`
@@ -166,8 +171,41 @@ the service streams nothing. A `409 busy` is surfaced as a retry signal, not a
 failure.
 
 A source path is resolved on **the service's** filesystem, not in this container:
-a file that only exists here is not a valid source. Use a URL, or a path the
-service can see.
+a file that only exists here is not a valid source. Use a URL, a path the service
+can see, or upload it.
+
+### Uploading: why it takes two endpoints
+
+The service accepts REFERENCES, not bytes — its own tool contract says `URL or
+absolute path`. So an upload cannot be sent to it directly: the bytes need an
+address first. That is the whole design, and it is the same shape as a file id in
+a hosted API:
+
+```
+POST /documents?filename=x.pdf   →  { id, url }
+POST /ingest/jobs { documentId } →  a job, as usual
+```
+
+Three consequences that are deliberate:
+
+- **The capability URL is unauthenticated.** The caller is the ingest service,
+  which holds no credential of ours. The URL carries a 32-byte secret in its path,
+  so holding the link is the permission; ids and secrets are separate so an id can
+  appear in a UI or a log without granting access. A wrong secret and an unknown id
+  answer identically, so the pair cannot be probed half at a time.
+- **The filename is in the path, not a header.** The service routes on the file
+  EXTENSION: a PDF served without `.pdf` is fetched as a web page and dies in HTML
+  extraction. The name is part of the wire contract.
+- **Upload ≠ ingest.** A document is a resource with identity; ingesting is a
+  separate action that can be repeated (after a failed compile, say) without
+  re-uploading. A cell in the upload list does not mean the wiki has it.
+
+Uploads are capped at 25 MB, enforced on that route only — the global JSON limit
+stays at 1 MB, because raising it for one endpoint would widen every other one.
+
+Unset `INGEST_API_BASE_URL` is a supported state: the routes answer `503
+ingest_not_configured`, which the view states plainly instead of showing an empty
+list.
 
 ## Development
 

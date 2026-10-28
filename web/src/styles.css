@@ -994,3 +994,78 @@ body {
   }
 }
 
+/* ---------- Documents ---------- */
+
+.jobs-panel__upload {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+}
+
+/*
+ * The real input is visually hidden but still focusable and still triggered by the
+ * label: a custom-styled button that is actually a <button> cannot open a file
+ * picker, and a display:none input is unreachable by keyboard.
+ */
+.jobs-panel__filebutton input[type="file"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.jobs-panel__filebutton {
+  cursor: pointer;
+}
+
+.jobs-panel__filebutton input[type="file"]:focus-visible + .button {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.jobs-panel__documents {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.document-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.document-list__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  font-size: 14px;
+}
+
+.document-list__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-list__meta {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}

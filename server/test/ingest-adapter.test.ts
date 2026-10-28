@@ -355,6 +355,9 @@ describe("the server proxy preserves what the codes mean", () => {
       ingest: options.configured
         ? new IngestClient({ baseUrl: host.baseUrl, timeoutMs: 2000 })
         : undefined,
+      // These tests cover the source-only path; document resolution has its own
+      // file, so the resolver is explicitly absent here.
+      documents: undefined,
     });
     const started = await router.listen(0, "127.0.0.1");
     const address = started.address() as AddressInfo;
@@ -486,6 +489,7 @@ describe("the server proxy preserves what the codes mean", () => {
       });
       registerIngestRoutes(busyRouter, {
         ingest: new IngestClient({ baseUrl: `http://127.0.0.1:${port}`, timeoutMs: 2000 }),
+      documents: undefined,
       });
       const started = await busyRouter.listen(0, "127.0.0.1");
       const busyBase = `http://127.0.0.1:${(started.address() as AddressInfo).port}`;
