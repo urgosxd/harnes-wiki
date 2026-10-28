@@ -258,7 +258,6 @@ function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
   return {
     stacks: [],
     stacksProblem: null,
-    stackFilterUnsupported: false,
     selectedStackId: null,
     selectStack: vi.fn(),
     observeStacks: vi.fn(),
@@ -361,40 +360,6 @@ describe("IngestJobsPanel", () => {
     // The list comes from the agent, so an empty one is not a bug and must not read
     // like one.
     expect(screen.getByText(/Ask the assistant to list the stacks/)).toBeDefined();
-  });
-
-  it("says the job list does not follow the picker, when it does not", () => {
-    // The guard that stops the UI attributing one stack's jobs to another. It is
-    // only shown when there is more than one stack to confuse.
-    render(
-      <IngestJobsPanel
-        ingest={fakeIngest({
-          stacks: [
-            { id: "s1", name: "Formation", isCurrent: true },
-            { id: "s2", name: "Wire", isCurrent: false },
-          ],
-          selectedStackId: "s2",
-          stackFilterUnsupported: true,
-        })}
-        onClose={() => {}}
-      />,
-    );
-    expect(screen.getByRole("status").textContent).toMatch(/own stack, not the\s+selection/);
-  });
-
-  it("does not warn about the picker when there is only one stack", () => {
-    // With one stack there is nothing to misattribute, so a warning would be noise.
-    render(
-      <IngestJobsPanel
-        ingest={fakeIngest({
-          stacks: [{ id: "s1", name: "Formation", isCurrent: true }],
-          selectedStackId: "s1",
-          stackFilterUnsupported: true,
-        })}
-        onClose={() => {}}
-      />,
-    );
-    expect(screen.queryByRole("status")).toBeNull();
   });
 
   it("shows a stack-list problem as a failure, not as an empty list", () => {

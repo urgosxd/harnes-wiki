@@ -110,13 +110,13 @@ export class IngestClient {
   }
 
   /** Read one job snapshot. 404 (unknown id) and 503 (no tracking) are distinct. */
-  async getJob(id: string): Promise<UpstreamResponse> {
-    return this.request("GET", `/api/ingest/jobs/${encodeURIComponent(id)}`);
+  async getJob(id: string, stackId?: string): Promise<UpstreamResponse> {
+    return this.request("GET", `/api/ingest/jobs/${encodeURIComponent(id)}${stackQuery(stackId)}`);
   }
 
   /** Read every retained job, newest first, as the service orders them. */
-  async listJobs(): Promise<UpstreamResponse> {
-    return this.request("GET", "/api/ingest/jobs");
+  async listJobs(stackId?: string): Promise<UpstreamResponse> {
+    return this.request("GET", `/api/ingest/jobs${stackQuery(stackId)}`);
   }
 
   private async request(method: string, path: string, body?: unknown): Promise<UpstreamResponse> {
@@ -152,6 +152,18 @@ export class IngestClient {
 
     return { status: response.status, body: await parseBody(response) };
   }
+}
+
+/**
+ * The `?stackId=` suffix, or nothing.
+ *
+ * Absent must stay absent rather than becoming an empty parameter: an empty value
+ * would be sent as a Stack named `""`, and the service would have to guess whether
+ * that means "the bound one" or "a Stack with no id".
+ */
+function stackQuery(stackId: string | undefined): string {
+  const trimmed = stackId?.trim();
+  return trimmed ? `?stackId=${encodeURIComponent(trimmed)}` : "";
 }
 
 async function parseBody(response: Response): Promise<unknown> {

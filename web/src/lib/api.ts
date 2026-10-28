@@ -237,13 +237,16 @@ export class ApiClient {
     });
   }
 
-  async listIngestJobs(): Promise<IngestJob[]> {
-    const body = await this.json<{ jobs?: IngestJob[] }>("GET", "/ingest/jobs");
+  async listIngestJobs(stackId?: string): Promise<IngestJob[]> {
+    const body = await this.json<{ jobs?: IngestJob[] }>("GET", `/ingest/jobs${stackQuery(stackId)}`);
     return body.jobs ?? [];
   }
 
-  async getIngestJob(id: string): Promise<IngestJob> {
-    return this.json<IngestJob>("GET", `/ingest/jobs/${encodeURIComponent(id)}`);
+  async getIngestJob(id: string, stackId?: string): Promise<IngestJob> {
+    return this.json<IngestJob>(
+      "GET",
+      `/ingest/jobs/${encodeURIComponent(id)}${stackQuery(stackId)}`,
+    );
   }
 
   /**
@@ -256,6 +259,8 @@ export class ApiClient {
     id: string,
     options: {
       onUpdate: (job: IngestJob) => void;
+      /** Which Stack to read, when it is not the endpoint's own. */
+      stackId?: string;
       signal?: AbortSignal;
       fetchImpl?: typeof fetch;
       sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -263,6 +268,7 @@ export class ApiClient {
   ): Promise<PollOutcome> {
     return pollJob(id, {
       baseUrl: this.baseUrl,
+      ...(options.stackId ? { stackId: options.stackId } : {}),
       headers: this.headers,
       onUpdate: options.onUpdate,
       // The client's own transport, so a poll goes wherever every other call
@@ -352,6 +358,12 @@ export function newIdempotencyKey(): string {
   const random = globalThis.crypto?.randomUUID?.();
   if (random) return random;
   return `k-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** `?stackId=` or nothing: an empty value would name a Stack called "". */
+function stackQuery(stackId: string | undefined): string {
+  const trimmed = stackId?.trim();
+  return trimmed ? `?stackId=${encodeURIComponent(trimmed)}` : "";
 }
 
 /** Derive a conversation title from its first message, as chat products do. */

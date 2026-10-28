@@ -290,6 +290,8 @@ export interface PollOutcome {
 
 export interface PollOptions {
   baseUrl?: string;
+  /** Which Stack to read. Absent means the endpoint's own. */
+  stackId?: string;
   headers: () => Record<string, string>;
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
@@ -343,7 +345,9 @@ export async function pollJob(jobId: string, options: PollOptions): Promise<Poll
 
     let response: Response;
     try {
-      response = await doFetch(`${baseUrl}/ingest/jobs/${encodeURIComponent(jobId)}`, {
+      const stack = options.stackId?.trim();
+      const query = stack ? `?stackId=${encodeURIComponent(stack)}` : "";
+      response = await doFetch(`${baseUrl}/ingest/jobs/${encodeURIComponent(jobId)}${query}`, {
         headers: options.headers(),
         ...(options.signal ? { signal: options.signal } : {}),
       });

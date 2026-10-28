@@ -46,6 +46,19 @@ export interface DocumentResolver {
   urlFor(documentId: string, userId: string): Promise<string | undefined>;
 }
 
+/**
+ * The Stack a request names, taken from the query.
+ *
+ * Rails on the SERVER, not only in the browser: the service answers 404 for an
+ * unknown Stack and 400 for a malformed one, and both are useful signals the client
+ * shows directly. Reading the parameter here rather than forwarding a raw string
+ * means the same value cannot be dropped silently between the two hops.
+ */
+function stackIdFrom(url: URL): string | undefined {
+  const raw = url.searchParams.get("stackId")?.trim();
+  return raw ? raw : undefined;
+}
+
 export interface IngestRouteDeps {
   /**
    * `undefined` when this deployment consumes no ingest service. The routes still
@@ -144,7 +157,16 @@ export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): voi
       throw error;
     }
 
-    if (upstream.status === 200 || upstream.status === 404 || upstream.status === 503) {
+    // 400 travels too: the service answers it for a MALFORMED stack id, which is a
+    // caller mistake the UI must show as its own thing. Folding it into 502 would
+    // report a validation error as a deployment failure and send an operator
+    // looking at the wrong system.
+    if (
+      upstream.status === 200 ||
+      upstream.status === 400 ||
+      upstream.status === 404 ||
+      upstream.status === 503
+    ) {
       sendJson(res, upstream.status, upstream.body ?? {});
       return;
     }
@@ -231,11 +253,11 @@ export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): voi
   router.get("/ingest/jobs/:id", async (ctx) => {
     const id = ctx.params.id ?? "";
     if (id.trim() === "") throw new HttpError(404, "job_not_found", "no ingest job was named");
-    await forward(ctx.res, (c) => c.getJob(id));
+    await forward(ctx.res, (c) => c.getJob(id, stackIdFrom(ctx.url)));
   });
 
   /** Every retained job, newest first, exactly as the host orders them. */
   router.get("/ingest/jobs", async (ctx) => {
-    await forward(ctx.res, (c) => c.listJobs());
+    await forward(ctx.res, (c) => c.listJobs(stackIdFrom(ctx.url)));
   });
 }

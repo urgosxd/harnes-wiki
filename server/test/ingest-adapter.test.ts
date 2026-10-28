@@ -151,6 +151,13 @@ class FakeHost {
         return;
       }
       if (req.method === "GET" && path === "/api/ingest/jobs") {
+        // A scripted answer applies to the COLLECTION too: the service rejects a
+        // malformed `stackId` there, and a fake that could only script single-job
+        // reads would let that path go untested.
+        if (this.nextJobStatus !== undefined) {
+          send(this.nextJobStatus, this.nextJobBody);
+          return;
+        }
         if (!this.trackJobs) {
           send(503, { error: { code: "jobs_unavailable", message: "this host does not track ingest jobs" } });
           return;
@@ -432,6 +439,54 @@ describe("the server proxy preserves what the codes mean", () => {
     assert.equal(job.ingest.attempts.length, 2);
     assert.equal(job.ingest.attempts[1]?.endedAt, undefined);
     assert.equal(job.compile.progress, null, "null progress must survive the proxy");
+  });
+
+  test("stackId is forwarded on the list, so the browser can read another Stack", async () => {
+    const before = host.seen.length;
+    const res = await fetch(`${baseUrl}/ingest/jobs?stackId=aaaaaaaa-1111-2222-3333-444444444444`, {
+      headers,
+    });
+    assert.equal(res.status, 200);
+    const seen = host.seen.at(before);
+    assert.match(
+      seen?.url ?? "",
+      /stackId=aaaaaaaa-1111-2222-3333-444444444444/,
+      "the Stack must reach the service, not be dropped at the proxy",
+    );
+  });
+
+  test("an absent stackId sends NO query, keeping the bound-Stacks behaviour", async () => {
+    const before = host.seen.length;
+    await fetch(`${baseUrl}/ingest/jobs`, { headers });
+    const seen = host.seen.at(before);
+    // An empty `?stackId=` would name a Stack called ""; absence is the statement.
+    assert.doesNotMatch(seen?.url ?? "", /stackId/);
+  });
+
+  test("stackId is forwarded on a single job read too", async () => {
+    const before = host.seen.length;
+    await fetch(`${baseUrl}/ingest/jobs/ing_x?stackId=bbbbbbbb-1111-2222-3333-444444444444`, {
+      headers,
+    });
+    assert.match(host.seen.at(before)?.url ?? "", /stackId=bbbbbbbb-1111-2222-3333-444444444444/);
+  });
+
+  test("400 stays 400: a malformed Stack id is a caller mistake, not an outage", async () => {
+    host.nextJobStatus = 400;
+    host.nextJobBody = {
+      error: { code: "invalid_stack_id", message: "'nope' is not a Stack id." },
+    };
+    try {
+      const res = await fetch(`${baseUrl}/ingest/jobs?stackId=nope`, { headers });
+      // 502 would send an operator to look at the deployment for something the
+      // caller typed.
+      assert.equal(res.status, 400);
+      const body = (await res.json()) as { error?: { code?: string } };
+      assert.equal(body.error?.code, "invalid_stack_id");
+    } finally {
+      host.nextJobStatus = undefined;
+      host.nextJobBody = undefined;
+    }
   });
 
   test("404 stays 404: this host tracks jobs and never saw that id", async () => {
