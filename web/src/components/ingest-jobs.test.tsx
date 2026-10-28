@@ -260,6 +260,7 @@ function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
     stacksProblem: null,
     selectedStackId: null,
     selectStack: vi.fn(),
+    createTarget: { ok: true },
     observeStacks: vi.fn(),
     documents: [],
     uploading: false,

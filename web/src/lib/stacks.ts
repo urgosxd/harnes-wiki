@@ -85,3 +85,54 @@ export function parseStacksPayload(text: string): ParsedStacks {
 export function defaultStackId(stacks: readonly StackOption[]): string | null {
   return stacks.find((stack) => stack.isCurrent)?.id ?? null;
 }
+
+/**
+ * Whether a job started now would land in the Stack the picker shows.
+ *
+ * It would NOT, on the service as it stands: the write path binds its Stack once at
+ * startup from the host's own environment, and there is no parameter on it a caller
+ * can influence. Reads are Stack-scoped, writes are not. So a picker that offered
+ * upload into any Stack would be showing the user a choice that changes nothing.
+ *
+ * Three cases, and the middle one is the only happy path:
+ *
+ *  - Nothing selected: nothing is named, so the host uses its own Stack, which is
+ *    the same Stack the picker would default to. Allowed.
+ *  - The selected Stack is the one the service marks `isCurrent`: that IS the bound
+ *    Stack, so the choice and the destination agree. Allowed.
+ *  - Anything else, including "several Stacks but none marked current": the
+ *    destination cannot be made to match the selection, so it is refused with a
+ *    reason instead of silently creating the job somewhere else.
+ */
+export type CreateTargetCheck = { ok: true } | { ok: false; reason: string };
+
+export function checkCreateTarget(
+  stacks: readonly StackOption[],
+  selectedStackId: string | null,
+): CreateTargetCheck {
+  if (selectedStackId === null) return { ok: true };
+
+  const bound = stacks.find((stack) => stack.isCurrent);
+  if (bound?.id === selectedStackId) return { ok: true };
+
+  const selectedName = stacks.find((stack) => stack.id === selectedStackId)?.name;
+  const named = selectedName ? `"${selectedName}"` : "the selected Stack";
+
+  if (!bound) {
+    return {
+      ok: false,
+      reason:
+        `The ingest service did not say which Stack it is bound to, so new jobs ` +
+        `cannot be verified to land in ${named}. Select the Stack it reports as ` +
+        `bound, or none.`,
+    };
+  }
+
+  return {
+    ok: false,
+    reason:
+      `New jobs go to "${bound.name}", the Stack this endpoint is bound to — not ` +
+      `to ${named}. The service scopes READS by Stack but binds WRITES to its own, ` +
+      `so switch to "${bound.name}" to start an ingest there.`,
+  };
+}

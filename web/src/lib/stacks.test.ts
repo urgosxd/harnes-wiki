@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { defaultStackId, parseStacksPayload, type StackOption } from "./stacks.ts";
+import { checkCreateTarget, defaultStackId, parseStacksPayload, type StackOption } from "./stacks.ts";
 import { isChatFrame, parseChatFrame } from "./sse.ts";
 
 /**
@@ -120,5 +120,39 @@ describe("the tool_result frame", () => {
   it("still rejects a frame it does not understand", () => {
     // The reason the allowlist exists: a newer server must not crash an older client.
     expect(isChatFrame({ type: "something_new" })).toBe(false);
+  });
+});
+
+describe("checkCreateTarget", () => {
+  const bound = { id: "b8b8e801", name: "wire2", isCurrent: true };
+  const foreign = { id: "f2ae8fed", name: "Formation Stack", isCurrent: false };
+
+  it("allows nothing selected, because the host then uses its own Stack", () => {
+    expect(checkCreateTarget([bound, foreign], null)).toEqual({ ok: true });
+  });
+
+  it("allows the Stack the service marks as bound", () => {
+    expect(checkCreateTarget([bound, foreign], bound.id)).toEqual({ ok: true });
+  });
+
+  it("refuses a foreign Stack, and names both Stacks so the user can act", () => {
+    const result = checkCreateTarget([bound, foreign], foreign.id);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    // Naming both ends is what makes the refusal actionable: "not this one" alone
+    // leaves the user guessing where their upload would have gone.
+    expect(result.reason).toContain("Formation Stack");
+    expect(result.reason).toContain("wire2");
+  });
+
+  it("refuses when several Stacks exist but none is marked bound", () => {
+    // The dangerous case: with no `isCurrent` there is nothing proving where a write
+    // lands, so allowing it would be the silent mismatch again, just quieter.
+    const a = { id: "a", name: "A", isCurrent: false };
+    const b = { id: "b", name: "B", isCurrent: false };
+    const result = checkCreateTarget([a, b], a.id);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.reason).toMatch(/bound/i);
   });
 });

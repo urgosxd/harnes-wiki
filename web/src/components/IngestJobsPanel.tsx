@@ -97,6 +97,17 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
             Ask the assistant to list the stacks and they will appear here.
           </p>
         )}
+        {/*
+          The service scopes READS by Stack but binds WRITES to the one it started
+          with. So a foreign selection filters the list correctly and still sends a
+          new job to the bound Stack. Saying that here, next to the picker, is the
+          difference between a limitation and a lie.
+        */}
+        {!ingest.createTarget.ok && (
+          <p className="jobs-panel__notice jobs-panel__notice--warn" role="alert">
+            {ingest.createTarget.reason}
+          </p>
+        )}
       </section>
 
       <section className="jobs-panel__upload" aria-label="Upload a document">
@@ -136,6 +147,8 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
                 <button
                   type="button"
                   className="button button--small"
+                  disabled={!ingest.createTarget.ok}
+                  title={ingest.createTarget.ok ? undefined : ingest.createTarget.reason}
                   onClick={() => void ingest.ingestDocument(document.id, { compile })}
                 >
                   Ingest
@@ -176,7 +189,10 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
         <button
           type="submit"
           className="button button--primary"
-          disabled={ingest.starting || source.trim().length === 0}
+          disabled={
+            ingest.starting || source.trim().length === 0 || !ingest.createTarget.ok
+          }
+          title={ingest.createTarget.ok ? undefined : ingest.createTarget.reason}
         >
           {ingest.starting ? "Starting…" : "Start ingest"}
         </button>

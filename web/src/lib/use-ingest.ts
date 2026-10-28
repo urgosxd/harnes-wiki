@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiClient, ApiError, type UploadedDocument } from "./api.ts";
-import { defaultStackId, parseStacksPayload, type StackOption } from "./stacks.ts";
+import {
+  checkCreateTarget,
+  defaultStackId,
+  parseStacksPayload,
+  type CreateTargetCheck,
+  type StackOption,
+} from "./stacks.ts";
 import { pollJob, type IngestJob, type PollOutcome, type PollStopReason } from "./ingest.ts";
 
 /**
@@ -51,6 +57,14 @@ export interface UseIngestResult {
   /** The stack selected in the picker, or null when none was chosen. */
   selectedStackId: string | null;
   selectStack(id: string | null): void;
+  /**
+   * Whether a job started now would land in the Stack the picker shows.
+   *
+   * Exposed rather than enforced internally, so the panel can disable its controls
+   * AND say why. Silently refusing, or silently creating elsewhere, are the two ways
+   * this went wrong before.
+   */
+  createTarget: CreateTargetCheck;
   /** Feed a `list_stacks` payload from the agent's turn. */
   observeStacks(text: string, isError: boolean): void;
 
@@ -281,6 +295,7 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
     stacks,
     stacksProblem,
     selectedStackId,
+    createTarget: checkCreateTarget(stacks, selectedStackId),
     selectStack: setSelectedStackId,
     observeStacks,
     documents,
