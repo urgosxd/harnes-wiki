@@ -16,21 +16,14 @@ import { TurnService } from "./api/turn-service.ts";
 import { createRouter } from "./http/router.ts";
 import { createAuthenticator } from "./http/auth.ts";
 import { registerRoutes } from "./api/routes.ts";
+import { SYSTEM_PROMPT } from "./pi/system-prompt.ts";
 import { registerIngestRoutes } from "./api/ingest-routes.ts";
 import { registerDocumentRoutes, capabilityPath } from "./api/document-routes.ts";
 import { DocumentStore } from "./db/document-store.ts";
 import { IngestClient } from "./ingest/client.ts";
 import type { Model } from "@earendil-works/pi-ai";
 
-const SYSTEM_PROMPT = [
-  "You are a helpful assistant.",
-  "Answer clearly and concisely in the user's language.",
-  // Telling the model to hide its own capabilities made it answer "I can't do
-  // that" when asked what it could do. Say what it has, without exposing internals.
-  "You may have tools and skills available for reading files in your workspace and for business data.",
-  "When the user asks what you can do, describe your capabilities in plain language and try the tools available to you.",
-  "Never reveal tool names, internal identifiers, credentials or how you are implemented.",
-].join(" ");
+
 
 
 async function main(): Promise<void> {
