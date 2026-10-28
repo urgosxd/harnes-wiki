@@ -157,16 +157,17 @@ export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): voi
       throw error;
     }
 
-    // 400 travels too: the service answers it for a MALFORMED stack id, which is a
-    // caller mistake the UI must show as its own thing. Folding it into 502 would
-    // report a validation error as a deployment failure and send an operator
-    // looking at the wrong system.
-    if (
-      upstream.status === 200 ||
-      upstream.status === 400 ||
-      upstream.status === 404 ||
-      upstream.status === 503
-    ) {
+    // Every 4xx is the CALLER's answer and travels untouched. Plus 503, which is the
+    // service stating a fact about itself ("this host does not track jobs") rather
+    // than failing on this call — folding it into 502 would hide a configuration
+    // truth behind a transient-looking error.
+    //
+    // The rule rather than an enumeration is the point: a proxy that passes only the
+    // codes someone thought of silently rewrites the next one the service adds. That
+    // already happened here — 400 for a malformed Stack id was reported as 502,
+    // turning a caller's typo into a deployment outage. 401, 429 or a future 4xx
+    // would have gone the same way.
+    if (upstream.status < 500 || upstream.status === 503) {
       sendJson(res, upstream.status, upstream.body ?? {});
       return;
     }
@@ -232,18 +233,10 @@ export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): voi
       sendJson(ctx.res, 202, upstream.body ?? {});
       return;
     }
-    // `409 busy` is the one-ingest-at-a-time lock. It is a retry signal and must
-    // reach the client as itself, not as a generic failure.
-    if (upstream.status === 409) {
-      sendJson(ctx.res, 409, upstream.body ?? { error: "busy" });
-      return;
-    }
-    if (upstream.status === 400) {
-      sendJson(ctx.res, 400, upstream.body ?? { error: "invalid_source" });
-      return;
-    }
-    if (upstream.status === 503) {
-      sendJson(ctx.res, 503, upstream.body ?? { error: "jobs_unavailable" });
+    // Same rule as the reads, and it is what keeps `409 busy` a retry signal: the
+    // one-ingest-at-a-time lock is an answer to the CALLER, not a service failure.
+    if (upstream.status < 500 || upstream.status === 503) {
+      sendJson(ctx.res, upstream.status, upstream.body ?? {});
       return;
     }
     throw new HttpError(502, "ingest_service_error", `the ingest service answered ${upstream.status}`);

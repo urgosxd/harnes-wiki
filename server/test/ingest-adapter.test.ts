@@ -508,18 +508,51 @@ describe("the server proxy preserves what the codes mean", () => {
     }
   });
 
-  test("a 403 from the service is a deployment fault, reported as 502", async () => {
+  test("a 403 travels as 403: a 4xx is the caller's answer, not a service failure", async () => {
+    // This test previously asserted 502, which was WRONG and is worth recording:
+    // the service answers 403 when its request-header policy rejects this server,
+    // and rewriting that into 502 reported a deployment misconfiguration as a
+    // transient upstream error. Only a 5xx (other than 503) is the service failing
+    // at this call.
     host.nextJobStatus = 403;
     host.nextJobBody = { error: { code: "forbidden", message: "rejected by origin policy" } };
     try {
       const res = await fetch(`${baseUrl}/ingest/jobs/ing_x`, { headers });
+      assert.equal(res.status, 403);
+      const body = (await res.json()) as { error?: { code?: string } };
+      // The service's own code arrives unchanged, so a client can branch on it.
+      assert.equal(body.error?.code, "forbidden");
+    } finally {
+      host.nextJobStatus = undefined;
+      host.nextJobBody = undefined;
+    }
+  });
+
+  test("an unscripted 4xx also passes, without being enumerated", async () => {
+    // The rule, not a list: a code nobody thought of must still reach the caller.
+    // 429 is not handled anywhere in this proxy and must simply travel.
+    host.nextJobStatus = 429;
+    host.nextJobBody = { error: { code: "rate_limited", message: "slow down" } };
+    try {
+      const res = await fetch(`${baseUrl}/ingest/jobs/ing_x`, { headers });
+      assert.equal(res.status, 429);
+      const body = (await res.json()) as { error?: { code?: string } };
+      assert.equal(body.error?.code, "rate_limited");
+    } finally {
+      host.nextJobStatus = undefined;
+      host.nextJobBody = undefined;
+    }
+  });
+
+  test("a genuine 5xx is the service failing, so it stays 502", async () => {
+    // The other half of the rule: 500 IS the service failing at this call.
+    host.nextJobStatus = 500;
+    host.nextJobBody = { error: { code: "internal_error", message: "boom" } };
+    try {
+      const res = await fetch(`${baseUrl}/ingest/jobs/ing_x`, { headers });
       assert.equal(res.status, 502);
-      const body = (await res.json()) as { error?: string; message?: string };
+      const body = (await res.json()) as { error?: string };
       assert.equal(body.error, "ingest_service_error");
-      // The message may name OUR setting, but must never prescribe how to run the
-      // other service: that knowledge is not this repository's to hold.
-      assert.match(body.message ?? "", /INGEST_API_BASE_URL/);
-      assert.doesNotMatch(body.message ?? "", /--host|--allow-lan|llmwiki/);
     } finally {
       host.nextJobStatus = undefined;
       host.nextJobBody = undefined;
