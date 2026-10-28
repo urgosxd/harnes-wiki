@@ -165,6 +165,46 @@ describe("IngestJobView: progress is never invented", () => {
     expect(screen.queryByTestId("progress-exact")).toBeNull();
   });
 
+  it("does not paint a never-started compile as success", () => {
+    // `skipped` is green in the tone map, and usually it deserves to be. But a compile
+    // that never ran because the ingest failed is not a success, and the status word
+    // alone cannot tell the two apart — only the ingestion outcome can. A green badge
+    // directly above "the compile never started" is the same defect as the spinner, in
+    // the colour channel.
+    const { container } = render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "failed", attempts: [] },
+          compile: { status: "skipped", progress: null },
+        })}
+      />,
+    );
+
+    const compileBadge = container.querySelector(
+      '[data-testid="dimension-compile"] .badge',
+    ) as HTMLElement | null;
+    expect(compileBadge).not.toBeNull();
+    expect(compileBadge?.className).not.toMatch(/badge--good/);
+  });
+
+  it("still paints a skipped-on-request compile as success", () => {
+    // The complement: declining to compile is a normal, complete outcome, so the tone
+    // must stay green. Only the failed-ingest case is recoloured.
+    const { container } = render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "succeeded", attempts: [] },
+          compile: { status: "skipped", progress: null },
+        })}
+      />,
+    );
+
+    const compileBadge = container.querySelector(
+      '[data-testid="dimension-compile"] .badge',
+    ) as HTMLElement | null;
+    expect(compileBadge?.className).toMatch(/badge--good/);
+  });
+
   it("shows the exact pair when the stage knows its total", () => {
     render(
       <IngestJobView

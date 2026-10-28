@@ -71,7 +71,18 @@ export function IngestJobView({ job }: IngestJobViewProps) {
         >
           <h3 className="dimension__title">
             Compile
-            <StatusBadge status={job.compile.status} settled={isCompileSettled(job.compile)} />
+            {/*
+              `skipped` reads as success in the tone map, and usually it is. But a
+              compile that never started because the ingest failed is not a success,
+              and nothing about the status word says which one this is — only the
+              ingestion outcome does. Colour is a second channel saying "fine", so
+              leaving it green would contradict the words directly beneath it.
+            */}
+            <StatusBadge
+              status={job.compile.status}
+              settled={isCompileSettled(job.compile)}
+              tone={blockedCompile ? "idle" : undefined}
+            />
           </h3>
           <StageRow stage={job.compile.stage} />
           {/*
@@ -106,10 +117,19 @@ export function IngestJobView({ job }: IngestJobViewProps) {
   );
 }
 
-function StatusBadge({ status, settled }: { status: string; settled: boolean }) {
+function StatusBadge({
+  status,
+  settled,
+  tone,
+}: {
+  status: string;
+  settled: boolean;
+  /** Overrides the tone derived from the status alone, when the status is ambiguous. */
+  tone?: string | undefined;
+}) {
   return (
     <span
-      className={`badge badge--${badgeTone(status)}`}
+      className={`badge badge--${tone ?? badgeTone(status)}`}
       data-status={status}
       data-settled={settled ? "true" : "false"}
     >
