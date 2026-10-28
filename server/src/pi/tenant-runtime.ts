@@ -1,4 +1,4 @@
-import { McpClient, StdioTransport } from "@earendil-works/pi-mcp";
+import { McpClient, StdioTransport, StreamableHttpTransport } from "@earendil-works/pi-mcp";
 import {
   DefaultResourceLoader,
   ModelRuntime,
@@ -13,13 +13,33 @@ import { agentToolNames, createAgentTools, type AgentToolOptions } from "./agent
 import { Type } from "typebox";
 import type { ThinkingLevelName } from "../config.ts";
 
-/** One MCP server a tenant is allowed to reach. */
-export interface TenantMcpServer {
-  name: string;
-  command: string;
-  args: string[];
-  env?: Record<string, string>;
-}
+/**
+ * One MCP server a tenant is allowed to reach.
+ *
+ * Two transports, and the row states which: a `stdio` server is a process THIS
+ * container spawns, and an `http` server is one reachable at a URL — which is how
+ * an external service is consumed without its binary entering this image.
+ *
+ * The union is discriminated rather than a bag of optional fields so that a
+ * half-specified server is a type error here instead of a confusing connection
+ * failure at runtime.
+ */
+export type TenantMcpServer =
+  | {
+      transport?: "stdio";
+      name: string;
+      command: string;
+      args: string[];
+      env?: Record<string, string>;
+    }
+  | {
+      transport: "http";
+      name: string;
+      /** Streamable-HTTP endpoint, e.g. `http://host:4173/mcp`. */
+      url: string;
+      /** Sent on every request; some servers refuse the call without them. */
+      headers?: Record<string, string>;
+    };
 
 export type TenantToolScope = readonly string[];
 
@@ -156,13 +176,7 @@ export class TenantRuntime {
       for (const server of tenant.mcpServers) {
         if (!tenant.exposedMcpTools.length) break;
         const client = new McpClient({ name: "agentdocumentor", version: "0.1.0" });
-        await client.connect(
-          new StdioTransport({
-            command: server.command,
-            args: server.args,
-            env: { ...definedEnv(process.env), ...server.env },
-          }),
-        );
+        await client.connect(transportFor(server));
         const available = new Set((await client.listTools()).map((tool) => tool.name));
         const wanted = tenant.exposedMcpTools.filter((name) => available.has(name));
         tools.push(...proxyMcpTools(tenant.id, client, wanted));
@@ -206,6 +220,29 @@ export class TenantRuntime {
     await Promise.allSettled([...this.mcpConnections.values()].map((c) => c.client.close()));
     this.mcpConnections.clear();
   }
+}
+
+/**
+ * Build the transport a server row describes.
+ *
+ * Kept in one place so the two transports cannot drift: the stdio branch spawns a
+ * child process, the http branch talks to a URL, and nothing else in this file has
+ * to care which.
+ */
+function transportFor(server: TenantMcpServer): StdioTransport | StreamableHttpTransport {
+  if (server.transport === "http") {
+    return new StreamableHttpTransport({
+      url: server.url,
+      ...(server.headers && Object.keys(server.headers).length > 0
+        ? { headers: server.headers }
+        : {}),
+    });
+  }
+  return new StdioTransport({
+    command: server.command,
+    args: server.args,
+    env: { ...definedEnv(process.env), ...server.env },
+  });
 }
 
 /** StdioTransport takes a literal environment, so drop the unset variables. */

@@ -310,26 +310,48 @@ export class ConversationStore implements EntryStore {
   // Per-tenant configuration
   // ---------------------------------------------------------------------------
 
+  /**
+   * The MCP servers one tenant may reach, with the transport each one uses.
+   *
+   * `command` is null for an http server and `url` is null for a stdio one: the
+   * database constraint guarantees exactly one of them is present, so a caller that
+   * trusts `transport` cannot end up with a row it cannot connect.
+   */
   async listMcpServers(userId: string): Promise<
-    Array<{ serverName: string; command: string; args: string[]; env: Record<string, string>; exposedTools: string[] }>
+    Array<{
+      serverName: string;
+      transport: "stdio" | "http";
+      command: string | null;
+      args: string[];
+      env: Record<string, string>;
+      url: string | null;
+      headers: Record<string, string>;
+      exposedTools: string[];
+    }>
   > {
     const rows = await this.db.query<{
       server_name: string;
-      command: string;
+      transport: "stdio" | "http";
+      command: string | null;
       args: string[];
       env: Record<string, string>;
+      url: string | null;
+      headers: Record<string, string>;
       exposed_tools: string[];
     }>(
-      `SELECT server_name, command, args, env, exposed_tools
+      `SELECT server_name, transport, command, args, env, url, headers, exposed_tools
          FROM tenant_mcp WHERE user_id = $1 AND enabled = true
         ORDER BY server_name`,
       [userId],
     );
     return rows.map((row) => ({
       serverName: row.server_name,
+      transport: row.transport,
       command: row.command,
       args: row.args,
       env: row.env,
+      url: row.url,
+      headers: row.headers,
       exposedTools: row.exposed_tools,
     }));
   }

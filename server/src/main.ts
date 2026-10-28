@@ -100,12 +100,25 @@ async function main(): Promise<void> {
       const scopes = await store.listScopes(userId);
       const tenant: TenantDefinition = {
         id: userId,
-        mcpServers: servers.map((server) => ({
-          name: server.serverName,
-          command: server.command,
-          args: server.args,
-          env: server.env,
-        })),
+        // The transport decides what a row needs, so the mapping branches instead
+        // of inventing an empty command for an http server. The database
+        // constraint already guarantees the field that matters is present.
+        mcpServers: servers.map((server) =>
+          server.transport === "http"
+            ? {
+                transport: "http" as const,
+                name: server.serverName,
+                url: server.url ?? "",
+                ...(Object.keys(server.headers).length > 0 ? { headers: server.headers } : {}),
+              }
+            : {
+                transport: "stdio" as const,
+                name: server.serverName,
+                command: server.command ?? "",
+                args: server.args,
+                env: server.env,
+              },
+        ),
         exposedMcpTools: servers.flatMap((server) => server.exposedTools),
         scopes,
       };

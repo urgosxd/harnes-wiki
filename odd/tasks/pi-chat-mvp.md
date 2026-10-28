@@ -125,14 +125,15 @@ Worked in order. Each task closes with at least one work-unit commit on
     `api/document-routes.ts`; UI in `IngestJobsPanel`.
   - Commit: `feat(documents): upload as a resource the ingest service can fetch`
 
-- [ ] T13. MCP access to the external ingest service
-  - The agent reaches it as MCP tools, through the existing per-user `tenant_mcp`
-    seam, NOT through provider-specific code in this repository.
-  - Decision taken: the service's binary does NOT go into this image. A
-    bridge translates HTTP -> MCP, so swapping or moving the service stays a
-    deployment change.
-  - Pending: bridge component, `tenant_mcp` provisioning, and the decision on
-    which tools the model may call.
+- [x] T13. MCP access to the external ingest service, over HTTP
+  - The agent reaches the service as MCP tools through the existing per-user
+    `tenant_mcp` seam. No provider-specific code, and no binary of it in this image.
+  - No bridge was needed: the service grew a streamable-HTTP MCP mount, and
+    `pi-mcp` already ships `StreamableHttpTransport`. A bridge would have been
+    plumbing between two things that can now talk directly.
+  - The seam gained a transport per row (`stdio` | `http`, plus `url`/`headers`),
+    with a database constraint so a half-filled row cannot be stored.
+  - Commit: `feat(mcp): reach an external MCP server over streamable HTTP`
 
 ## Acceptance checklist
 
@@ -553,3 +554,8 @@ Worked in order. Each task closes with at least one work-unit commit on
 | 2026-10-27 | T14 boundary | Transport risk, stated rather than hidden: the service's `fetchAndParse` is a bare `fetch(url)` with no private-address guard, so this design depends on it staying that way. That absence is the transport, which makes it fragile by definition. Mitigated by keeping resolution behind `DocumentResolver`, so a shared-volume strategy is an implementation swap and not a UI or contract change. |
 | 2026-10-27 | T14 note | Two self-inflicted defects caught by tests: the router's JSON limit would have rejected any real upload (fixed by a `bodyBytes(limit)` seam that raises the ceiling for ONE route instead of for all of them), and `ingestDocument` in the hook used declarations that appeared later, with an `eslint-disable` papering over the incomplete dependency list — reordered instead of silenced. |
 | 2026-10-27 | T14 | Tests: server `157 / 157 pass / 0 fail / 0 skipped`; web `118 passed / 0 failed`. |
+| 2026-10-28 | T13 verified | I did not take the contract on trust — three earlier claims from the same peer were wrong. Stood up the real `llmwiki host` with a real Postgres and probed it: `POST /mcp` 200, `initialize` answering SSE-framed (`event: message` then `data:`), `tools/list` returning exactly 14 tools including `ingest_job_status` and `ingest_jobs_list`, `406` without `Accept: ...text/event-stream`, `405` on DELETE, GET stream held open. Then `StreamableHttpTransport` from `pi-mcp` 1.4.0 connected, listed 14 tools and called `ingest_jobs_list` successfully from inside a container on the product network, and `TenantRuntime` mounted the two tools and executed one end to end. |
+| 2026-10-28 | T13 finding | The precondition matters and is real: the `/mcp` mount exists only when the host serves a project root (`host/server.ts:432`), because the tools operate on one. A host without a root emits no `/mcp` at all, so the adapter fails to connect rather than silently mounting zero tools — which is the correct failure, and worth knowing before configuring a row. |
+| 2026-10-28 | T13 note | `databaseReady()` in the test harness shells out to `docker inspect`, so it reports "needs Postgres" when the suite runs INSIDE a container, where the docker CLI does not exist. That silently skipped the constraint tests until I ran them against a Postgres published on loopback. A skip that looks like a pass is the same class of defect this project keeps writing tests against. |
+| 2026-10-28 | fix(ingest) | Polling a job whose owner died: the service now persists snapshots with a fire-and-forget mirror, so a process killed mid-job leaves a row frozen at a non-terminal state forever. Measured 897 requests against one frozen snapshot in 90 seconds before the fix. The poller now stops on `stalled`, which is deliberately not `settled` (it never finished), not `error` (no request failed) and not `unknown` (the job is known and stays on screen). |
+| 2026-10-28 | T13 | Tests: server `163 / 163 pass / 0 fail / 0 skipped`; web `121 passed / 0 failed`. |

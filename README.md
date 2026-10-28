@@ -394,3 +394,34 @@ them reintroduces a bug that was already observed.
 
 Implementation in progress. See `odd/tasks/pi-chat-mvp.md` for the task list, the
 acceptance checklist, and the evidence log.
+
+## Reaching an MCP server over HTTP
+
+The tenant MCP seam has two transports, and a `tenant_mcp` row states which it
+uses:
+
+| `transport` | Needs | Where the server runs |
+|---|---|---|
+| `stdio` (default) | `command`, `args`, `env` | A process this container spawns — an in-image binary |
+| `http` | `url`, optional `headers` | Anywhere reachable; nothing of it enters this image |
+
+`http` exists so an external MCP server can be consumed without shipping its
+binary here. The row's transport is checked by a database constraint, so a
+half-filled row cannot be stored: an `http` row without a `url` and a `stdio` row
+without a `command` are both refused at write time rather than failing later at
+connect time.
+
+```sql
+INSERT INTO tenant_mcp
+  (user_id, server_name, command, transport, url, headers, exposed_tools)
+VALUES
+  ('alice', 'wiki', '', 'http', 'http://host:4173/mcp',
+   '{"accept":"application/json, text/event-stream"}'::jsonb,
+   '["ingest_jobs_list","ingest_job_status"]'::jsonb);
+```
+
+`headers` is part of the row rather than of the code on purpose: a server that
+requires `Accept: application/json, text/event-stream` (streamable HTTP answers
+`406` without the event-stream half) is stating a deployment requirement, and
+injecting that from our build would impose one deployment's requirement on every
+other.
