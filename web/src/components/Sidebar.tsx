@@ -12,6 +12,8 @@ export interface SidebarProps {
   onNew(): void;
   onDelete(id: string): void;
   onClose(): void;
+  /** Opens the ingest-job status view. Absent in tests that only render the list. */
+  onOpenJobs?: (() => void) | undefined;
 }
 
 export function Sidebar({
@@ -25,6 +27,7 @@ export function Sidebar({
   onNew,
   onDelete,
   onClose,
+  onOpenJobs,
 }: SidebarProps) {
   return (
     <>
@@ -35,6 +38,11 @@ export function Sidebar({
           <button type="button" className="button button--primary" onClick={onNew}>
             New chat
           </button>
+          {onOpenJobs && (
+            <button type="button" className="button" onClick={onOpenJobs}>
+              Ingest jobs
+            </button>
+          )}
         </div>
 
         {error && (

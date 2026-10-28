@@ -99,6 +99,31 @@ Worked in order. Each task closes with at least one work-unit commit on
   - Restart and session-restore acceptance run documented and executed.
   - Commit: `feat(deploy): compose stack with health checks`
 
+- [x] T12. Ingest-job status UI for an external ingest service
+  - The service lives in ANOTHER repository and is deployed separately. This
+    project consumes its HTTP protocol only: no code, no dependency, and no
+    knowledge of how it is started, bound or migrated. The boundary is
+    `INGEST_API_BASE_URL`.
+  - `server/src/ingest/client.ts`: server-side adapter. Builds every call from the
+    configured origin and sends no browser `Host` or `Origin`.
+  - `server/src/api/ingest-routes.ts`: `POST /ingest/jobs`, `GET /ingest/jobs`,
+    `GET /ingest/jobs/:id`, forwarding the service's `200`/`404`/`503`/`409`
+    unchanged and turning a deployment fault into `502`.
+  - `web/src/lib/ingest.ts`: the protocol as the UI sees it — two dimensions,
+    `isJobSettled` requiring BOTH to be terminal, and a `250 ms -> 2 s` poller.
+  - `web/src/components/IngestJobView.tsx`: two columns, stage, attempts, and an
+    indeterminate indicator whenever `progress` is `null`.
+  - Commit: `feat(ingest): ingest job status UI for an external ingest service`
+
+- [ ] T13. MCP access to the external ingest service
+  - The agent reaches it as MCP tools, through the existing per-user `tenant_mcp`
+    seam, NOT through provider-specific code in this repository.
+  - Decision taken: the service's binary does NOT go into this image. A
+    bridge translates HTTP -> MCP, so swapping or moving the service stays a
+    deployment change.
+  - Pending: bridge component, `tenant_mcp` provisioning, and the decision on
+    which tools the model may call.
+
 ## Acceptance checklist
 
 - [x] Create a conversation and receive a streamed reply.
@@ -111,6 +136,12 @@ Worked in order. Each task closes with at least one work-unit commit on
 - [x] Two simultaneous runs on one session are prevented.
 - [x] Reconnecting does not duplicate messages.
 - [x] MCP and provider errors lose no saved history (a failed run is recorded as `error` and the transcript is untouched).
+- [x] An ingest job shows its two dimensions separately, and `compile.busy` is not a failure.
+- [x] `ingest.unchanged` is shown as unchanged, not as succeeded.
+- [x] A job is followed only until both dimensions are terminal, at 250 ms -> 2 s.
+- [x] `progress: null` renders an indeterminate indicator and the stage, never a percentage.
+- [x] Attempts are visible: in flight without `endedAt`, rolled back with `error`.
+- [x] `503` (host does not track jobs) and `404` (job expired) produce different messages.
 
 ## Evidence log
 
@@ -502,3 +533,8 @@ Worked in order. Each task closes with at least one work-unit commit on
 | 2026-10-25 | T3 finding | node's strip-only TypeScript rejects constructor parameter properties (`constructor(private db: T)`). Runtime limitation, not a type error: `tsc` accepts it and node fails with `ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`. Documented in README. |
 | 2026-10-25 | T2 chore | The harness safety policy blocked a `.env.example` file; variables live in `README.md` instead. |
 | 2026-10-25 | T1 note | `.env.example` is blocked by the harness safety policy (sensitive path). Variables are documented in `README.md` instead; no `.env` file exists in the repo. |
+| 2026-10-27 | T12 boundary | Correction, self-inflicted: the first version put the other service's operational knowledge in this repo — its launch flags, its bind constraints, its Postgres schema, its `AKS_STACK_ID`, its failure log path — in the README and in our error messages. A consumer that prescribes how a producer is started is a consumer that lies the moment the producer moves. Removed: the adapter now names the ROLE (`INGEST_API_BASE_URL`, `src/ingest/`), and the only messages name OUR setting. A test asserts the 403 message never contains `--host`, `--allow-lan` or the provider's name, so the leak cannot come back quietly. |
+| 2026-10-27 | T12 measured | Adapter proven against the service's published protocol with a fake that enforces the same header policy: accepted address -> `200`, a foreign `Host` -> `403`, `OPTIONS` -> `404`, foreign `Origin` -> `403`. End-to-end registration and reads verified over real HTTP through the server, including `404` (unknown id) and `502` (service down) staying distinct. |
+| 2026-10-27 | T12 finding | `Host` cannot be overridden from Node: `fetch(url, {headers:{host}})` still sends the URL's host. So "derive the address from the URL and forward nothing from the browser" is the only correct construction, not a style choice. |
+| 2026-10-27 | T12 note | Mutation checks: the poller scheduled one more sleep after an abort arrived mid-read (caught and fixed); the client's `pollIngestJob` silently fell back to global `fetch` instead of the injected transport (caught by the hook-level 503/404 tests). |
+| 2026-10-27 | T12 | Tests: server `141 / 141 pass / 0 fail / 0 skipped` (baseline `eff1585`: `121 / 121`); web `115 passed / 0 failed`. |

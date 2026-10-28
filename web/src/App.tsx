@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ApiClient, ApiError, type Identity } from "./lib/api.ts";
 import { useChat } from "./lib/use-chat.ts";
+import { useIngest } from "./lib/use-ingest.ts";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { ChatWindow } from "./components/ChatWindow.tsx";
 import { AuthGate } from "./components/AuthGate.tsx";
+import { IngestJobsPanel } from "./components/IngestJobsPanel.tsx";
 
 /**
  * Identity from the URL: `?user=alice&token=...`.
@@ -110,7 +112,18 @@ function ChatApp({ credentials }: { credentials: Credentials }) {
 
 function Chat({ identity, client }: { identity: Identity; client: ApiClient }) {
   const chat = useChat({ client });
+  // Built once here, not inside the panel: the poll loop must survive a switch to
+  // the chat tab and back, otherwise returning to the view would restart a poll
+  // for a job that is already being followed.
+  const ingest = useIngest({ client });
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [view, setView] = useState<"chat" | "jobs">("chat");
+
+  if (view === "jobs") {
+    return (
+      <IngestJobsPanel ingest={ingest} onClose={() => setView("chat")} />
+    );
+  }
 
   return (
     <div className="app">
@@ -131,6 +144,7 @@ function Chat({ identity, client }: { identity: Identity; client: ApiClient }) {
         }}
         onDelete={(id) => void chat.remove(id)}
         onClose={() => setSidebarOpen(false)}
+        onOpenJobs={() => setView("jobs")}
       />
 
       <ChatWindow

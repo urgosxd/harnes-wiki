@@ -12,6 +12,21 @@ export interface ToolsConfig {
   skills: boolean;
 }
 
+/**
+ * An external service this deployment consumes over HTTP.
+ *
+ * Deliberately named for the ROLE and not for any particular product: this file
+ * must not acquire knowledge about how the other service is built, started or
+ * configured. Swapping the implementation is then a configuration change, not a
+ * code change — which is the whole point of an adapter.
+ */
+export interface ExternalApiConfig {
+  /** Origin only, e.g. `http://host:4173`. Never a path. */
+  baseUrl: string;
+  /** Deadline for one read, in milliseconds. */
+  timeoutMs: number;
+}
+
 export interface Config {
   /** Empty in generate mode: the service writes its own Pi configuration. */
   agentDir: string;
@@ -21,6 +36,8 @@ export interface Config {
   modelId: string;
   thinkingLevel: ThinkingLevelName;
   databaseUrl: string | undefined;
+  /** `undefined` when this deployment consumes no external ingest service. */
+  ingestApi: ExternalApiConfig | undefined;
 }
 
 export type ThinkingLevelName = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -41,6 +58,57 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name]?.trim();
   if (!value) throw new ConfigError(`${name} is required`);
   return value;
+}
+
+/**
+ * Validate the address of the external ingest service.
+ *
+ * Only rules that hold for ANY http service are enforced here:
+ *
+ *  - it must be an absolute http(s) origin, because a path or query here would
+ *    silently change every request this adapter builds;
+ *  - it must not be `0.0.0.0`, which is a bind address rather than a destination:
+ *    no service accepts it as the `Host` of a request, so the failure would look
+ *    like an upstream bug instead of a configuration mistake.
+ *
+ * Nothing here encodes how the other service is built or started. If it moves, or
+ * is replaced, the fix belongs in the deployment's environment, not in this file.
+ */
+export function parseExternalApiConfig(
+  env: NodeJS.ProcessEnv,
+  options: { urlVar: string; timeoutVar: string; timeoutDefault?: number },
+): ExternalApiConfig | undefined {
+  const raw = env[options.urlVar]?.trim();
+  if (!raw) return undefined;
+
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ConfigError(`${options.urlVar} must be an absolute URL, got "${raw}"`);
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new ConfigError(`${options.urlVar} must be http or https, got "${url.protocol}"`);
+  }
+  if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+    throw new ConfigError(
+      `${options.urlVar} must be an origin with no path, query or fragment, got "${raw}"`,
+    );
+  }
+  if (url.hostname === "0.0.0.0") {
+    throw new ConfigError(
+      `${options.urlVar} must be a reachable address, not 0.0.0.0: that is a bind ` +
+        "address, so no service accepts it as a request host and every call would fail.",
+    );
+  }
+
+  const timeoutValue = env[options.timeoutVar]?.trim();
+  const timeoutMs = timeoutValue ? Number(timeoutValue) : (options.timeoutDefault ?? 10_000);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new ConfigError(`${options.timeoutVar} must be a positive number, got "${timeoutValue}"`);
+  }
+
+  return { baseUrl: `${url.protocol}//${url.host}`, timeoutMs };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -86,5 +154,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     modelId: required(env, "CHAT_MODEL"),
     thinkingLevel,
     databaseUrl: env.DATABASE_URL?.trim() || undefined,
+    ingestApi: parseExternalApiConfig(env, {
+      urlVar: "INGEST_API_BASE_URL",
+      timeoutVar: "INGEST_API_TIMEOUT_MS",
+    }),
   };
 }

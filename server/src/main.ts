@@ -16,6 +16,8 @@ import { TurnService } from "./api/turn-service.ts";
 import { createRouter } from "./http/router.ts";
 import { createAuthenticator } from "./http/auth.ts";
 import { registerRoutes } from "./api/routes.ts";
+import { registerIngestRoutes } from "./api/ingest-routes.ts";
+import { IngestClient } from "./ingest/client.ts";
 import type { Model } from "@earendil-works/pi-ai";
 
 const SYSTEM_PROMPT = [
@@ -163,6 +165,23 @@ async function main(): Promise<void> {
 
   const router = createRouter({ authenticate: authenticator });
   registerRoutes(router, { store, turns });
+
+  // The external ingest service is reached server-side only, because it validates
+  // its own request headers and cannot be called from the browser's origin. When no
+  // address is configured the routes still answer 503 with their own code, which
+  // tells the client "not configured" instead of "no such job".
+  const ingest = config.ingestApi
+    ? new IngestClient({ baseUrl: config.ingestApi.baseUrl, timeoutMs: config.ingestApi.timeoutMs })
+    : undefined;
+  registerIngestRoutes(router, { ingest });
+  if (config.ingestApi) {
+    log.info("ingest service adapter configured", {
+      baseUrl: config.ingestApi.baseUrl,
+      timeoutMs: config.ingestApi.timeoutMs,
+    });
+  } else {
+    log.warn("INGEST_API_BASE_URL is not set: ingest job routes will answer 503");
+  }
 
   const port = Number(process.env.PORT ?? 8080);
   const server = await router.listen(port, "0.0.0.0");

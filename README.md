@@ -35,6 +35,9 @@ request headers only, never from a body or query parameter.
 | `PATCH` | `/conversations/:id` | Rename |
 | `DELETE` | `/conversations/:id` | Archive |
 | `POST` | `/conversations/:id/turns` | Run a turn, streaming SSE |
+| `POST` | `/ingest/jobs` | Start an async ingest job; `202` with a job id |
+| `GET` | `/ingest/jobs` | Retained jobs, newest first |
+| `GET` | `/ingest/jobs/:id` | One job snapshot; the poller's only read |
 
 `POST /conversations/:id/turns` **requires** an `Idempotency-Key` header. Responses:
 
@@ -62,6 +65,8 @@ Never commit provider credentials.
 | `CHAT_MODEL` | Model id inside that provider. |
 | `CHAT_THINKING_LEVEL` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
 | `DATABASE_URL` | Postgres connection string. |
+| `INGEST_API_BASE_URL` | Origin of the external ingest service, e.g. `http://host:4173`. Empty answers `503 ingest_not_configured`. |
+| `INGEST_API_TIMEOUT_MS` | Deadline for one job read. Default `10000`. |
 
 `PI_AGENT_DIR` matters more than it looks: on many setups the provider key lives
 inline in `models.json` and `auth.json` is empty, so mounting only `auth.json`
@@ -109,6 +114,60 @@ ownership is already enforced in the data layer.
 
 The sidebar shows the signed-in account at the bottom, so a user can tell which
 link they opened.
+
+## Ingest jobs (external service)
+
+A status surface for a compilation pipeline that runs as an **external service**.
+That service lives in another repository and is deployed separately; this project
+consumes its HTTP protocol and owns nothing about how it is built, started or
+migrated.
+
+```
+browser -> web/nginx (/api/) -> server:8080 -> INGEST_API_BASE_URL
+```
+
+`nginx` proxies `/api/` to the server and strips the prefix, so the same path looks
+like `/api/ingest/jobs` to the browser and `/ingest/jobs` to the server.
+
+### The boundary
+
+1. **The browser never talks to the service.** It cannot: the service publishes no
+   CORS headers, answers no preflight, and requires its own request headers. It also
+   has no credential of its own, so exposing it would publish a project's ingest
+   surface to anyone who can reach the port.
+2. **Only the address is configured.** `INGEST_API_BASE_URL` is an origin
+   (`http://host:4173`). Nothing in this repository describes how the other service
+   is run — if it moves or is replaced by another implementation of the same
+   protocol, this is an environment change.
+3. **No browser header is forwarded.** The server builds each call from the
+   configured address and sends no `Host` or `Origin` of its own, which is what the
+   service's request policy requires.
+4. **A deployment fault is never shown as a job state.** An unreachable service or
+   a rejected request becomes `502` with the reason named; only the service's own
+   `200` / `404` / `503` / `409` reach the client unchanged.
+
+### What the view will not guess
+
+`ingest` and `compile` are independent state machines. A finished ingest with a
+`busy` compile is a normal state — the source is stored and only the compile needs
+a retry — so the view is two columns and never one status.
+
+| Protocol fact | How the view shows it |
+|---|---|
+| `unchanged` ≠ `succeeded` | Different words: "Unchanged" vs "Source saved" |
+| `busy` is not a failure | Warning tone plus "Only the compile needs a retry" |
+| A job ends only when **both** dimensions are terminal | The poller keeps going while either moves |
+| `progress` is `null` or an exact pair — never a percentage | Indeterminate sweep plus the stage name, or "3 of 8" |
+| `attempts[].endedAt` absent = in flight; `error` = rolled back | One row per attempt, marked in flight / rolled back / done |
+| `404` ≠ `503` | "This job is no longer known" (expired) vs "the service does not track jobs" |
+
+Polling backs off from 250 ms to 2 s and stops as soon as both dimensions settle;
+the service streams nothing. A `409 busy` is surfaced as a retry signal, not a
+failure.
+
+A source path is resolved on **the service's** filesystem, not in this container:
+a file that only exists here is not a valid source. Use a URL, or a path the
+service can see.
 
 ## Development
 

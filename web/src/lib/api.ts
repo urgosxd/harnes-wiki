@@ -1,4 +1,6 @@
 import { SseParser, parseChatFrame, type ChatFrame } from "./sse.ts";
+import { pollJob, type IngestJob, type IngestJobAccepted, type PollOutcome } from "./ingest.ts";
+
 
 export interface Identity {
   id: string;
@@ -162,6 +164,61 @@ export class ApiClient {
       // Releasing the reader on an aborted turn is what actually stops the stream.
       reader.releaseLock();
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Ingest jobs
+  // -------------------------------------------------------------------------
+
+  /**
+   * Start an async ingest and return the job identity.
+   *
+   * The server forces `async: true`, so this can never turn into a request that
+   * blocks for minutes. `compile: false` verifies the source without compiling.
+   */
+  async startIngest(source: string, options: { compile?: boolean } = {}): Promise<IngestJobAccepted> {
+    return this.json<IngestJobAccepted>("POST", "/ingest/jobs", {
+      source,
+      compile: options.compile !== false,
+    });
+  }
+
+  async listIngestJobs(): Promise<IngestJob[]> {
+    const body = await this.json<{ jobs?: IngestJob[] }>("GET", "/ingest/jobs");
+    return body.jobs ?? [];
+  }
+
+  async getIngestJob(id: string): Promise<IngestJob> {
+    return this.json<IngestJob>("GET", `/ingest/jobs/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * Follow a job until both dimensions settle.
+   *
+   * Stops are outcomes, not exceptions: a 503 (host without job tracking) and a
+   * 404 (job expired) are different facts and both are reported as such.
+   */
+  pollIngestJob(
+    id: string,
+    options: {
+      onUpdate: (job: IngestJob) => void;
+      signal?: AbortSignal;
+      fetchImpl?: typeof fetch;
+      sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+    },
+  ): Promise<PollOutcome> {
+    return pollJob(id, {
+      baseUrl: this.baseUrl,
+      headers: this.headers,
+      onUpdate: options.onUpdate,
+      // The client's own transport, so a poll goes wherever every other call
+      // goes. Falling back to global `fetch` here would silently bypass an
+      // injected transport and talk to a different origin than the rest of the
+      // client.
+      fetchImpl: options.fetchImpl ?? this.doFetch,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.sleep ? { sleep: options.sleep } : {}),
+    });
   }
 
   private async request(method: string, path: string, body?: unknown): Promise<Response> {

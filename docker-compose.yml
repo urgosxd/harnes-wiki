@@ -50,6 +50,14 @@ services:
       # Neutral workspace: Pi appends a <cwd> section to the system prompt.
       PI_WORKSPACE_DIR: /data/workspace
       DATABASE_URL: postgres://agentdocumentor:${POSTGRES_PASSWORD:-agentdocumentor}@postgres:5432/agentdocumentor
+      # An EXTERNAL ingest service, called server-side only (it validates its own
+      # request headers and offers no browser CORS). The service lives in another
+      # repository and is deployed separately: how it is started is not this
+      # project's concern, and this value must be the address it accepts.
+      # Empty means "not configured", and the ingest routes then answer 503
+      # instead of pretending to be fine.
+      INGEST_API_BASE_URL: ${INGEST_API_BASE_URL:-}
+      INGEST_API_TIMEOUT_MS: ${INGEST_API_TIMEOUT_MS:-10000}
       # Two users, each with their own secret: `id:token,id:token`. The token is
       # what identifies the caller, so holding bob's token does not let anyone act
       # as alice. Tokens must be at least 16 characters; the server refuses
