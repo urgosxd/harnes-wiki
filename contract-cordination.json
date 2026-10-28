@@ -1,0 +1,37 @@
+{
+  "_validator": "@local/orchestration (global package at ~/.agents/orchestration; contract stays per-repo)",
+  "_ratified": "human-ratified: ONE implementation role for this repository, in the primary checkout. This repository runs a single Pi session (AgentDocumentor), so declaring web/ and server/ as separate roles would name agents that do not exist and split one feature across a boundary neither side owns. The role is unrestrictedWrite because this repository is a CONSUMER of an external interface -- llm-wiki-compiler's HTTP ingest job contract, documented at /home/urgosxd/Desktop/ofk/llm-wiki-compiler/docs/guides/http-ingest-jobs.mdx -- and its coordinator must be able to record interface decisions and repair infrastructure. llm-wiki-compiler is a SEPARATE repository and is deliberately not declared here: this contract governs writes inside AgentDocumentor only. Splitting into web/ and server/ roles later is a data edit, and it must create the worktrees in the same change or the full validation rejects it.",
+  "version": 1,
+  "sharedPaths": [
+    ".fallowrc.json",
+    ".github/**",
+    "AGENTS.md",
+    "ARCHITECTURE.md",
+    "CHANGELOG.md",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+    "README.md",
+    "contract-cordination.json",
+    "docker-compose.yml",
+    "docs/**",
+    "odd/**",
+    "package-lock.json",
+    "package.json",
+    "scripts/**",
+    "tsconfig*.json"
+  ],
+  "roles": {
+    "agentdocumentor-main": {
+      "module": "coordination-and-integration",
+      "worktree": "",
+      "unrestrictedWrite": true,
+      "ownedPaths": [
+        "**"
+      ],
+      "forbiddenPaths": [
+        ".git/**",
+        "../**"
+      ]
+    }
+  }
+}
