@@ -245,9 +245,19 @@ export function isUnchanged(previous: IngestJob | undefined, snapshot: IngestJob
 /**
  * Leading 404s tolerated before a job is called unknown.
  *
- * Three reads at 250/500/1000 ms is the mirror's realistic landing window; beyond
- * that a 404 is the truth. Bounded on purpose: an unbounded tolerance would make an
- * expired job look like a slow one forever.
+ * Three reads at 250/500/1000 ms; beyond that a 404 is the truth. Bounded on
+ * purpose: an unbounded tolerance would make an expired job look like a slow one
+ * forever.
+ *
+ * MEASURED on a live host: the fire-and-forget mirror lands in 71-72 ms (three runs),
+ * so the first read at 250 ms already sees it. This tolerance is headroom against a
+ * loaded host, not the normal path.
+ *
+ * ONE BOUNDARY WORTH KNOWING: for a Stack that is NOT the endpoint's bound one, the
+ * service serves durable rows only — its live registry is stack-agnostic and merging
+ * it would attribute this host's jobs to another Stack. So nothing bridges the gap
+ * and this tolerance IS the whole wait. A foreign-Stack job that appears late is that
+ * fact showing through, not a bug: another process's memory cannot be read from here.
  */
 export const MISSING_TOLERANCE = 3;
 
