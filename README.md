@@ -21,18 +21,19 @@ odd/tasks/      Feature plan and evidence for the current work
 
 ## API
 
-Every request needs an identity, and the token is the whole of it. The server
-refuses everything unless `CHAT_USERS` declares a roster, and then accepts
-`x-dev-token: <token>`; `x-user-id` is optional and must AGREE with the token when
-sent. The user id is read from the request headers only, never from a body or
-query parameter.
+Every request must name a caller, and by default the name is all there is: the
+server accepts `x-user-id: <name>` and treats it as the identity. Nothing verifies
+it. See **Identity: the name in the link** below for what that means and for the
+`AUTH_MODE` that restores per-user tokens.
 
 ```bash
-curl -H "x-dev-token: $TOKEN" http://127.0.0.1:8088/api/me   # 200 {"id":"alice",...}
+curl -H "x-user-id: alice" http://127.0.0.1:8088/api/me   # 200 {"id":"alice",...}
 ```
 
-A header sent with an EMPTY value is refused (`401`), while an absent header is
-fine — so clients omit `x-user-id` rather than send it blank.
+A request with no `x-user-id`, or with one that is empty or malformed, is `401`. The
+id is read from the request headers only, never from a body or query parameter.
+Under `AUTH_MODE=roster`, `x-dev-token` is what identifies the caller and a claimed
+`x-user-id` must agree with it.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -72,7 +73,8 @@ Never commit provider credentials.
 | Variable | Purpose |
 |---|---|
 | `PI_AGENT_DIR` | Pi agent directory holding `models.json` and, when needed, `auth.json`. Mounted read-only in containers. |
-| `CHAT_USERS` | The roster: `id:token,id:token`. This IS the user table; see **Users and tokens**. Empty means every request is refused. |
+| `AUTH_MODE` | `open` (default), `shared-token` or `roster`. Chooses how a caller is identified; see **Identity: the name in the link**. |
+| `CHAT_USERS` | `id:token,id:token`, only read when `AUTH_MODE=roster`. |
 | `CHAT_API_KEY` | Provider key. The container generates its own `models.json` from it and never carries it in the image. |
 | `POSTGRES_PASSWORD` | Database password. Applied on the volume's first `initdb` only; see the note below. |
 | `PI_WORKSPACE_DIR` | Neutral workspace handed to the session as `cwd`. Never a real project path. |
@@ -106,8 +108,10 @@ CHAT_API_KEY=sk-...
 # Database (secret). Applied only on the volume's first initdb.
 POSTGRES_PASSWORD=<48 hex chars>
 
-# The user roster. This is the whole user table.
-CHAT_USERS=ana:<24 hex>,luis:<24 hex>
+# How callers are identified. `open` = the name in the link, no secret.
+# Use `roster` (with CHAT_USERS) to require per-user tokens.
+AUTH_MODE=open
+# CHAT_USERS=ana:<24 hex>,luis:<24 hex>     # only read when AUTH_MODE=roster
 
 # External ingest service
 INGEST_API_BASE_URL=http://host.docker.internal:4240
@@ -130,103 +134,95 @@ Three notes that are easy to get wrong:
    `INGEST_API_BASE_URL` one this server can reach. A container IP changes when the
    network is recreated; prefer a hostname, or `extra_hosts:
    ["host.docker.internal:host-gateway"]` when the ingest service runs on the host.
-3. **Never set `DEV_AUTH_TOKEN`.** It is the retired shared-token scheme: one secret
-   for everyone, and the `user` id taken from whatever the client claims.
+3. **`AUTH_MODE=open` means no authentication.** Anyone who can reach the server can
+   act as any user by editing a URL. Only choose it where that is acceptable, and
+   have TLS plus network restrictions in front. `AUTH_MODE=roster` is the mode that
+   requires a secret per user.
 
-## Users and tokens
+## Identity: the name in the link
 
-There is no `users` table: the roster in `CHAT_USERS` **is** the user table, and a
-token is the identity. That makes each operation a one-line change plus a
-`docker compose up -d server` (no rebuild, no migration).
-
-**Add a user**
-
-```bash
-node -e 'console.log("ana:"+require("node:crypto").randomBytes(24).toString("hex"))'
-# add `ana:<token>` to CHAT_USERS, then:
-docker compose up -d server
-
-# give that user the wiki tools
-cd server && MCP_SERVER_URL=http://host.docker.internal:4240/mcp \
-  MCP_DEFAULT_STACK_ID=<stack uuid> DATABASE_URL=postgres://... \
-  node scripts/provision-mcp.mjs
-
-# verify the link before sending it
-curl -s -H "x-dev-token: <ana's token>" http://127.0.0.1:8088/api/me
-```
-
-Rules the server enforces at startup (`server/src/http/users.ts`): the id matches
-`[A-Za-z0-9._@-]{1,64}`, the token is **at least 16 characters**, and no id is
-declared twice.
-
-**Rotate a token**: replace that user's token in `CHAT_USERS` and restart the
-server. Conversations are **kept**, because `conversations.user_id` stores the id,
-not the token. The old link stops working; issue the new one.
-
-**Remove a user**: drop their `id:token` from the roster. Their conversations stay
-in the database (there is no foreign key to a roster that lives in the
-environment); delete them with SQL if that matters.
-
-**Deliver the link** over a private channel: the link is the credential.
-
-## Two users: how the link works
-
-The link carries the token, and optionally the name:
+**There is no authentication.** The `user` in the link IS the identity:
 
 ```
-http://localhost:8088/?token=<alice's token>
-http://localhost:8088/?user=alice&token=<alice's token>
+http://localhost:8088/?user=alice
 ```
 
-**The token identifies the caller, not the `user` parameter.** Each user has a
-secret of their own, configured once in `CHAT_USERS=id:token,id:token`.
-`scripts/up.sh` and `scripts/dev-env.sh` generate that file (`.chat-users`, mode
-0600, git-ignored) on first run and print both links.
+That is the whole access model, and the consequence has to be stated plainly:
 
-**Opening a link never asks for credentials.** There is no sign-in form: a token is
-the only credential this product has, so a form could ask for nothing the link does
-not already carry. The two paths that used to show one now explain themselves
-instead:
+- **Anybody who can reach the server can act as any user.** Change `user=alice` to
+  `user=bob` and you are bob.
+- **There is nothing to "validate" the name against.** With no secret, a check
+  would only confirm that a string looks like a name. Writing one would be a claim
+  of control where there is none.
+- **Conversations are still separated by `user_id` in the database.** Ownership is
+  enforced on every query; what is missing is any proof that the caller is entitled
+  to the id they claim.
+
+There is no `users` table and no roster to maintain. Any name matching
+`[A-Za-z0-9._@-]{1,64}` is accepted, and it becomes a `user_id` the first time it
+creates a conversation.
+
+**The link is not a secret.** Send it however you like; what it grants is the name
+it contains, and everyone can type that name themselves.
+
+### Modes
+
+`AUTH_MODE` selects the scheme, and the difference is only whether a claimed id can
+be checked against a secret:
+
+| `AUTH_MODE` | Identity comes from | Resists impersonation | Needs |
+|---|---|---|---|
+| `open` (default) | `x-user-id` alone | **No** | nothing |
+| `shared-token` | `x-dev-token` + `x-user-id` | No — one token for everyone | `DEV_AUTH_TOKEN` (≥1 char, shared) |
+| `roster` | `x-dev-token` resolved to a user | **Yes** | `CHAT_USERS=id:token,...` |
+
+With `AUTH_MODE=roster` each person gets a secret of their own, a claimed id that
+disagrees with the token is refused with `401`, and tokens shorter than 16
+characters are rejected at startup. That mode still works and is still tested; it is
+a configuration change, not a rewrite.
+
+A misspelled `AUTH_MODE` throws at startup instead of falling back to a weaker mode.
+With nothing configured at all, the server refuses every request: inference never
+falls forward into `open`.
+
+### Opening a link never asks for credentials
+
+There is no sign-in form on any path, because there is nothing to type that the link
+does not already carry.
 
 | URL | What the person sees |
 |---|---|
-| `?token=...` (with or without `user`) | The product, straight away |
-| No token | "This page needs your link", and nothing to type |
-| A rejected token | "This link is no longer valid — ask for a new one" |
-| Server down | "Cannot reach the server", never a credentials error |
+| `?user=alice` | The product, straight away |
+| No `user` | "This page needs a user in the link", and nothing to type |
+| A name the server refuses | "This link was not accepted" |
+| Server down | "Cannot reach the server", never an identity error |
 
-The name shown in the sidebar comes from `GET /me`, not from the URL, because the
-server resolves it from the token. The `user` parameter is a display hint that
-saves one round trip; it cannot be used to act as somebody else — a claimed id that
-disagrees with the token is refused.
+A token-only link (`?token=...`) is **not** an identity any more: with no roster a
+token names nobody, so it is treated as a link with no user. A link carrying both is
+still accepted, and the token is forwarded as `x-dev-token`, which is what keeps
+`AUTH_MODE=roster` and old links working.
 
-Why this matters, and why it was a bug before: with a single shared token, the
-`user` parameter was only a claim. Measured on the running stack, one user could
-open another's conversation with their own token and get **200 with the title
-visible**. Now:
+**Giving someone access** is just giving them the URL with their name. **Revoking**
+it is not possible without switching to `AUTH_MODE=roster`: a name has no secret to
+revoke.
 
-| Attempt | Before | Now |
-|---|---|---|
-| bob's token, claiming `user=alice` | `200`, title visible | `401` |
-| bob's token, `user=bob`, alice's conversation | `404` | `404` |
-| `/me` with a mismatched pair | n/a | `401` |
+### Giving a user the wiki tools
 
-Rules the server enforces:
+Tools are per `user_id`, so a name needs a `tenant_mcp` row before the agent can
+read anything:
 
-- A token that matches nobody is refused, whatever the `user` parameter says.
-- A token that matches one user but claims another id is refused.
-- The `user` parameter is optional: the token alone identifies the caller. It is
-  kept in the link so the interface can show whose account is open.
-- Tokens shorter than 16 characters are rejected at startup, because with two users
-  guessing is the whole attack.
+```bash
+cd server
+USERS=alice,bob \
+MCP_SERVER_URL=http://host.docker.internal:4240/mcp \
+MCP_DEFAULT_STACK_ID=<stack uuid> \
+DATABASE_URL=postgres://agentdocumentor:<pass>@127.0.0.1:5432/agentdocumentor \
+node scripts/provision-mcp.mjs            # --dry-run to preview
+```
 
-This is still not production authentication: it is a fixed local roster. Replacing
-it with a session cookie or a verified JWT means implementing the same
-`Authenticator` contract (`server/src/http/auth.ts`) and changing nothing else —
-ownership is already enforced in the data layer.
-
-The sidebar shows the signed-in account at the bottom, so a user can tell which
-link they opened.
+It is idempotent, and it does not create users — it grants tools to the names you
+list. A name that never appears there still opens the product; it simply has no
+tools.
 
 ## Ingest jobs (external service)
 
@@ -407,7 +403,11 @@ Installing Vite 8 fails on a peer conflict; do not paper over it with
 
 ## Acceptance: isolation and concurrency
 
-`server/test/isolation.test.ts` is the MVP's definition of done. It defaults to 2
+`server/test/isolation.test.ts` is the MVP's definition of done. It builds its
+server with an explicit shared token and sends a matching pair on every request, so
+it verifies **data-layer ownership under a test harness that does identify its
+callers** — not that the deployed mode can. See the note at the end of this section.
+ It defaults to 2
 users (`ISOLATION_USERS=5` for the full run) and nothing in it is specific to that
 number:
 
@@ -422,6 +422,15 @@ for read/write/rename/delete, sidebars never show another user's rows, two
 simultaneous turns on one conversation yield exactly one 200 and one 409, MCP
 connections are per tenant and do not grow with turns, each tenant's MCP tool runs
 against its own connection, and a business tool enforces only its tenant's scope.
+
+**What this file cannot tell you.** With the default `AUTH_MODE=open` there is no
+secret in the deployed product, so the isolation above is a property of the queries,
+not of the running system: `?user=alice` is alice for whoever holds the link. The
+suite is kept because the ownership predicates it exercises are still the thing that
+stops one *legitimate* user's data appearing in another's sidebar, and because
+removing it would make `AUTH_MODE=roster` unverifiable the day it is switched back
+on. `scripts/smoke.mjs` prints an explicit `SKIP` for the impersonation check, with
+that reason.
 
 Both properties were mutation-checked: removing the ownership predicate makes all
 seven tests fail, and rebuilding the tenant runtime per turn fails the process
@@ -516,14 +525,18 @@ acceptance checklist, and the evidence log.
 
 ```bash
 cd server
+USERS=alice,bob \
 MCP_SERVER_URL=http://172.17.0.1:4173/mcp \
+MCP_DEFAULT_STACK_ID=<stack uuid> \
 DATABASE_URL=postgres://... \
 node scripts/provision-mcp.mjs            # add --dry-run to preview
 ```
 
-It reads the roster from `CHAT_USERS` (or `.chat-users`), upserts one row per user,
-and is idempotent: running it twice is the same as running it once, and a corrected
-`MCP_SERVER_URL` replaces the old address instead of adding a second server.
+It takes the ids from `USERS` (or `CHAT_USERS=id:token,...`, or a legacy
+`.chat-users` file), upserts one row per user, and is idempotent: running it twice is
+the same as running it once, and a corrected `MCP_SERVER_URL` replaces the old
+address instead of adding a second server. It grants tools; it does not create
+users, because with `AUTH_MODE=open` a user is just a name.
 
 It exposes three tools — `list_stacks`, `ingest_jobs_list`, `ingest_job_status`.
 The other twelve the service offers are filesystem-scoped, and exposing them would
