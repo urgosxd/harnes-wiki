@@ -13,6 +13,12 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY src ./src
+# Operator scripts ship WITH the image, because they are the only supported way to
+# grant a user the external MCP tools and there is no source tree in production.
+# Measured consequence of leaving them out: `provision-mcp.mjs` could not be run in
+# a deployed stack at all — verified with `ls /app/scripts` on the published image,
+# which returned nothing.
+COPY scripts ./scripts
 COPY tsconfig.json ./
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
