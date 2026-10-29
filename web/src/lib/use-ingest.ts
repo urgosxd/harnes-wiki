@@ -230,7 +230,10 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
     async (id: string, options: { compile?: boolean } = {}) => {
       setPollNotice(null);
       try {
-        const accepted = await client.startIngestForDocument(id, options);
+        const accepted = await client.startIngestForDocument(id, {
+          ...options,
+          ...(selectedStackRef.current ? { stackId: selectedStackRef.current } : {}),
+        });
         follow(accepted.jobId);
       } catch (error) {
         setPollNotice(noticeFor(error));
@@ -248,7 +251,10 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
       setStarting(true);
       setPollNotice(null);
       try {
-        const accepted = await client.startIngest(trimmed, options);
+        const accepted = await client.startIngest(trimmed, {
+          ...options,
+          ...(selectedStackRef.current ? { stackId: selectedStackRef.current } : {}),
+        });
         // Both dimensions arrive with the 202, so the view has something true to
         // render before the first poll returns.
         setActiveJob({

@@ -189,10 +189,16 @@ export class ApiClient {
    * The server forces `async: true`, so this can never turn into a request that
    * blocks for minutes. `compile: false` verifies the source without compiling.
    */
-  async startIngest(source: string, options: { compile?: boolean } = {}): Promise<IngestJobAccepted> {
+  async startIngest(
+    source: string,
+    options: { compile?: boolean; stackId?: string | undefined } = {},
+  ): Promise<IngestJobAccepted> {
     return this.json<IngestJobAccepted>("POST", "/ingest/jobs", {
       source,
       compile: options.compile !== false,
+      // The Stack the job belongs to. Omitted means the endpoint's own, which this
+      // product no longer trusts as a default - see the picker guard in stacks.ts.
+      ...(options.stackId ? { stackId: options.stackId } : {}),
     });
   }
 
@@ -230,10 +236,14 @@ export class ApiClient {
   }
 
   /** Start an ingest for an uploaded document, by reference rather than by path. */
-  async startIngestForDocument(documentId: string, options: { compile?: boolean } = {}): Promise<IngestJobAccepted> {
+  async startIngestForDocument(
+    documentId: string,
+    options: { compile?: boolean; stackId?: string | undefined } = {},
+  ): Promise<IngestJobAccepted> {
     return this.json<IngestJobAccepted>("POST", "/ingest/jobs", {
       documentId,
       compile: options.compile !== false,
+      ...(options.stackId ? { stackId: options.stackId } : {}),
     });
   }
 
