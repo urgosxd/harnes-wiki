@@ -224,7 +224,82 @@ describe("IngestJobView: progress is never invented", () => {
     expect(counted.textContent).toContain("1 of 1");
   });
 
-  it("shows a single-batch stage as a count, not a bar at 100%", () => {
+  it("does not show a stage name on a succeeded compile", () => {
+    // Reported by the user with a real payload: status succeeded, stage embeddings.
+    // `stage` is where the run ENDED, not where it is, so rendering it unqualified on
+    // a finished job reads as "still embedding" and the user rightly called it a UI
+    // bug. A finished job reaches `final`; a failed one keeps its stage, because
+    // knowing it died in embeddings rather than extraction is the useful part.
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "succeeded", attempts: [] },
+          compile: {
+            status: "succeeded",
+            stage: "embeddings",
+            progress: null,
+            detail: { chunks: 2, requests: 2 },
+          },
+        })}
+      />,
+    );
+
+    const compile = screen.getByTestId("dimension-compile");
+    expect(compile.textContent).toContain("final");
+    expect(compile.textContent).not.toMatch(/embeddings/i);
+  });
+
+  it("keeps the stage on a failed compile, because where it died matters", () => {
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "succeeded", attempts: [] },
+          compile: { status: "failed", stage: "embeddings", progress: null },
+        })}
+      />,
+    );
+
+    const compile = screen.getByTestId("dimension-compile");
+    expect(compile.textContent).toMatch(/embeddings/i);
+  });
+
+  it("says a complete-looking count is still working, not frozen", () => {
+    // Reported by the user against a live job: stage embeddings, running, 109 of 109,
+    // and the panel showed nothing else - which reads as "=", a frozen job. The
+    // counters reach the total while the stage is still closing, because a batch lands
+    // atomically and the tail work has no counter. Without a word, a complete-looking
+    // pair on a RUNNING stage is indistinguishable from a stuck one.
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "succeeded", attempts: [] },
+          compile: { status: "running", stage: "embeddings", progress: { completed: 109, total: 109 } },
+        })}
+      />,
+    );
+
+    const counted = screen.getByTestId("progress-counted");
+    expect(counted.textContent).toContain("109 of 109");
+    expect(counted.textContent).toMatch(/still working/i);
+  });
+
+  it("does not claim work continues once a partial count is below the total", () => {
+    // The marker must be conditional: 3 of 4 is visibly mid-way, and adding "still
+    // working" there would be noise attached to a bar that already shows motion.
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "succeeded", attempts: [] },
+          compile: { status: "running", stage: "page_generation", progress: { completed: 3, total: 4 } },
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("progressbar")).toBeDefined();
+    expect(screen.getByTestId("dimension-compile").textContent).not.toMatch(/still working/i);
+  });
+
+  it("shows a single-batch stage as a count, not a bar at 100%", async () => {
     // The producer documents this: the provider answers a batch atomically, so with
     // the default batch size a whole stage jumps to N/N while still running. It is
     // correct upstream and must not be read as a stall - and equally must not be

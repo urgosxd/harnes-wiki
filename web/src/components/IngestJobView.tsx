@@ -54,7 +54,7 @@ export function IngestJobView({ job }: IngestJobViewProps) {
             Ingest
             <StatusBadge status={job.ingest.status} settled={isIngestSettled(job.ingest)} />
           </h3>
-          <StageRow stage={job.ingest.stage} />
+          <StageRow stage={job.ingest.stage} status={job.ingest.status} />
           {job.ingest.message && <p className="dimension__message">{job.ingest.message}</p>}
           {job.ingest.error && (
             <p className="dimension__error" role="alert">
@@ -84,7 +84,7 @@ export function IngestJobView({ job }: IngestJobViewProps) {
               tone={blockedCompile ? "idle" : undefined}
             />
           </h3>
-          <StageRow stage={job.compile.stage} />
+          <StageRow stage={job.compile.stage} status={job.compile.status} />
           {/*
             No progress indicator when the compile can never start: an animated
             indeterminate bar reads as "working", and the ingest that feeds this stage
@@ -161,13 +161,33 @@ function badgeTone(status: string): string {
   return "idle";
 }
 
-function StageRow({ stage }: { stage: string | undefined }) {
+/**
+ * Where the work is, or where it stopped.
+ *
+ * `stage` records the last stage the run reached, and on a SETTLED job it is a
+ * residue: `status: succeeded` with `stage: embeddings` does not mean "still
+ * embedding", it means "finished, and embeddings was the last thing it touched".
+ * Rendering it unqualified on a finished job reads as "it is in embeddings now" -
+ * reported by the user as a UI bug on a compile that had already succeeded.
+ *
+ * So a finished job says `final`, not a step name. The stage still matters while the
+ * run is live, and it still matters after a FAILURE - knowing it died in embeddings
+ * rather than extraction is the useful part - so only `succeeded` is relabelled.
+ */
+function StageRow({
+  stage,
+  status,
+}: {
+  stage: string | undefined;
+  status: string;
+}) {
+  const finished = status === "succeeded";
   return (
     <p className="dimension__stage">
-      <span className="dimension__stage-label">Stage</span>
+      <span className="dimension__stage-label">{finished ? "Reached" : "Stage"}</span>
       {/* Never blank: "waiting" is a statement, an empty row is a mystery. */}
       <span className="dimension__stage-value" data-testid="stage">
-        {stageLabel(stage)}
+        {finished ? "final" : stageLabel(stage)}
       </span>
     </p>
   );
@@ -236,11 +256,20 @@ function ProgressIndicator({ compile }: { compile: CompileDimension }) {
   //
   // The numbers stay either way. This withholds only the bar; the pair is real and is
   // still shown, so it is not the fabricated null this surface refuses.
+  //
+  // The trailing marker is what stops "109 of 109" reading as a frozen "=". The
+  // counters reach the total while the stage is still closing (a batch lands
+  // atomically, and the tail work - flush, index write, settle - has no counter of
+  // its own). Without a word saying it is still working, a complete-looking pair on a
+  // RUNNING stage reads as stuck, and the user rightly asks why nothing is happening.
   if (total <= 1 || completed >= total) {
     return (
       <div className="progress" data-testid="progress-counted">
         <p className="progress__label">
           {completed} of {total}
+          <span className="progress__pending" aria-live="polite">
+            {completed >= total ? " — still working" : ""}
+          </span>
         </p>
       </div>
     );
