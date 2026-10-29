@@ -192,6 +192,22 @@ function ProgressIndicator({ compile }: { compile: CompileDimension }) {
   }
 
   const { completed, total } = compile.progress;
+
+  // A single-source compile reports a true 0/1 -> 1/1. Both numbers are honest and
+  // must be shown, but a BAR reaching 100% while the stage is still running is worse
+  // than no bar at all: it says "finished" at the exact moment the user is waiting.
+  // The words stay - this is not a fabricated null, the pair is real - and only the
+  // bar is withheld, because a ratio of one has no width to communicate.
+  if (total <= 1) {
+    return (
+      <div className="progress" data-testid="progress-counted">
+        <p className="progress__label">
+          {completed} of {total}
+        </p>
+      </div>
+    );
+  }
+
   // Guard against a nonsensical pair rather than rendering 250%: a total of 0
   // cannot produce a width, so the bar is left empty and the numbers speak.
   const percent = total > 0 ? Math.min(100, Math.max(0, Math.round((completed / total) * 100))) : 0;

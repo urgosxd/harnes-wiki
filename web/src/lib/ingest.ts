@@ -95,6 +95,19 @@ export interface CompileDimension {
   startedAt?: string;
   endedAt?: string;
   progress: JobProgress | null;
+  /**
+   * Counts that do NOT fit in `progress`, when the producer publishes them.
+   *
+   * The embeddings stage embeds PAGES and, separately, CHUNKS of those pages - one
+   * page yields several chunks, so 93 pages produced 442 chunks. A single
+   * `{completed, total}` pair cannot carry both, and merging them into one number
+   * would be fabricated progress. So the ratio stays pages and anything else arrives
+   * here, where it informs without corrupting what the bar means.
+   *
+   * Optional because the producer does not emit it yet; absent means simply absent,
+   * never zero, so a renderer must not infer "no chunks" from a missing field.
+   */
+  detail?: { chunks?: number; requests?: number };
   message?: string;
   error?: string;
 }

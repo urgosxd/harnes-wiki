@@ -205,6 +205,41 @@ describe("IngestJobView: progress is never invented", () => {
     expect(compileBadge?.className).toMatch(/badge--good/);
   });
 
+  it("shows a single-source pair as a count, not a bar that reaches 100%", () => {
+    // The producer reports a true 0/1 -> 1/1 for a one-document compile. Both numbers
+    // are honest, so they stay. But a bar at 100% while the stage is STILL RUNNING
+    // says "finished" at the moment the user is waiting - worse than no bar. So the
+    // pair is rendered as words and the bar is withheld.
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "succeeded", attempts: [] },
+          compile: { status: "running", stage: "extraction", progress: { completed: 1, total: 1 } },
+        })}
+      />,
+    );
+
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    const counted = screen.getByTestId("progress-counted");
+    expect(counted.textContent).toContain("1 of 1");
+  });
+
+  it("still draws the bar once the total is worth drawing", () => {
+    // The complement: two or more is a ratio a bar can actually communicate.
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "succeeded", attempts: [] },
+          compile: { status: "running", stage: "extraction", progress: { completed: 7, total: 18 } },
+        })}
+      />,
+    );
+
+    const bar = screen.getByRole("progressbar");
+    expect(bar.getAttribute("aria-valuenow")).toBe("7");
+    expect(bar.getAttribute("aria-valuemax")).toBe("18");
+  });
+
   it("shows the exact pair when the stage knows its total", () => {
     render(
       <IngestJobView
@@ -234,9 +269,12 @@ describe("IngestJobView: progress is never invented", () => {
         })}
       />,
     );
-    // The pair is shown as it is; no division by zero produces NaN% or Infinity%.
+    // The pair is shown as it is, and no bar is drawn: a total of 0 has no width to
+    // communicate, and the previous behaviour - a 0%-wide bar - was a division guard
+    // dressed up as progress. Same rule as total<=1, so both share one branch.
     expect(screen.getByText("0 of 0")).toBeDefined();
-    expect(document.querySelector(".progress__fill")?.getAttribute("style")).toContain("width: 0%");
+    expect(document.querySelector(".progress__fill")).toBeNull();
+    expect(screen.queryByRole("progressbar")).toBeNull();
   });
 });
 
