@@ -37,6 +37,16 @@ export type TenantMcpServer =
       name: string;
       /** Streamable-HTTP endpoint, e.g. `http://host:4173/mcp`. */
       url: string;
+      /**
+       * Stack to name on EVERY call to this server.
+       *
+       * The tools take `stackId` optionally and omitting it inherits the host's
+       * binding. That default is not ours: on 2026-10-28 it moved to an empty Stack
+       * and the agent truthfully reported "0 pages" about a Stack the user had never
+       * heard of, while their real work sat in another one. Naming it explicitly
+       * turns a remote environment variable into a value this product chose.
+       */
+      defaultStackId?: string | null;
       /** Sent on every request; some servers refuse the call without them. */
       headers?: Record<string, string>;
     };
@@ -184,7 +194,14 @@ export class TenantRuntime {
         const available = await client.listTools();
         const byName = new Map(available.map((tool) => [tool.name, tool]));
         const wanted = tenant.exposedMcpTools.filter((name) => byName.has(name));
-        tools.push(...proxyMcpTools(tenant.id, client, wanted.map((name) => byName.get(name)!)));
+        tools.push(
+          ...proxyMcpTools(
+            tenant.id,
+            client,
+            wanted.map((name) => byName.get(name)!),
+            server.transport === "http" ? (server.defaultStackId ?? undefined) : undefined,
+          ),
+        );
         connections.set(server.name, { server, client, toolNames: wanted });
       }
     } catch (error) {
@@ -271,10 +288,11 @@ function toolName(tool: ToolDefinition): string {
  * resources are not exposed. A business chat wants plain callable tools, and this
  * keeps one process per server instead of one per session.
  */
-function proxyMcpTools(
+export function proxyMcpTools(
   tenantId: string,
   client: McpClient,
   tools: readonly { name: string; description?: string; inputSchema?: Record<string, unknown> }[],
+  defaultStackId?: string,
 ): ToolDefinition[] {
   return tools.map((tool) =>
     defineTool({
@@ -293,7 +311,15 @@ function proxyMcpTools(
           : { type: "object", properties: {}, additionalProperties: true },
       ),
       execute: async (_toolCallId: string, params: Record<string, unknown>) => {
-        const result = await client.callTool(tool.name, params ?? {});
+        // Name the Stack ourselves rather than inheriting the host's binding, and
+        // let an explicit argument win: a tool the schema says takes `stackId` may
+        // legitimately be pointed somewhere else, and silently overriding the
+        // caller would be the same class of lie in the other direction.
+        const args =
+          defaultStackId !== undefined && (params ?? {}).stackId === undefined
+            ? { ...(params ?? {}), stackId: defaultStackId }
+            : (params ?? {});
+        const result = await client.callTool(tool.name, args);
         const text = (result.content ?? [])
           .filter((block) => block.type === "text")
           .map((block) => ({ type: "text" as const, text: block.text }));

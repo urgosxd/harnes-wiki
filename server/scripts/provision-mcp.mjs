@@ -118,6 +118,25 @@ export const TOOLS = [...STACK_TOOLS, ...READ_ONLY_WIKI_TOOLS];
  */
 export const HEADERS = { accept: "application/json, text/event-stream" };
 
+/**
+ * The Stack every MCP call will name.
+ *
+ * Required on purpose. Leaving it unset means the agent inherits whatever Stack the
+ * remote host happens to be bound to, and that binding changed under us once already
+ * (2026-10-28: it moved to an empty Stack and the agent truthfully told the user their
+ * wiki had 0 pages). A product should not depend on another process's environment.
+ */
+export function requireDefaultStack(env = process.env) {
+  const value = (env.MCP_DEFAULT_STACK_ID ?? "").trim();
+  if (!value) {
+    throw new Error(
+      "MCP_DEFAULT_STACK_ID is required: the Stack the agent should read. " +
+        "Omitting it would make every call inherit the remote host's binding.",
+    );
+  }
+  return value;
+}
+
 async function main() {
   const dryRun = process.argv.includes("--dry-run");
   const url = process.env.MCP_SERVER_URL?.trim();
@@ -133,6 +152,7 @@ async function main() {
   if (!databaseUrl) throw new Error("DATABASE_URL is required.");
 
   const users = loadRoster();
+  const defaultStack = requireDefaultStack();
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
 
@@ -146,16 +166,18 @@ async function main() {
       // corrected address REPLACES the old row rather than adding a second server.
       await client.query(
         `INSERT INTO tenant_mcp
-           (user_id, server_name, command, transport, url, headers, exposed_tools, enabled)
-         VALUES ($1, 'wiki', '', 'http', $2, $3::jsonb, $4::jsonb, true)
+           (user_id, server_name, command, transport, url, headers, exposed_tools,
+            default_stack_id, enabled)
+         VALUES ($1, 'wiki', '', 'http', $2, $3::jsonb, $4::jsonb, $5, true)
          ON CONFLICT (user_id, server_name) DO UPDATE
            SET transport = 'http',
                command = '',
                url = excluded.url,
                headers = excluded.headers,
                exposed_tools = excluded.exposed_tools,
+               default_stack_id = excluded.default_stack_id,
                enabled = true`,
-        [userId, url, JSON.stringify(HEADERS), JSON.stringify(TOOLS)],
+        [userId, url, JSON.stringify(HEADERS), JSON.stringify(TOOLS), defaultStack],
       );
       process.stdout.write(`provisioned ${userId} -> ${url}\n`);
     }

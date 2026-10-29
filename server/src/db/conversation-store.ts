@@ -327,6 +327,8 @@ export class ConversationStore implements EntryStore {
       url: string | null;
       headers: Record<string, string>;
       exposedTools: string[];
+      /** Stack to name on every MCP call; null means "inherit the host default". */
+      defaultStackId: string | null;
     }>
   > {
     const rows = await this.db.query<{
@@ -338,8 +340,10 @@ export class ConversationStore implements EntryStore {
       url: string | null;
       headers: Record<string, string>;
       exposed_tools: string[];
+      default_stack_id: string | null;
     }>(
-      `SELECT server_name, transport, command, args, env, url, headers, exposed_tools
+      `SELECT server_name, transport, command, args, env, url, headers, exposed_tools,
+              default_stack_id
          FROM tenant_mcp WHERE user_id = $1 AND enabled = true
         ORDER BY server_name`,
       [userId],
@@ -353,6 +357,7 @@ export class ConversationStore implements EntryStore {
       url: row.url,
       headers: row.headers,
       exposedTools: row.exposed_tools,
+      defaultStackId: row.default_stack_id,
     }));
   }
 

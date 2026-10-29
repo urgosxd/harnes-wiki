@@ -15,9 +15,10 @@ test("the prompt does not forbid naming a capability the user can invoke", () =>
 
 test("the prompt still forbids the things that are genuinely private", () => {
   for (const forbidden of NEVER_REVEAL) {
+    const word = forbidden.split(" ")[0] ?? forbidden;
     assert.match(
       SYSTEM_PROMPT,
-      new RegExp(forbidden.split(" ")[0], "i"),
+      new RegExp(word, "i"),
       `the prompt should forbid revealing ${forbidden}`,
     );
   }
