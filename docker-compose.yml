@@ -67,7 +67,14 @@ services:
       # what identifies the caller, so holding bob's token does not let anyone act
       # as alice. Tokens must be at least 16 characters; the server refuses
       # anything shorter at startup.
-      CHAT_USERS: ${CHAT_USERS:?CHAT_USERS must be set, e.g. alice:token-alice-1234567890,bob:token-bob-1234567890}
+      #
+      # No `:?` here on purpose, for the same reason as CHAT_API_KEY above: Compose
+      # interpolates the whole file for EVERY command, so a required variable makes
+      # `docker compose ps`, `logs` and `down` fail on a machine that does not export
+      # it — including the machine trying to shut the stack down. The server already
+      # validates the roster at startup, where a fault belongs: an empty value means
+      # every request is refused, which is the safe direction.
+      CHAT_USERS: ${CHAT_USERS:-}
       # Capabilities the model gets. Invisible in the UI either way.
       # AGENT_BASH stays off by default: a shell cannot be confined to the
       # workspace, and the provider key lives one directory above it.
