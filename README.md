@@ -343,6 +343,60 @@ cd web    && npx vitest run && npx tsc --noEmit
 
 ## Production (containers)
 
+Two paths, and they no longer share one file. **Development builds from source;
+production consumes a published image.** Mixing them is how an arm64 host ends up
+recompiling instead of using the arm64 image that was actually tested.
+
+### Building and publishing both architectures
+
+```bash
+./scripts/build.sh 0.1.0                                  # local images only
+PUSH=1 REGISTRY=ghcr.io/your-user ./scripts/build.sh 0.1.0  # publish a manifest list
+```
+
+One tag holds `linux/amd64` **and** `linux/arm64`; the consuming host resolves its
+own architecture and knows nothing about this. `REGISTRY` has no default on purpose:
+a guessed namespace publishes images into somebody else's account. `VERSION` is
+required for the same reason a deployment must be able to name what it runs.
+
+Verified on this machine, not assumed:
+
+| Check | Result |
+|---|---|
+| Both images build for arm64 | `buildx --platform linux/arm64` succeeds for server and web |
+| The server runs natively on arm64 | `process.arch` = `arm64` under qemu, config and auth load |
+| The web bundle builds on arm64 | esbuild and rollup resolve their platform binaries |
+| No native bindings of our own | **zero** `.node` files mapped in the runtime |
+| Base images are multi-arch | `node:22.23.2-alpine`, `nginx:1.27-alpine`, `postgres:16-alpine` |
+| Same tag, two architectures | `docker run --platform linux/amd64` and `linux/arm64` both from `:0.1.0` |
+
+`--load` of a manifest list needs containerd's image store. On a daemon without it,
+either publish with `PUSH=1 REGISTRY=...`, or build one platform at a time with
+`PLATFORMS=linux/arm64 ./scripts/build.sh 0.1.0`. The script says this instead of
+failing halfway.
+
+### Running it
+
+```bash
+# local images (built above), no registry involved
+VERSION=0.1.0 docker compose -f docker-compose.prod.yml up -d
+
+# from a registry
+REGISTRY=ghcr.io/your-user VERSION=0.1.0 \
+  docker compose -f docker-compose.prod.yml pull
+REGISTRY=ghcr.io/your-user VERSION=0.1.0 \
+  docker compose -f docker-compose.prod.yml up -d
+```
+
+`docker-compose.prod.yml` has **no `build:` key at all**, so it cannot compile
+anything even by accident. It also requires `POSTGRES_PASSWORD` rather than
+defaulting it, and publishes only `127.0.0.1:8088` — a reverse proxy with TLS is
+what exposes it.
+
+### The development stack
+
+## Production (containers)
+
 ```bash
 ./scripts/up.sh          # builds, starts, waits for health, prints the URL
 ```
@@ -369,7 +423,10 @@ them; the file itself is never mounted.
 
 | | Development | Production |
 |---|---|---|
-| Command | `source scripts/dev-env.sh` + `npm start` | `./scripts/up.sh` |
+| Command | `source scripts/dev-env.sh` + `npm start` | `docker compose -f docker-compose.prod.yml up -d` |
+| Compose file | `docker-compose.yml` (`build:`) | `docker-compose.prod.yml` (`image:`) |
+| Where it builds | on this machine, from the source tree | nowhere — the image is pulled |
+| Architectures | whatever this machine is | `linux/amd64` **and** `linux/arm64`, one tag |
 | Client | Vite dev server on :5173 (HMR) | nginx static build on :8088 |
 | Server | local Node on :8080 | container, no published port |
 | Database | container, port 127.0.0.1:5432 | container, private network |
@@ -378,7 +435,8 @@ them; the file itself is never mounted.
 | Restart policy | none | `unless-stopped` |
 
 Both paths run the same source: there is no build step for the server, because Node
-executes the TypeScript directly.
+executes the TypeScript directly. What differs is where the image comes from, and
+that is the whole reason the two compose files exist.
 
 ## Client
 

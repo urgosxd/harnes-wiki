@@ -1,3 +1,17 @@
+# Nothing that only exists to develop or test this service belongs in the image.
+#
+# node_modules is the big one: it is 178 MB of host-resolved packages, and the
+# Dockerfile installs its own from package-lock.json. Copying the host's would put
+# the wrong platform's binaries inside the image — which is precisely the failure
+# mode that makes a multi-arch build break only on arm64.
 node_modules
+
+# Tests and their fixtures stay out: the runtime never imports them, and they are
+# the one place a real credential could be baked in by accident.
 test
+
+# Local state and editor noise.
 *.log
+.DS_Store
+
+# The lockfile and package.json ARE sent: `npm ci` requires both.

@@ -1,3 +1,8 @@
+# node_modules and dist are rebuilt inside the image. Sending them would both bloat
+# the context and risk reusing a bundle built for another platform or another source
+# revision — the second stage would copy a dist/ nobody in this build produced.
 node_modules
 dist
+
 *.log
+.DS_Store
