@@ -193,12 +193,20 @@ function ProgressIndicator({ compile }: { compile: CompileDimension }) {
 
   const { completed, total } = compile.progress;
 
-  // A single-source compile reports a true 0/1 -> 1/1. Both numbers are honest and
-  // must be shown, but a BAR reaching 100% while the stage is still running is worse
-  // than no bar at all: it says "finished" at the exact moment the user is waiting.
-  // The words stay - this is not a fabricated null, the pair is real - and only the
-  // bar is withheld, because a ratio of one has no width to communicate.
-  if (total <= 1) {
+  // A bar reaching 100% while the stage is still RUNNING says "finished" at the exact
+  // moment the user is waiting - worse than no bar, because it is confidently wrong
+  // rather than visibly stuck. Two ways to arrive there:
+  //
+  //   - a one-unit total (a single source compiles 0/1 -> 1/1), where a ratio of one
+  //     has no width to communicate anything;
+  //   - a single settled BATCH, which the producer documents: the provider answers a
+  //     batch atomically, so with the default batch size a whole stage jumps straight
+  //     to N/N while the stage is still closing. That is correct upstream and must not
+  //     be read as a stall - but it must not be drawn as completion either.
+  //
+  // The numbers stay either way. This withholds only the bar; the pair is real and is
+  // still shown, so it is not the fabricated null this surface refuses.
+  if (total <= 1 || completed >= total) {
     return (
       <div className="progress" data-testid="progress-counted">
         <p className="progress__label">

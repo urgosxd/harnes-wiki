@@ -224,6 +224,24 @@ describe("IngestJobView: progress is never invented", () => {
     expect(counted.textContent).toContain("1 of 1");
   });
 
+  it("shows a single-batch stage as a count, not a bar at 100%", () => {
+    // The producer documents this: the provider answers a batch atomically, so with
+    // the default batch size a whole stage jumps to N/N while still running. It is
+    // correct upstream and must not be read as a stall - and equally must not be
+    // drawn as completion while the user is still waiting.
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "succeeded", attempts: [] },
+          compile: { status: "running", stage: "embeddings", progress: { completed: 2, total: 2 } },
+        })}
+      />,
+    );
+
+    expect(screen.queryByRole("progressbar")).toBeNull();
+    expect(screen.getByTestId("progress-counted").textContent).toContain("2 of 2");
+  });
+
   it("still draws the bar once the total is worth drawing", () => {
     // The complement: two or more is a ratio a bar can actually communicate.
     render(
