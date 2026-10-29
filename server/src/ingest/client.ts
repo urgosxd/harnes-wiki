@@ -115,6 +115,23 @@ export class IngestClient {
     });
   }
 
+  /**
+   * The Stack ids this endpoint can reach.
+   *
+   * A plain read of the service's own `/stacks` listing: it costs one request and
+   * needs no MCP session, which is why it is usable on a request path where opening
+   * a second protocol connection would be out of proportion. A failure here is
+   * deliberately NOT fatal - if the listing cannot be read, callers fall back to the
+   * upstream's own validation rather than refusing every create.
+   */
+  async listStackIds(): Promise<string[] | undefined> {
+    const response = await this.request("GET", "/stacks");
+    if (response.status !== 200 || !Array.isArray(response.body)) return undefined;
+    return (response.body as Array<{ id?: unknown }>)
+      .map((entry) => (typeof entry?.id === "string" ? entry.id : undefined))
+      .filter((id): id is string => id !== undefined);
+  }
+
   /** Read one job snapshot. 404 (unknown id) and 503 (no tracking) are distinct. */
   async getJob(id: string, stackId?: string): Promise<UpstreamResponse> {
     return this.request("GET", `/api/ingest/jobs/${encodeURIComponent(id)}${stackQuery(stackId)}`);

@@ -210,7 +210,29 @@ export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): voi
    */
   router.post("/ingest/jobs", async (ctx) => {
     const target = requireTarget(await ctx.body());
+
     const c = requireClient();
+
+    // Refuse a Stack that does not exist BEFORE creating the job.
+    //
+    // Not paranoia: the upstream accepts a well-formed unknown id with a `202` and
+    // then writes no row, so the caller is handed a job id that can never be read -
+    // and my own poll turns that into `404`, which reads as "your job vanished"
+    // rather than "you named a Stack that is not there". Only a malformed id is
+    // refused upstream, and only after the job exists.
+    if (target.stackId !== undefined) {
+      const known = await c.listStackIds();
+      // `undefined` means the listing could not be read. Falling through to the
+      // upstream's own validation is better than refusing a create because a
+      // side-channel read failed.
+      if (known !== undefined && !known.includes(target.stackId)) {
+        throw new HttpError(
+          400,
+          "unknown_stack",
+          `no Stack "${target.stackId}" exists. Ask the service for its Stacks and use one of those.`,
+        );
+      }
+    }
 
     // A document reference has to become a URL before the service can read it, and
     // the resolver is the only part that knows storage. Refusing here keeps the

@@ -62,6 +62,14 @@ class FakeHost {
   jobs = new Map<string, unknown>();
   /** The `stackId` the proxy actually sent on the last create, or null. */
   lastCreateQuery: string | null = null;
+  /**
+   * Stacks `/stacks` reports. The service refuses a MALFORMED id itself but accepts
+   * a well-formed unknown one with a 202 and writes nothing, so this listing is the
+   * only way to refuse a nonexistent Stack before a job id is minted.
+   */
+  knownStacks: string[] = ["11111111-1111-1111-1111-111111111111"];
+  /** When true, `/stacks` fails so the fallback path can be exercised. */
+  stacksUnreadable = false;
   /** When set, `/api/ingest/jobs` answers 503 as a host without a registry does. */
   trackJobs = true;
   /** Scripted answers for `GET /api/ingest/jobs/:id`, to pin 404 handling. */
@@ -155,6 +163,14 @@ class FakeHost {
           ingest: job.ingest,
           compile: job.compile,
         });
+        return;
+      }
+      if (req.method === "GET" && path === "/stacks") {
+        if (this.stacksUnreadable) {
+          send(500, { error: "listing unavailable" });
+          return;
+        }
+        send(200, this.knownStacks.map((id) => ({ id, name: `stack ${id}` })));
         return;
       }
       if (req.method === "GET" && path === "/api/ingest/jobs") {
@@ -644,6 +660,9 @@ describe("the server proxy preserves what the codes mean", () => {
     // green suite. Asserting the SENT query is the only way to see it; the response
     // looks identical either way.
     const stackId = "22222222-2222-2222-2222-222222222222";
+    // The Stack has to exist for the create to reach the upstream at all now: a
+    // nonexistent one is refused before a job id is minted.
+    host.knownStacks = [...host.knownStacks, stackId];
     host.lastCreateQuery = null;
     const res = await fetch(`${baseUrl}/ingest/jobs`, {
       method: "POST",
@@ -652,6 +671,50 @@ describe("the server proxy preserves what the codes mean", () => {
     });
     assert.equal(res.status, 202);
     assert.equal(host.lastCreateQuery, stackId);
+  });
+
+  test("refuses a create in a Stack that does not exist", async () => {
+    // Found against the live service: a WELL-FORMED but unknown id answers 202 and
+    // writes no row, so the caller gets a job id it can never read. Only a MALFORMED
+    // id is refused upstream. Handing back a job id that resolves to 404 later reads
+    // as "your job vanished" instead of "you named a Stack that is not there".
+    host.lastCreateQuery = null;
+    const res = await fetch(`${baseUrl}/ingest/jobs`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        source: "https://example.com/x",
+        stackId: "00000000-0000-0000-0000-000000000000",
+      }),
+    });
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error?: string };
+    assert.equal(body.error, "unknown_stack");
+    // And nothing reached the upstream: refusing after the call would still mint a
+    // job id nobody can read.
+    assert.equal(host.lastCreateQuery, null);
+  });
+
+  test("accepts a create when the Stack listing cannot be read", async () => {
+    // A side-channel read failing is not a reason to refuse every create. The
+    // upstream's own validation still applies, and a malformed id is still a 400
+    // from the service.
+    host.stacksUnreadable = true;
+    host.lastCreateQuery = null;
+    try {
+      const res = await fetch(`${baseUrl}/ingest/jobs`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({
+          source: "https://example.com/y",
+          stackId: "11111111-1111-1111-1111-111111111111",
+        }),
+      });
+      assert.equal(res.status, 202);
+      assert.equal(host.lastCreateQuery, "11111111-1111-1111-1111-111111111111");
+    } finally {
+      host.stacksUnreadable = false;
+    }
   });
 
   test("a create without a stackId sends none, leaving the endpoint's own Stack", async () => {
