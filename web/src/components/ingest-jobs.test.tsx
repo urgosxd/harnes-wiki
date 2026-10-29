@@ -242,6 +242,65 @@ describe("IngestJobView: progress is never invented", () => {
     expect(screen.getByTestId("progress-counted").textContent).toContain("2 of 2");
   });
 
+  it("shows chunk and request counts as text after the stage settles", () => {
+    // The producer's own regression: the merge deleted `detail` whenever a patch did
+    // not mention it, so the cardinality vanished on every status transition - the
+    // exact moment an operator reads it. This renders the settled shape.
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "succeeded", attempts: [] },
+          compile: {
+            status: "succeeded",
+            stage: "embeddings",
+            progress: null,
+            detail: { chunks: 14, requests: 6 },
+          },
+        })}
+      />,
+    );
+
+    const line = screen.getByTestId("compile-detail");
+    expect(line.textContent).toContain("14 chunks");
+    expect(line.textContent).toContain("6 requests");
+  });
+
+  it("says nothing when the producer published no detail", () => {
+    // Absent means absent. A stage that never published chunks must not render an
+    // empty or zeroed line - that is the same lie as a fabricated null.
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "succeeded", attempts: [] },
+          compile: { status: "succeeded", stage: "page_generation", progress: { completed: 4, total: 5 } },
+        })}
+      />,
+    );
+
+    expect(screen.queryByTestId("compile-detail")).toBeNull();
+  });
+
+  it("states a real zero rather than hiding it", () => {
+    // A genuine zero is a measurement. The producer omits zeros, so a zero arriving
+    // here was actually counted, and suppressing it would discard a true fact.
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "succeeded", attempts: [] },
+          compile: {
+            status: "succeeded",
+            stage: "embeddings",
+            progress: null,
+            detail: { chunks: 0, requests: 0 },
+          },
+        })}
+      />,
+    );
+
+    const line = screen.getByTestId("compile-detail");
+    expect(line.textContent).toContain("0 chunks");
+  });
+
   it("still draws the bar once the total is worth drawing", () => {
     // The complement: two or more is a ratio a bar can actually communicate.
     render(

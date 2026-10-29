@@ -98,6 +98,17 @@ export function IngestJobView({ job }: IngestJobViewProps) {
           ) : (
             <ProgressIndicator compile={job.compile} />
           )}
+          {/*
+            Counts that do not fit the ratio, shown as text beside it and NEVER
+            merged into it: `progress` is pages, `detail` is chunks and requests, and
+            adding them would be the invented progress this view refuses. Absent means
+            absent - a stage that never published chunks says nothing rather than "0".
+          */}
+          {detailLine(job.compile.detail) && (
+            <p className="dimension__hint" data-testid="compile-detail">
+              {detailLine(job.compile.detail)}
+            </p>
+          )}
           {job.compile.message && <p className="dimension__message">{job.compile.message}</p>}
           {job.compile.error && (
             <p className="dimension__error" role="alert">
@@ -169,6 +180,25 @@ function StageRow({ stage }: { stage: string | undefined }) {
  * real total, so `null` is the common case and must look deliberate rather than
  * broken.
  */
+/**
+ * Chunks and requests, when the producer published them.
+ *
+ * `undefined` and `0` are different facts and this renders the difference: a missing
+ * count says nothing, a real zero is stated. The producer omits zeros for the same
+ * reason, so a zero here is a genuine measurement rather than a default.
+ */
+function detailLine(detail: CompileDimension["detail"]): string | null {
+  if (detail === undefined) return null;
+  const parts: string[] = [];
+  if (detail.chunks !== undefined) {
+    parts.push(`${detail.chunks} ${detail.chunks === 1 ? "chunk" : "chunks"}`);
+  }
+  if (detail.requests !== undefined) {
+    parts.push(`${detail.requests} ${detail.requests === 1 ? "request" : "requests"}`);
+  }
+  return parts.length > 0 ? `Embedded ${parts.join(" in ")}` : null;
+}
+
 function ProgressIndicator({ compile }: { compile: CompileDimension }) {
   // A bar only means something while the work is MOVING. An animation on a settled
   // compile invents motion for a job that already ended, which is the one thing this
