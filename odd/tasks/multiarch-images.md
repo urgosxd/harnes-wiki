@@ -90,6 +90,10 @@ y por eso existe `PUSH=1`: con registry el problema no aparece.
 | 2026-10-29 | T6 | Stack de prod levantado **desde las imágenes, sin construir**: los 3 healthy, images `postgres:16-alpine`, `agentdocumentor-server:0.1.0`, `agentdocumentor-web:0.1.0`. |
 | 2026-10-29 | T6 | `smoke.mjs` contra ese stack: 7/7 + 1 SKIP. |
 | 2026-10-29 | T6 | Suite completa: server 190/190 (0 skip), web 175/175, `tsc` exit 0 en ambos. |
+| 2026-10-29 | T6 | **Build final rehecho** con el script corregido, desde imágenes borradas: índices OCI `sha256:8fa7b20` (server) y `sha256:0512130` (web), 1609 bytes cada uno. |
+| 2026-10-29 | T6 | Prueba de que el índice tiene DOS imágenes distintas, no una duplicada: `sha256sum /usr/local/bin/node` dentro del mismo tag → `f371ff1f3888ed7c` en amd64 vs `306c1d8dbda82362` en arm64. |
+| 2026-10-29 | T6 | Arranque desde el tag único: server amd64 → `arch: x64`; server arm64 → `arch: arm64`; web en ambas → `HTTP 200` con el mismo bundle. |
+| 2026-10-29 | T6 | Stack de prod levantado desde las imágenes finales y smoke 7/7 + 1 SKIP. |
 
 ## Nota de operación encontrada durante la verificación
 
