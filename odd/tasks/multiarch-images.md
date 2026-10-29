@@ -74,7 +74,7 @@ y por eso existe `PUSH=1`: con registry el problema no aparece.
 
 | Commit | Contenido |
 |---|---|
-| `TBD` | `feat(build)`: script multi-arch + compose de prod |
+| `dbde903` | `feat(build)`: script multi-arch + compose de prod |
 | `TBD` | `docs`: publicación y consumo, con lo medido |
 
 ## Evidence log
