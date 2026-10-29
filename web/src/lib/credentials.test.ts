@@ -2,70 +2,67 @@ import { describe, it, expect } from "vitest";
 import { authHeaders, credentialsUrl, parseCredentials } from "./credentials.ts";
 
 /**
- * These cases encode the contract measured against the server, not a preference.
+ * Identity is the `user` in the link. There is no secret.
  *
- *   curl -H "x-dev-token: $TOK"                 /api/me  -> 200 {"id":"bob"}
- *   curl -H "x-dev-token: $TOK" -H "x-user-id;" /api/me  -> 401
- *
- * So the token alone is a complete identity, and a header sent with an empty value
- * is worse than a header not sent at all. The link carries `user` only so the
- * interface can name the account before `/me` answers.
+ * That is a deliberate decision, not an oversight, and these tests pin both halves
+ * of it: the name alone opens the product, and nothing here pretends to verify it.
+ * A `token` is still forwarded when one is present, so an old link keeps working and
+ * a deployment in roster mode can still be driven from the interface.
  */
 describe("parseCredentials", () => {
-  it("treats the token alone as a complete identity", () => {
-    expect(parseCredentials("?token=abc123")).toEqual({ token: "abc123" });
+  it("takes the user from the link, with no token anywhere", () => {
+    expect(parseCredentials("?user=alice")).toEqual({ user: "alice" });
   });
 
-  it("keeps the user when the link carries both halves", () => {
+  it("keeps a token when the link still carries one", () => {
     expect(parseCredentials("?user=alice&token=abc123")).toEqual({
-      token: "abc123",
       user: "alice",
+      token: "abc123",
     });
   });
 
-  it("refuses a link with no token, whatever else it carries", () => {
+  it("refuses a link with no user, whatever else it carries", () => {
+    // A token alone names nobody now: there is no roster to resolve it against, so
+    // accepting it would mean guessing which account was meant.
     expect(parseCredentials("")).toBeNull();
-    expect(parseCredentials("?user=alice")).toBeNull();
-    expect(parseCredentials("?token=")).toBeNull();
-    expect(parseCredentials("?token=%20%20")).toBeNull();
+    expect(parseCredentials("?token=abc123")).toBeNull();
+    expect(parseCredentials("?user=")).toBeNull();
+    expect(parseCredentials("?user=%20%20")).toBeNull();
   });
 
-  it("ignores a blank user instead of inventing one", () => {
-    // `?user=&token=x` must not produce `{ user: "" }`: an empty header is refused.
-    expect(parseCredentials("?user=&token=abc123")).toEqual({ token: "abc123" });
-    expect(parseCredentials("?user=%20&token=abc123")).toEqual({ token: "abc123" });
+  it("ignores a blank token instead of forwarding an empty header", () => {
+    expect(parseCredentials("?user=alice&token=")).toEqual({ user: "alice" });
+    expect(parseCredentials("?user=alice&token=%20")).toEqual({ user: "alice" });
   });
 
-  it("trims what a copy-paste adds, because a trailing newline is a 401", () => {
-    expect(parseCredentials("?user=%20alice%20&token=%20abc123%0A")).toEqual({
-      token: "abc123",
+  it("trims what a copy-paste adds, because a stray space is a different id", () => {
+    expect(parseCredentials("?user=%20alice%0A&token=%20abc123%20")).toEqual({
       user: "alice",
+      token: "abc123",
     });
   });
 });
 
 describe("authHeaders", () => {
-  it("sends the token alone when the link named no user", () => {
-    // The whole bug: sending x-user-id with an empty value answers 401, so the
-    // header must be absent rather than blank.
-    expect(authHeaders({ token: "abc123" })).toEqual({ "x-dev-token": "abc123" });
+  it("identifies the caller by name alone", () => {
+    expect(authHeaders({ user: "alice" })).toEqual({ "x-user-id": "alice" });
   });
 
-  it("sends both halves when the link named a user", () => {
-    expect(authHeaders({ token: "abc123", user: "alice" })).toEqual({
-      "x-dev-token": "abc123",
+  it("forwards a token only when the link carried one", () => {
+    expect(authHeaders({ user: "alice", token: "abc123" })).toEqual({
       "x-user-id": "alice",
+      "x-dev-token": "abc123",
     });
   });
 });
 
 describe("credentialsUrl", () => {
-  it("writes the token into the link, keeping the user when there is one", () => {
-    expect(credentialsUrl({ token: "abc123" })).toBe("?token=abc123");
-    expect(credentialsUrl({ token: "abc123", user: "alice" })).toBe("?user=alice&token=abc123");
+  it("builds a link with the user, and the token only when present", () => {
+    expect(credentialsUrl({ user: "alice" })).toBe("?user=alice");
+    expect(credentialsUrl({ user: "alice", token: "abc123" })).toBe("?user=alice&token=abc123");
   });
 
-  it("escapes a token that would otherwise break the query", () => {
-    expect(credentialsUrl({ token: "a&b=c d" })).toBe("?token=a%26b%3Dc+d");
+  it("escapes a value that would otherwise break the query", () => {
+    expect(credentialsUrl({ user: "a&b", token: "c=d e" })).toBe("?user=a%26b&token=c%3Dd+e");
   });
 });

@@ -1,82 +1,81 @@
 /**
  * Where identity comes from, and what a link is allowed to say about it.
  *
+ * ## The decision this file encodes
+ *
+ * Identity is the `user` in the link. Full stop. There is no password, no session
+ * and no per-user secret: opening `?user=alice` opens alice's account.
+ *
+ * That is not authentication and it cannot pretend to be. Nothing in this file
+ * verifies the name against anything, because there is nothing to verify it against
+ * — so the honest reading is that **anybody holding a link can act as that user, and
+ * anybody can edit the link to act as somebody else.** The server enforces ownership
+ * of rows by `user_id`; it cannot enforce who is allowed to claim that `user_id`.
+ *
+ * ## Why a token is still forwarded
+ *
+ * `token` is optional and becomes an `x-dev-token` header when present. It costs one
+ * line and it keeps two things working that would otherwise break: a link handed out
+ * before this change, and a deployment running with `AUTH_MODE=roster`, where the
+ * token is what actually identifies the caller. With no token the server uses the
+ * name alone.
+ *
  * ## Why this is a module and not four lines in `App.tsx`
  *
- * The rule below is the product's whole access model, and it was wrong in a way no
- * one could see: the component demanded BOTH halves of the link and fell back to a
- * sign-in form when one was missing, so a link carrying only a token — which the
- * server happily authenticates — showed a form asking for a token the person did
- * not have.
- *
- * Kept as pure functions over `location.search`, this is testable without a DOM and
- * survives the next redesign of whichever screen happens to render it.
- *
- * ## The contract, measured rather than assumed
- *
- *   curl -H "x-dev-token: $TOK"                 /api/me  -> 200 {"id":"bob"}
- *   curl -H "x-dev-token: $TOK" -H "x-user-id;" /api/me  -> 401
- *
- * Two consequences drive everything here:
- *
- *  - The token alone is a COMPLETE identity. `user` is optional and exists only so
- *    the interface can name the account before `/me` answers.
- *  - A header with an EMPTY value is refused, while an absent header is fine. So
- *    `x-user-id` must be omitted, never sent blank (`server/src/http/users.ts`).
- *
- * `user` is never trusted as identity: the server resolves the id from the token and
- * refuses a claimed id that disagrees with it. A link cannot use this field to act
- * as somebody else.
+ * It is the product's whole access model, and it is pure logic over
+ * `location.search`: testable without a DOM, and independent of whichever screen
+ * happens to render it.
  */
 export interface Credentials {
-  /** The secret. This is what identifies the caller. */
-  token: string;
-  /** Display hint only. `GET /me` is the authority on who this token belongs to. */
-  user?: string;
+  /** The identity. A claim, not a verified fact. */
+  user: string;
+  /** Optional. Forwarded when present, never required. */
+  token?: string;
 }
 
 /**
  * Read credentials from a query string like `location.search`.
  *
- * Returns `null` when there is no usable token — which is the ONE case where the
- * interface has nothing to work with, because no amount of typing produces a
- * credential that is not already the token.
+ * Returns `null` only when the link names no user. A token with no user used to be
+ * enough, when the server could resolve a token against a roster; with no roster a
+ * token names nobody, so accepting one would mean guessing which account was meant.
  *
- * Values are trimmed: a token copied out of a chat window arrives with whitespace
- * often enough that a trailing newline used to read as a wrong token.
+ * Values are trimmed: a name copied out of a chat window arrives with whitespace
+ * often enough that `?user=alice%0A` would otherwise be a different user row.
  */
 export function parseCredentials(search: string): Credentials | null {
   const params = new URLSearchParams(search);
-  const token = params.get("token")?.trim();
-  if (!token) return null;
 
   const user = params.get("user")?.trim();
-  // `?user=&token=x` must not become `{ user: "" }`: that would send a blank
-  // header, which the server refuses.
-  return user ? { token, user } : { token };
+  if (!user) return null;
+
+  const token = params.get("token")?.trim();
+  // A blank token must not become `token: ""`: that would send an empty header, and
+  // an empty `x-dev-token` is a worse signal than no header at all.
+  return token ? { user, token } : { user };
 }
 
 /**
  * The headers a request needs to carry this identity.
  *
- * `x-user-id` is included ONLY when the link named a user, because sending it blank
- * answers `401` while omitting it is the supported path.
+ * `x-user-id` is always sent — it is the identity. `x-dev-token` only travels when
+ * the link carried one.
  */
 export function authHeaders(credentials: Credentials): Record<string, string> {
-  const headers: Record<string, string> = { "x-dev-token": credentials.token };
-  if (credentials.user) headers["x-user-id"] = credentials.user;
+  const headers: Record<string, string> = { "x-user-id": credentials.user };
+  if (credentials.token) headers["x-dev-token"] = credentials.token;
   return headers;
 }
 
 /**
  * The query string that reproduces these credentials in a link.
  *
- * Built with `URLSearchParams` so a token containing `&`, `=` or a space survives a
+ * Built with `URLSearchParams` so a value containing `&`, `=` or a space survives a
  * round trip instead of silently truncating the identity.
  */
 export function credentialsUrl(credentials: Credentials): string {
   const params = new URLSearchParams();
-  if (credentials.user) params.set("user", credentials.user);
-  params.set("token", credentials.token);
+  params.set("user", credentials.user);
+  if (credentials.token) params.set("token", credentials.token);
   return `?${params.toString()}`;
 }

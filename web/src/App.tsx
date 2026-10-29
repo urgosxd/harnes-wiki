@@ -8,16 +8,14 @@ import { ChatWindow } from "./components/ChatWindow.tsx";
 import { IngestJobsPanel } from "./components/IngestJobsPanel.tsx";
 
 /**
- * The link IS the credentials: `?token=...`, optionally `&user=alice`.
+ * The link names the account: `?user=alice`.
  *
- * There is deliberately no sign-in screen. A token is the only credential this
- * product has, so a form could ask for nothing the link does not already carry: it
- * would be a prompt for a secret the person does not possess, and it used to
- * prefill the literal "dev" left over from the shared-token scheme.
+ * There is deliberately no sign-in screen, and no longer any secret to ask for:
+ * identity IS the name in the link. A form would be theatre — it could not verify
+ * anything, because there is nothing to verify a name against.
  *
- * A link with no token therefore gets an explanation and nothing to type, and a
- * rejected token gets the same explanation instead of a retry form that cannot
- * succeed. Both paths say how to obtain a working link.
+ * A link with no user therefore gets an explanation and nothing to type. The other
+ * two paths say what happened rather than offering a retry that cannot help.
  */
 export function App() {
   // Read once, at mount. The link is the identity; there is nothing to type and no
@@ -26,38 +24,36 @@ export function App() {
     parseCredentials(window.location.search),
   );
 
-  if (!credentials) return <MissingInviteLink problem="no-link" />;
+  if (!credentials) return <MissingInviteLink problem="no-user" />;
 
   // Remounting on identity change is deliberate: a different user must not inherit
   // the previous user's conversations or in-flight stream.
-  return <InviteSession key={credentials.token} credentials={credentials} />;
+  return <InviteSession key={credentials.user} credentials={credentials} />;
 }
 
 /** Why no usable identity is on screen, so the message can be specific. */
-type InviteProblem = "no-link" | "rejected" | "unreachable";
+type InviteProblem = "no-user" | "rejected" | "unreachable";
 
 /**
  * The only screen shown without a working identity.
  *
- * It is a dead end on purpose. Every field a form could offer would ask for the
- * token that the link already carries, so the useful content is what happened and
- * how to get a link that works. Nothing here accepts input.
+ * It is a dead end on purpose: there is no credential to type, only a link to fix.
  */
 function MissingInviteLink({ problem }: { problem: InviteProblem }) {
   const { title, body } =
-    problem === "no-link"
+    problem === "no-user"
       ? {
-          title: "This page needs your link",
+          title: "This page needs a user in the link",
           body:
-            "Access is carried by the link you were given, which includes a personal " +
-            "token. Open that link, or ask for a new one.",
+            "Access is carried by the link you were given, which ends in " +
+            "?user=<name>. Open that link, or ask for one with your name in it.",
         }
       : problem === "rejected"
         ? {
-            title: "This link is no longer valid",
+            title: "This link was not accepted",
             body:
-              "The token in this link was rejected. It may have been replaced or " +
-              "removed. Ask for a new link.",
+              "The server did not accept the user in this link. Check the link, or " +
+              "ask for a new one.",
           }
         : {
             title: "Cannot reach the server",
@@ -81,8 +77,7 @@ function InviteSession({ credentials }: { credentials: Credentials }) {
   const client = useMemo(
     () =>
       new ApiClient({
-        // The token alone is a complete identity: `x-user-id` is sent only when the
-        // link named a user, because a blank value is refused by the server.
+        // The name is the identity. A token travels only if the link carried one.
         headers: () => authHeaders(credentials),
         onUnauthorized: () => setRejected("rejected"),
       }),
