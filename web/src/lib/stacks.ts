@@ -87,22 +87,27 @@ export function defaultStackId(stacks: readonly StackOption[]): string | null {
 }
 
 /**
- * Whether a job started now would land in the Stack the picker shows.
+ * Whether a job started now can land where the picker says it will.
  *
- * It would NOT, on the service as it stands: the write path binds its Stack once at
- * startup from the host's own environment, and there is no parameter on it a caller
- * can influence. Reads are Stack-scoped, writes are not. So a picker that offered
- * upload into any Stack would be showing the user a choice that changes nothing.
+ * ## What this replaced
  *
- * Three cases, and the middle one is the only happy path:
+ * The previous version refused every Stack except the one the service marked
+ * `isCurrent`, because writes were bound to the host's Stack while reads were
+ * Stack-scoped. That asymmetry was real and the refusal was honest: offering a
+ * choice the service would ignore is worse than refusing.
  *
- *  - Nothing selected: nothing is named, so the host uses its own Stack, which is
- *    the same Stack the picker would default to. Allowed.
- *  - The selected Stack is the one the service marks `isCurrent`: that IS the bound
- *    Stack, so the choice and the destination agree. Allowed.
- *  - Anything else, including "several Stacks but none marked current": the
- *    destination cannot be made to match the selection, so it is refused with a
- *    reason instead of silently creating the job somewhere else.
+ * It is gone upstream. `POST /api/ingest` now records the job in the Stack the
+ * request names — verified by the acceptance pair, `200` with the requested Stack
+ * and `404` with the bound one, for the same job id, via both the query and the
+ * body. So the only question left is whether the selection is a Stack this endpoint
+ * actually knows about.
+ *
+ * ## Why the check is not deleted outright
+ *
+ * A name the service does not recognise would surface as an opaque upstream error on
+ * submit. Naming it before the call keeps the failure where the user can act on it.
+ * And an empty list means the service admitted nothing, so there is nothing to verify
+ * against — refusing there is honest rather than permissive.
  */
 export type CreateTargetCheck = { ok: true } | { ok: false; reason: string };
 
@@ -110,29 +115,30 @@ export function checkCreateTarget(
   stacks: readonly StackOption[],
   selectedStackId: string | null,
 ): CreateTargetCheck {
+  // Nothing selected: the endpoint uses its own Stack, which is what omitting the
+  // parameter has always meant and still means.
   if (selectedStackId === null) return { ok: true };
 
-  const bound = stacks.find((stack) => stack.isCurrent);
-  if (bound?.id === selectedStackId) return { ok: true };
-
-  const selectedName = stacks.find((stack) => stack.id === selectedStackId)?.name;
-  const named = selectedName ? `"${selectedName}"` : "the selected Stack";
-
-  if (!bound) {
+  // No list yet: the picker has not received the agent's `list_stacks`, so no
+  // selection can be verified against anything. A selection in this state is a value
+  // nobody vouched for, and sending it would be a guess.
+  if (stacks.length === 0) {
     return {
       ok: false,
       reason:
-        `The ingest service did not say which Stack it is bound to, so new jobs ` +
-        `cannot be verified to land in ${named}. Select the Stack it reports as ` +
-        `bound, or none.`,
+        "The Stack list has not loaded yet, so this selection cannot be verified. " +
+        "Ask the assistant to list the Stacks, or clear the selection to use the " +
+        "endpoint's own.",
     };
   }
+
+  const known = stacks.some((stack) => stack.id === selectedStackId);
+  if (known) return { ok: true };
 
   return {
     ok: false,
     reason:
-      `New jobs go to "${bound.name}", the Stack this endpoint is bound to — not ` +
-      `to ${named}. The service scopes READS by Stack but binds WRITES to its own, ` +
-      `so switch to "${bound.name}" to start an ingest there.`,
+      `"${selectedStackId}" is not a Stack this endpoint reported. Pick one from the ` +
+      `list, or clear the selection to use the endpoint's own.`,
   };
 }

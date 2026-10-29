@@ -127,32 +127,38 @@ describe("checkCreateTarget", () => {
   const bound = { id: "b8b8e801", name: "wire2", isCurrent: true };
   const foreign = { id: "f2ae8fed", name: "Formation Stack", isCurrent: false };
 
-  it("allows nothing selected, because the host then uses its own Stack", () => {
+  it("allows nothing selected, because the endpoint then uses its own Stack", () => {
     expect(checkCreateTarget([bound, foreign], null)).toEqual({ ok: true });
   });
 
-  it("allows the Stack the service marks as bound", () => {
-    expect(checkCreateTarget([bound, foreign], bound.id)).toEqual({ ok: true });
+  it("allows a FOREIGN Stack, because writes are now Stack-scoped", () => {
+    // This is the regression this file exists for. The old guard refused every Stack
+    // except the bound one, correctly, because the service bound WRITES to the host's
+    // Stack while scoping READS by Stack. The upstream fixed that (df25558) and the
+    // acceptance pair proved it: POST naming B is readable under B and 404 under A.
+    // A guard still refusing here would block a capability that now exists.
+    expect(checkCreateTarget([bound, foreign], foreign.id)).toEqual({ ok: true });
   });
 
-  it("refuses a foreign Stack, and names both Stacks so the user can act", () => {
-    const result = checkCreateTarget([bound, foreign], foreign.id);
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error("unreachable");
-    // Naming both ends is what makes the refusal actionable: "not this one" alone
-    // leaves the user guessing where their upload would have gone.
-    expect(result.reason).toContain("Formation Stack");
-    expect(result.reason).toContain("wire2");
-  });
-
-  it("refuses when several Stacks exist but none is marked bound", () => {
-    // The dangerous case: with no `isCurrent` there is nothing proving where a write
-    // lands, so allowing it would be the silent mismatch again, just quieter.
+  it("allows a Stack when nothing is marked bound", () => {
+    // No `isCurrent` used to mean "cannot verify where a write lands". It now means
+    // nothing about writes, because the caller names the destination.
     const a = { id: "a", name: "A", isCurrent: false };
-    const b = { id: "b", name: "B", isCurrent: false };
-    const result = checkCreateTarget([a, b], a.id);
+    expect(checkCreateTarget([a], a.id)).toEqual({ ok: true });
+  });
+
+  it("refuses a Stack the endpoint never reported", () => {
+    const result = checkCreateTarget([bound], "not-a-real-stack");
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("unreachable");
-    expect(result.reason).toMatch(/bound/i);
+    expect(result.reason).toContain("not a Stack this endpoint reported");
+  });
+
+  it("refuses a selection when the list has not loaded", () => {
+    // A value nobody vouched for. Sending it would be a guess dressed as a choice.
+    const result = checkCreateTarget([], "b8b8e801");
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.reason).toMatch(/has not loaded/i);
   });
 });
