@@ -68,26 +68,24 @@ fi
 export CHAT_API_KEY CHAT_PROVIDER="$PROVIDER"
 export CHAT_BASE_URL="${CHAT_BASE_URL:-}"
 export CHAT_API="${CHAT_API:-openai-completions}"
-# Two users with distinct secrets. Generated once per machine and kept in a local
-# file so the same links keep working across restarts: the token IS the identity.
-USERS_FILE=".chat-users"
-if [ -z "${CHAT_USERS:-}" ]; then
-  if [ -f "$USERS_FILE" ]; then
-    CHAT_USERS="$(cat "$USERS_FILE")"
-  else
-    gen() { node -e 'process.stdout.write(require("node:crypto").randomBytes(12).toString("hex"))'; }
-    CHAT_USERS="alice:$(gen),bob:$(gen)"
-    printf '%s' "$CHAT_USERS" > "$USERS_FILE"
-    chmod 600 "$USERS_FILE"
-    echo "generated two user tokens in $USERS_FILE (keep the links private)"
-  fi
-fi
-export CHAT_USERS
 
-echo "provider: $PROVIDER"
-echo "api:      ${CHAT_API}"
-echo "model:    ${CHAT_MODEL:-syn:large:text}"
-echo "key:      ${CHAT_API_KEY:0:8}... (passed as an environment variable)"
+# Identity is the name in the link: `?user=alice`. There is no token to generate and
+# no roster file to keep, because there is no secret behind a name.
+#
+# `USERS` only decides WHICH LINKS THIS SCRIPT PRINTS. It is not a whitelist and the
+# server does not check it: any name that matches [A-Za-z0-9._@-] is accepted, which
+# is exactly the consequence of running without authentication.
+USERS="${USERS:-alice,bob}"
+export AUTH_MODE="${AUTH_MODE:-open}"
+
+echo "provider:  $PROVIDER"
+echo "api:       ${CHAT_API}"
+echo "model:     ${CHAT_MODEL:-syn:large:text}"
+echo "key:       ${CHAT_API_KEY:0:8}... (passed as an environment variable)"
+echo "auth mode: ${AUTH_MODE}"
+if [ "$AUTH_MODE" = "open" ]; then
+  echo "           (no authentication: the name in the link IS the identity)"
+fi
 
 # Only pass these when they have a value, so the compose defaults apply.
 if [ -z "$CHAT_BASE_URL" ]; then unset CHAT_BASE_URL; fi
@@ -101,14 +99,15 @@ for _ in $(seq 1 60); do
   web="$(docker inspect --format '{{.State.Health.Status}}' agentdoc-web 2>/dev/null || echo starting)"
   if [ "$server" = "healthy" ] && [ "$web" = "healthy" ]; then
     echo
-    echo "Links (each user has their own token):"
+    echo "Links (the name in the link is the identity):"
     # A here-string, not a pipe: inside a pipeline the loop runs in a subshell and
     # only the first line survives when combined with `read`.
-    while IFS=: read -r id token; do
+    while IFS= read -r id; do
+      id="$(printf '%s' "$id" | tr -d '[:space:]')"
       if [ -n "$id" ]; then
-        echo "  ${id}:  http://localhost:8088/?user=${id}&token=${token}"
+        echo "  ${id}:  http://localhost:8088/?user=${id}"
       fi
-    done <<< "$(printf '%s' "$CHAT_USERS" | tr ',' '\n')"
+    done <<< "$(printf '%s' "$USERS" | tr ',' '\n')"
     exit 0
   fi
   sleep 2

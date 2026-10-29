@@ -39,33 +39,47 @@ import pg from "pg";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Roster from `CHAT_USERS`, or from the local `.chat-users` file the other scripts
- * generate. Same two sources `up.sh` and the smoke test use, so the ids here are the
- * ids the server actually authenticates.
+ * Which ids get the tools.
+ *
+ * Three sources, in order: `USERS` (plain comma-separated names, matching what the
+ * scripts and the smoke test use), then `CHAT_USERS` (`id:token,...`, the form a
+ * roster deployment still sets), then a legacy `.chat-users` file if one is lying
+ * around from an older checkout.
+ *
+ * Ids here are just rows in `tenant_mcp`. They are not a whitelist: with the default
+ * AUTH_MODE=open the server accepts any well-formed name, so a user this script was
+ * not run for still opens the product — they simply get no tools until it is.
  */
 function loadRoster() {
-  let raw = process.env.CHAT_USERS?.trim();
-  if (!raw) {
-    try {
-      // The roster file lives at the repository root; this script lives in
-      // `server/scripts/`, one level deeper than the root scripts are.
-      raw = readFileSync(join(HERE, "..", "..", ".chat-users"), "utf8").trim();
-    } catch {
-      throw new Error(
-        "No roster. Set CHAT_USERS=id:token,id:token or run scripts/up.sh first.",
-      );
+  const ids = [];
+  const add = (id) => {
+    const trimmed = id.trim();
+    if (trimmed && !ids.includes(trimmed)) ids.push(trimmed);
+  };
+
+  const plain = process.env.USERS?.trim();
+  if (plain) {
+    for (const entry of plain.split(",")) add(entry);
+  } else {
+    let raw = process.env.CHAT_USERS?.trim();
+    if (!raw) {
+      try {
+        // The file lives at the repository root; this script lives in
+        // `server/scripts/`, one level deeper than the root scripts are.
+        raw = readFileSync(join(HERE, "..", "..", ".chat-users"), "utf8").trim();
+      } catch {
+        throw new Error(
+          "No users. Set USERS=alice,bob (or CHAT_USERS=id:token,...) first.",
+        );
+      }
+    }
+    for (const entry of raw.split(",")) {
+      const separator = entry.indexOf(":");
+      add(separator === -1 ? entry : entry.slice(0, separator));
     }
   }
-  const ids = [];
-  for (const entry of raw.split(",")) {
-    const trimmed = entry.trim();
-    if (!trimmed) continue;
-    const separator = trimmed.indexOf(":");
-    if (separator === -1) continue;
-    const id = trimmed.slice(0, separator).trim();
-    if (id) ids.push(id);
-  }
-  if (ids.length === 0) throw new Error("The roster declared no users.");
+
+  if (ids.length === 0) throw new Error("No users were declared.");
   return ids;
 }
 

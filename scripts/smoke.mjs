@@ -10,47 +10,33 @@
  * measure the provider's chunking, not this system, and it reports a false failure
  * on short answers. Streaming is checked with a long answer instead.
  */
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 const base = `${process.argv[2] ?? "http://127.0.0.1:8088"}/api`;
 
 /**
- * The roster: `id:token,id:token`.
+ * Two identities, from `USERS` (comma-separated names, default `alice,bob`).
  *
- * Taken from CHAT_USERS, or from the .chat-users file that up.sh generates, so the
- * smoke test uses the same identities the product does instead of a shared token
- * the server no longer accepts.
+ * There is no secret to load: the name in the request IS the identity, so this test
+ * needs nothing but the names it is going to claim.
  */
-function loadRoster() {
-  const raw = process.env.CHAT_USERS?.trim();
-  const file = join(dirname(fileURLToPath(import.meta.url)), "..", ".chat-users");
-  const source = raw || readFileSync(file, "utf8").trim();
-
-  const users = new Map();
-  for (const entry of source.split(",")) {
-    const trimmed = entry.trim();
-    if (!trimmed) continue;
-    const separator = trimmed.indexOf(":");
-    if (separator === -1) continue;
-    users.set(trimmed.slice(0, separator).trim(), trimmed.slice(separator + 1).trim());
-  }
-  if (users.size < 2) {
+function loadUsers() {
+  const raw = (process.env.USERS ?? "alice,bob").trim();
+  const users = raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (users.length < 2) {
     throw new Error(
-      `need two users to check isolation, found ${users.size}. ` +
-        "Set CHAT_USERS=alice:...,bob:... or run scripts/up.sh first.",
+      `need two users to check isolation, found ${users.length}. Set USERS=alice,bob.`,
     );
   }
   return users;
 }
 
-const USERS = loadRoster();
-const [ALICE, ALICE_TOKEN] = [...USERS][0];
-const [BOB, BOB_TOKEN] = [...USERS][1];
+const USERS = loadUsers();
+const [ALICE, BOB] = USERS;
 
 const headers = (user) => ({
-  "x-dev-token": USERS.get(user),
   "x-user-id": user,
   "content-type": "application/json",
 });
@@ -105,9 +91,21 @@ async function turn(user, conversationId, message, key) {
 }
 
 const results = [];
+const skips = [];
 function check(name, ok, detail) {
   results.push({ name, ok });
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
+}
+
+/**
+ * A property this suite no longer asserts, recorded rather than deleted.
+ *
+ * Not counted as a pass: a skipped check that silently counts as success is how a
+ * suite starts reporting on things it never verified.
+ */
+function skip(name, reason) {
+  skips.push({ name, reason });
+  console.log(`SKIP  ${name} — ${reason}`);
 }
 
 // Real roster users, so isolation is checked against the identities the product has.
@@ -146,14 +144,15 @@ check(
   !aliceList.conversations.some((conversation) => conversation.id === convBob),
 );
 
-// The impersonation check: bob's token claiming to be alice must be refused.
-const impostor = await fetch(`${base}/conversations/${convBob}`, {
-  headers: { "x-dev-token": BOB_TOKEN, "x-user-id": alice },
-});
-check(
+// The impersonation check used to live here: bob's token claiming to be alice had to
+// be refused. With no secret behind a name there is nothing to refuse it with, so
+// the property is gone BY DECISION, not by regression. Kept as a visible SKIP with
+// its reason, so the next reader does not rediscover it as a bug — and so that
+// turning AUTH_MODE=roster back on is an obvious prompt to restore the assertion.
+skip(
   "a token cannot claim another user's identity",
-  impostor.status === 401,
-  `status ${impostor.status}`,
+  "no secret behind the name: with AUTH_MODE=open, claiming another user id is the " +
+    "documented behaviour, not a failure. Restore this check under AUTH_MODE=roster.",
 );
 
 // 4. Idempotency: the same key must not append a second turn.
@@ -173,4 +172,7 @@ check(
 
 const failed = results.filter((result) => !result.ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
+if (skips.length > 0) {
+  console.log(`${skips.length} skipped (see SKIP lines above)`);
+}
 process.exit(failed.length === 0 ? 0 : 1);

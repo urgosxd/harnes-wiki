@@ -53,21 +53,11 @@ export PI_AGENT_CONFIG_MODE="${PI_AGENT_CONFIG_MODE:-generate}"
 export PI_WORKSPACE_DIR="${PI_WORKSPACE_DIR:-/tmp/agentdoc-dev-workspace}"
 
 export DATABASE_URL="${DATABASE_URL:-postgres://agentdocumentor:agentdocumentor@127.0.0.1:5432/agentdocumentor}"
-# Two users with distinct secrets; the token is what identifies the caller, so
-# holding one token does not allow acting as the other user.
-if [ -z "${CHAT_USERS:-}" ]; then
-  _users_file="$(dirname "$0")/../.chat-users"
-  if [ -f "$_users_file" ]; then
-    CHAT_USERS="$(cat "$_users_file")"
-  else
-    _gen() { node -e 'process.stdout.write(require("node:crypto").randomBytes(12).toString("hex"))'; }
-    CHAT_USERS="alice:$(_gen),bob:$(_gen)"
-    printf '%s' "$CHAT_USERS" > "$_users_file"
-    chmod 600 "$_users_file"
-  fi
-  unset _users_file
-fi
-export CHAT_USERS
+# Identity is the name the client claims: there is no secret, so there is no roster
+# to generate and no token file to keep. `?user=alice` IS alice. Stated here rather
+# than assumed, because a local server that looks authenticated but is not is the
+# kind of thing that gets exposed by accident.
+export AUTH_MODE="${AUTH_MODE:-open}"
 export PORT="${PORT:-8080}"
 export LOG_LEVEL="${LOG_LEVEL:-info}"
 

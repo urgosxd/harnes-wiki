@@ -63,17 +63,21 @@ services:
       # would name the wrong process. Empty keeps uploads working but disables
       # ingest-by-document, since there would be no URL to hand over.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://server:8080}
-      # Two users, each with their own secret: `id:token,id:token`. The token is
-      # what identifies the caller, so holding bob's token does not let anyone act
-      # as alice. Tokens must be at least 16 characters; the server refuses
-      # anything shorter at startup.
+      # How the caller is identified. `open` (the default here) takes the name from
+      # the request and treats it as the identity: `?user=alice` IS alice, with no
+      # secret behind it, so anyone who can reach this server can act as any user.
+      # That is a deliberate product decision, logged as a warning at startup.
       #
-      # No `:?` here on purpose, for the same reason as CHAT_API_KEY above: Compose
-      # interpolates the whole file for EVERY command, so a required variable makes
-      # `docker compose ps`, `logs` and `down` fail on a machine that does not export
-      # it — including the machine trying to shut the stack down. The server already
-      # validates the roster at startup, where a fault belongs: an empty value means
-      # every request is refused, which is the safe direction.
+      # `roster` restores per-user tokens (`CHAT_USERS=id:token,id:token`, tokens of
+      # at least 16 characters) and is the only mode that resists impersonation.
+      # `shared-token` accepts one token for everyone, which proves the caller was
+      # given it and proves nothing about which user they are.
+      AUTH_MODE: ${AUTH_MODE:-open}
+      # Only consulted when AUTH_MODE=roster (or as the inference fallback when
+      # AUTH_MODE is unset). No `:?` here on purpose, for the same reason as
+      # CHAT_API_KEY above: Compose interpolates the whole file for EVERY command, so
+      # a required variable makes `docker compose ps`, `logs` and `down` fail on a
+      # machine that does not export it — including the one shutting the stack down.
       CHAT_USERS: ${CHAT_USERS:-}
       # Capabilities the model gets. Invisible in the UI either way.
       # AGENT_BASH stays off by default: a shell cannot be confined to the
