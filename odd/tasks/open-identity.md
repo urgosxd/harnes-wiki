@@ -64,15 +64,38 @@ apariencia de control sin control.
 ## Tasks
 
 - [x] T1. Este documento.
-- [ ] T2. `auth.ts`: modo `open` + `mode` explícito. `main.ts`: `AUTH_MODE` y warns.
-- [ ] T3. `credentials.ts`: `user` obligatorio, `token` opcional. `App.tsx`: copy sin token.
-- [ ] T4. `docker-compose.yml`, `up.sh`, `dev-env.sh`, `smoke.mjs`, `provision-mcp.mjs`.
-- [ ] T5. `users.test.ts`: tests del modo abierto.
-- [ ] T6. README: decir que no hay cuentas.
-- [ ] T7. Verificar: server tests, vitest, tsc, curls, smoke.
+- [x] T2. `auth.ts`: modo `open` + `mode` explícito. `main.ts`: `AUTH_MODE` y warns.
+- [x] T3. `credentials.ts`: `user` obligatorio, `token` opcional. `App.tsx`: copy sin token.
+- [x] T4. `docker-compose.yml`, `up.sh`, `dev-env.sh`, `smoke.mjs`, `provision-mcp.mjs`.
+- [x] T5. `users.test.ts`: tests del modo abierto (17 tests en el archivo).
+- [x] T6. README: decir que no hay cuentas.
+- [x] T7. Verificar: server tests, vitest, tsc, curls, smoke.
 
 ## Evidence log
 
 | Fecha | Task | Evidencia |
 |---|---|---|
-| 2026-10-29 | T1 | Medido antes de tocar: `isolation.test.ts:116` construye el authenticator con `{ devToken }` y `headers()` manda un par coincidente, así que los 7 tests no dependen del roster. `http-api.test.ts:65` igual. `smoke.mjs:132` es el único que asume un secreto. |
+| 2026-10-29 | T1 | Medido antes de tocar: `isolation.test.ts:116` construye el authenticator con `{ devToken }` y `headers()` manda un par coincidente, así que los 7 tests no dependen del roster. `http-api.test.ts:65` igual. `smoke.mjs` era el único que asumía un secreto. |
+| 2026-10-29 | T2 | Un test VIEJO encontró un bug nuevo: con `open` como fallback de la inferencia, "con nada configurado todo se rechaza" fallaba (`alice` era aceptado). Corregido: `resolveAuthMode` devuelve `undefined` sin configuración, y `open` sólo se alcanza pidiéndolo. Test agregado: `inference never falls forward into open mode`. |
+| 2026-10-29 | T2 | `parseAuthMode` probado a mano: `"open"`→open, `" roster "`→roster, `""`→undefined, `"opne"`→throw `AUTH_MODE must be one of roster, shared-token, open, got "opne"`. |
+| 2026-10-29 | T5 | `users.test.ts`: 17/17. Cubre id solo, sin header, id malformado (`bad id!`, `a/b`, 65 chars), ids válidos reales, precedencia explícita sobre roster y sobre shared-token, y el fail-closed. |
+| 2026-10-29 | T7 | Server: 190 tests, 190 pass, 0 fail. Web: 175 tests, 10 files. `tsc --noEmit` exit 0 en ambos. |
+| 2026-10-29 | T7 | Stack real reconstruido con `AUTH_MODE=open`: warn en logs (`identity is the claimed x-user-id and there is no secret behind it`). Curls: `x-user-id: alice` → 200; `x-user-id: cualquiera-nuevo` → **200** (la consecuencia aceptada); sin header → 401; `bad id!` → 401; token viejo sin user → 401. |
+| 2026-10-29 | T7 | `smoke.mjs`: 7/7 checks + 1 SKIP visible. Los 3 checks de ownership siguen pasando. Bundle servido sin "Access token"/"Sign in"/"personal token". |
+| 2026-10-29 | T4 | `provision-mcp.mjs` probado: `USERS="ana,luis,ana"` deduplica; sin nada configurado nombra qué falta (`No users. Set USERS=alice,bob...`). |
+
+## Commits
+
+| Commit | Contenido |
+|---|---|
+| `a55edd5` | `docs(odd)`: la decisión y lo medido antes de tocar |
+| `ad5371d` | `feat(auth)`: modo `open`, `AUTH_MODE` explícito, fail-closed |
+| `c4b05f5` | `feat(web)`: identidad por nombre, token opcional |
+| `7613b9f` | `chore`: open por defecto, sin rosters, SKIP del smoke |
+| `73fc560` | `docs`: decir que no hay autenticación |
+
+## Cómo se vuelve atrás
+
+`AUTH_MODE=roster` + `CHAT_USERS=id:token,...` + `docker compose up -d server`. El
+código del roster está intacto y testeado. Lo único que hay que restaurar a mano es
+el check de suplantación del smoke, que hoy imprime su propio recordatorio.
