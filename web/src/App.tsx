@@ -1,72 +1,96 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ApiClient, ApiError, type Identity } from "./lib/api.ts";
+import { authHeaders, parseCredentials, type Credentials } from "./lib/credentials.ts";
 import { useChat } from "./lib/use-chat.ts";
 import { useIngest } from "./lib/use-ingest.ts";
 import { Sidebar } from "./components/Sidebar.tsx";
 import { ChatWindow } from "./components/ChatWindow.tsx";
-import { AuthGate } from "./components/AuthGate.tsx";
 import { IngestJobsPanel } from "./components/IngestJobsPanel.tsx";
 
 /**
- * Identity from the URL: `?user=alice&token=...`.
+ * The link IS the credentials: `?token=...`, optionally `&user=alice`.
  *
- * The token, not the name, is what identifies the caller. Each user has their own
- * secret (`CHAT_USERS`), so a link carrying the wrong pair is refused by the server
- * rather than silently acting as somebody else.
+ * There is deliberately no sign-in screen. A token is the only credential this
+ * product has, so a form could ask for nothing the link does not already carry: it
+ * would be a prompt for a secret the person does not possess, and it used to
+ * prefill the literal "dev" left over from the shared-token scheme.
+ *
+ * A link with no token therefore gets an explanation and nothing to type, and a
+ * rejected token gets the same explanation instead of a retry form that cannot
+ * succeed. Both paths say how to obtain a working link.
  */
-interface Credentials {
-  user: string;
-  token: string;
-}
-
-function credentialsFromUrl(): Credentials | null {
-  const params = new URLSearchParams(window.location.search);
-  const user = params.get("user")?.trim();
-  const token = params.get("token")?.trim();
-  if (!user || !token) return null;
-  return { user, token };
-}
-
-function writeCredentialsToUrl(credentials: Credentials): void {
-  const params = new URLSearchParams(window.location.search);
-  params.set("user", credentials.user);
-  params.set("token", credentials.token);
-  window.history.replaceState(null, "", `?${params.toString()}`);
-}
-
 export function App() {
-  const [credentials, setCredentials] = useState<Credentials | null>(credentialsFromUrl);
+  // Read once, at mount. The link is the identity; there is nothing to type and no
+  // state that a later edit could contradict.
+  const [credentials] = useState<Credentials | null>(() =>
+    parseCredentials(window.location.search),
+  );
 
-  const continueAs = useCallback((user: string, token: string) => {
-    const next = { user, token };
-    writeCredentialsToUrl(next);
-    setCredentials(next);
-  }, []);
-
-  if (!credentials) {
-    return <AuthGate error={null} initialUser="" initialToken="" onContinue={continueAs} />;
-  }
+  if (!credentials) return <MissingInviteLink problem="no-link" />;
 
   // Remounting on identity change is deliberate: a different user must not inherit
   // the previous user's conversations or in-flight stream.
-  return <ChatApp key={`${credentials.user}:${credentials.token}`} credentials={credentials} />;
+  return <InviteSession key={credentials.token} credentials={credentials} />;
 }
 
-function ChatApp({ credentials }: { credentials: Credentials }) {
+/** Why no usable identity is on screen, so the message can be specific. */
+type InviteProblem = "no-link" | "rejected" | "unreachable";
+
+/**
+ * The only screen shown without a working identity.
+ *
+ * It is a dead end on purpose. Every field a form could offer would ask for the
+ * token that the link already carries, so the useful content is what happened and
+ * how to get a link that works. Nothing here accepts input.
+ */
+function MissingInviteLink({ problem }: { problem: InviteProblem }) {
+  const { title, body } =
+    problem === "no-link"
+      ? {
+          title: "This page needs your link",
+          body:
+            "Access is carried by the link you were given, which includes a personal " +
+            "token. Open that link, or ask for a new one.",
+        }
+      : problem === "rejected"
+        ? {
+            title: "This link is no longer valid",
+            body:
+              "The token in this link was rejected. It may have been replaced or " +
+              "removed. Ask for a new link.",
+          }
+        : {
+            title: "Cannot reach the server",
+            body: "The server did not answer. Try again in a moment.",
+          };
+
+  return (
+    <div className="gate">
+      <div className="gate__card">
+        <h1 className="gate__title">{title}</h1>
+        <p className="gate__hint">{body}</p>
+      </div>
+    </div>
+  );
+}
+
+function InviteSession({ credentials }: { credentials: Credentials }) {
   const [identity, setIdentity] = useState<Identity | null>(null);
-  const [rejected, setRejected] = useState<string | null>(null);
+  const [rejected, setRejected] = useState<InviteProblem | null>(null);
 
   const client = useMemo(
     () =>
       new ApiClient({
-        headers: () => ({ "x-dev-token": credentials.token, "x-user-id": credentials.user }),
-        onUnauthorized: () => setRejected("That token was rejected by the server."),
+        // The token alone is a complete identity: `x-user-id` is sent only when the
+        // link named a user, because a blank value is refused by the server.
+        headers: () => authHeaders(credentials),
+        onUnauthorized: () => setRejected("rejected"),
       }),
     [credentials],
   );
 
-  // Confirm the credentials before rendering the chat, so a wrong token shows the
-  // sign-in screen instead of an empty conversation list.
+  // Confirm the link before rendering the chat, so a rejected token explains itself
+  // instead of showing an empty conversation list that looks like lost data.
   useEffect(() => {
     let cancelled = false;
     client
@@ -77,9 +101,7 @@ function ChatApp({ credentials }: { credentials: Credentials }) {
       .catch((error: unknown) => {
         if (cancelled) return;
         setRejected(
-          error instanceof ApiError && error.status === 401
-            ? "That user and token do not match. Ask for your own link."
-            : "Could not reach the server.",
+          error instanceof ApiError && error.status === 401 ? "rejected" : "unreachable",
         );
       });
     return () => {
@@ -87,21 +109,7 @@ function ChatApp({ credentials }: { credentials: Credentials }) {
     };
   }, [client]);
 
-  if (rejected) {
-    return (
-      <AuthGate
-        error={rejected}
-        initialUser={credentials.user}
-        initialToken=""
-        onContinue={(user, token) => {
-          const params = new URLSearchParams(window.location.search);
-          params.set("user", user);
-          params.set("token", token);
-          window.location.replace(`?${params.toString()}`);
-        }}
-      />
-    );
-  }
+  if (rejected) return <MissingInviteLink problem={rejected} />;
 
   if (!identity) {
     return <div className="boot">Connecting…</div>;
