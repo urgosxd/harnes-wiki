@@ -21,10 +21,18 @@ odd/tasks/      Feature plan and evidence for the current work
 
 ## API
 
-Every request needs an identity. Until real authentication is wired, the server
-refuses everything unless `DEV_AUTH_TOKEN` is set, and then accepts
-`x-dev-token: <token>` plus `x-user-id: <user>`. The user id is read from the
-request headers only, never from a body or query parameter.
+Every request needs an identity, and the token is the whole of it. The server
+refuses everything unless `CHAT_USERS` declares a roster, and then accepts
+`x-dev-token: <token>`; `x-user-id` is optional and must AGREE with the token when
+sent. The user id is read from the request headers only, never from a body or
+query parameter.
+
+```bash
+curl -H "x-dev-token: $TOKEN" http://127.0.0.1:8088/api/me   # 200 {"id":"alice",...}
+```
+
+A header sent with an EMPTY value is refused (`401`), while an absent header is
+fine — so clients omit `x-user-id` rather than send it blank.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -64,6 +72,9 @@ Never commit provider credentials.
 | Variable | Purpose |
 |---|---|
 | `PI_AGENT_DIR` | Pi agent directory holding `models.json` and, when needed, `auth.json`. Mounted read-only in containers. |
+| `CHAT_USERS` | The roster: `id:token,id:token`. This IS the user table; see **Users and tokens**. Empty means every request is refused. |
+| `CHAT_API_KEY` | Provider key. The container generates its own `models.json` from it and never carries it in the image. |
+| `POSTGRES_PASSWORD` | Database password. Applied on the volume's first `initdb` only; see the note below. |
 | `PI_WORKSPACE_DIR` | Neutral workspace handed to the session as `cwd`. Never a real project path. |
 | `CHAT_PROVIDER` | Provider id for the chat model, e.g. `synthetic`. |
 | `CHAT_MODEL` | Model id inside that provider. |
@@ -78,19 +89,116 @@ inline in `models.json` and `auth.json` is empty, so mounting only `auth.json`
 starts the server with zero credentials and every turn fails with
 `No API key found for the selected model.`
 
+### `.env` for a deployment
+
+Compose reads a `.env` beside `docker-compose.yml` and interpolates it into the
+service environment, so a deployment is configured in one git-ignored file instead
+of a shell export per command. Start from this and keep it `chmod 600`:
+
+```env
+# Provider (secret)
+CHAT_PROVIDER=synthetic
+CHAT_MODEL=syn:large:text
+CHAT_API=openai-completions
+CHAT_BASE_URL=https://api.synthetic.new/openai/v1
+CHAT_API_KEY=sk-...
+
+# Database (secret). Applied only on the volume's first initdb.
+POSTGRES_PASSWORD=<48 hex chars>
+
+# The user roster. This is the whole user table.
+CHAT_USERS=ana:<24 hex>,luis:<24 hex>
+
+# External ingest service
+INGEST_API_BASE_URL=http://host.docker.internal:4240
+PUBLIC_BASE_URL=http://<address the ingest service reaches this server at>:8080
+
+# What the model may do
+AGENT_READ_TOOLS=true
+AGENT_SKILLS=true
+AGENT_BASH=false
+AGENT_WRITES=false
+```
+
+Three notes that are easy to get wrong:
+
+1. **`POSTGRES_PASSWORD` only takes effect on the volume's first `initdb`.**
+   Changing it later leaves Postgres with the old password and the server unable to
+   connect. Either change it together with a fresh volume, or run
+   `ALTER USER agentdocumentor WITH PASSWORD '...'` inside the container.
+2. **`PUBLIC_BASE_URL` must be an address the ingest service can reach**, and
+   `INGEST_API_BASE_URL` one this server can reach. A container IP changes when the
+   network is recreated; prefer a hostname, or `extra_hosts:
+   ["host.docker.internal:host-gateway"]` when the ingest service runs on the host.
+3. **Never set `DEV_AUTH_TOKEN`.** It is the retired shared-token scheme: one secret
+   for everyone, and the `user` id taken from whatever the client claims.
+
+## Users and tokens
+
+There is no `users` table: the roster in `CHAT_USERS` **is** the user table, and a
+token is the identity. That makes each operation a one-line change plus a
+`docker compose up -d server` (no rebuild, no migration).
+
+**Add a user**
+
+```bash
+node -e 'console.log("ana:"+require("node:crypto").randomBytes(24).toString("hex"))'
+# add `ana:<token>` to CHAT_USERS, then:
+docker compose up -d server
+
+# give that user the wiki tools
+cd server && MCP_SERVER_URL=http://host.docker.internal:4240/mcp \
+  MCP_DEFAULT_STACK_ID=<stack uuid> DATABASE_URL=postgres://... \
+  node scripts/provision-mcp.mjs
+
+# verify the link before sending it
+curl -s -H "x-dev-token: <ana's token>" http://127.0.0.1:8088/api/me
+```
+
+Rules the server enforces at startup (`server/src/http/users.ts`): the id matches
+`[A-Za-z0-9._@-]{1,64}`, the token is **at least 16 characters**, and no id is
+declared twice.
+
+**Rotate a token**: replace that user's token in `CHAT_USERS` and restart the
+server. Conversations are **kept**, because `conversations.user_id` stores the id,
+not the token. The old link stops working; issue the new one.
+
+**Remove a user**: drop their `id:token` from the roster. Their conversations stay
+in the database (there is no foreign key to a roster that lives in the
+environment); delete them with SQL if that matters.
+
+**Deliver the link** over a private channel: the link is the credential.
+
 ## Two users: how the link works
 
-The URL carries both halves of an identity:
+The link carries the token, and optionally the name:
 
 ```
+http://localhost:8088/?token=<alice's token>
 http://localhost:8088/?user=alice&token=<alice's token>
-http://localhost:8088/?user=bob&token=<bob's token>
 ```
 
 **The token identifies the caller, not the `user` parameter.** Each user has a
 secret of their own, configured once in `CHAT_USERS=id:token,id:token`.
 `scripts/up.sh` and `scripts/dev-env.sh` generate that file (`.chat-users`, mode
 0600, git-ignored) on first run and print both links.
+
+**Opening a link never asks for credentials.** There is no sign-in form: a token is
+the only credential this product has, so a form could ask for nothing the link does
+not already carry. The two paths that used to show one now explain themselves
+instead:
+
+| URL | What the person sees |
+|---|---|
+| `?token=...` (with or without `user`) | The product, straight away |
+| No token | "This page needs your link", and nothing to type |
+| A rejected token | "This link is no longer valid — ask for a new one" |
+| Server down | "Cannot reach the server", never a credentials error |
+
+The name shown in the sidebar comes from `GET /me`, not from the URL, because the
+server resolves it from the token. The `user` parameter is a display hint that
+saves one round trip; it cannot be used to act as somebody else — a claimed id that
+disagrees with the token is refused.
 
 Why this matters, and why it was a bug before: with a single shared token, the
 `user` parameter was only a claim. Measured on the running stack, one user could
@@ -278,8 +386,15 @@ executes the TypeScript directly.
 
 ## Client
 
-React 19 + Vite. `?token=` and `?user=` in the URL are a development convenience
-for switching identity, not an authentication scheme.
+React 19 + Vite. The `?token=` in the URL IS how a user authenticates (`?user=` is
+an optional display hint), and the rules for reading it live in
+`web/src/lib/credentials.ts` with their own tests.
+
+One consequence worth stating: the token appears in the URL, so it also appears in
+nginx's access log (default `combined` format logs the query string). Use TLS in
+front of this stack, and treat the logs as sensitive. Moving the token to the URL
+fragment (`#token=`) would keep it out of the server log — a deliberate follow-up,
+not an oversight.
 
 Text is rendered as text, never as HTML: model output is untrusted input.
 The SSE parser is hand-written because a chunk boundary can fall inside a frame,
