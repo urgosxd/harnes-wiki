@@ -54,14 +54,37 @@ desaparece**. No hay pantalla de credenciales en ninguna rama.
 
 ## Tasks
 
-- [ ] T2. `web/src/lib/credentials.ts` con `parseCredentials`, `authHeaders`, `credentialsUrl` + `credentials.test.ts`.
-- [ ] T3. `App.tsx` usa el módulo; `MissingInviteLink` reemplaza a `AuthGate`; `auth-gate.test.tsx` y `AuthGate.tsx` eliminados.
-- [ ] T4. `docker-compose.yml`: `CHAT_USERS` con `:-` en vez de `:?`.
-- [ ] T5. README: configuración, sección de links, alta de usuarios.
-- [ ] T6. Verificación: vitest, tsc, `docker compose config`, curls contra el stack.
+- [x] T2. `web/src/lib/credentials.ts` con `parseCredentials`, `authHeaders`, `credentialsUrl` + `credentials.test.ts`.
+- [x] T3. `App.tsx` usa el módulo; `MissingInviteLink` reemplaza a `AuthGate`; `auth-gate.test.tsx` y `AuthGate.tsx` eliminados.
+- [x] T4. `docker-compose.yml`: `CHAT_USERS` con `:-` en vez de `:?`.
+- [x] T5. README: configuración, sección de links, alta de usuarios.
+- [x] T6. Verificación: vitest, tsc, `docker compose config`, curls contra el stack.
 
 ## Evidence log
 
 | Fecha | Task | Evidencia |
 |---|---|---|
 | 2026-10-29 | T1 | `vitest run`: 9 files, 165 tests passed. `tsc --noEmit`: exit 0. |
+| 2026-10-29 | T2 | `credentials.test.ts`: 9 tests verdes. Antes de implementar el m\u00f3dulo la suite fallaba al importar (`no tests`), que es el rojo esperado. |
+| 2026-10-29 | T2/T3 | Mutation check: reintroducir `if (!token \|\| !user) return null` rompe 5 tests; enviar `x-user-id` vac\u00edo rompe 2. C\u00f3digo restaurado, 14/14 verdes. Un test que pasa con el bug presente no prueba nada. |
+| 2026-10-29 | T3 | Suite completa: 10 files, 174 tests passed. `tsc --noEmit`: exit 0. `grep AuthGate src/`: sin referencias. |
+| 2026-10-29 | T4 | Sin `CHAT_USERS` en el shell: antes `docker compose config`/`ps` fallaban con `required variable`; ahora `config OK` y los 3 contenedores listados. Con la variable exportada, se inyecta igual. |
+| 2026-10-29 | T4 | Falla cerrado verificada dentro de la imagen: con roster vac\u00edo, `createAuthenticator` devuelve `undefined` para cualquier token, o sea toda request es 401. |
+| 2026-10-29 | T6 | Stack real (imagen web reconstruida): `smoke.mjs` 8/8, incluido "a token cannot claim another user's identity". Bundle servido sin `Sign in` / `Access token` / `Your name`; con los tres textos nuevos. Curls: token solo 200, par correcto 200, `user` ajeno 401, token inv\u00e1lido 401. |
+
+## Commits
+
+| Commit | Contenido |
+|---|---|
+| `4cd7149` | `docs(odd)`: el plan y su evidencia medida |
+| `4cfab0c` | `feat(auth)`: `credentials.ts` + tests |
+| `e41d088` | `feat(auth)`: `App` sin formulario, `AuthGate` eliminado, `app.test.tsx` |
+| `b553e12` | `fix(compose)`: `CHAT_USERS` deja de ser obligatoria para cada comando |
+| `6d59030` | `docs`: `.env`, alta/rotaci\u00f3n de usuarios, links, y la fuga conocida |
+
+## Lo que este cambio NO arregla
+
+El token sigue en el query string, así que nginx lo escribe en `access.log` (formato
+`combined`, verificado: `docker logs agentdoc-web` muestra `GET /?user=bob&token=...`).
+Moverlo al fragmento (`#token=`) o a `sessionStorage` es una feature aparte, con su
+propio cambio de contrato de enlaces.
