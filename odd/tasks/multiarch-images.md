@@ -95,6 +95,25 @@ y por eso existe `PUSH=1`: con registry el problema no aparece.
 | 2026-10-29 | T6 | Arranque desde el tag único: server amd64 → `arch: x64`; server arm64 → `arch: arm64`; web en ambas → `HTTP 200` con el mismo bundle. |
 | 2026-10-29 | T6 | Stack de prod levantado desde las imágenes finales y smoke 7/7 + 1 SKIP. |
 
+## Publicación real en Docker Hub (2026-10-29)
+
+Hecha a mano con `docker buildx build --push`, sin pasar por `scripts/build.sh`:
+
+| Imagen | Manifest list | amd64 | arm64 |
+|---|---|---|---|
+| `urgosxd7/agentdocumentor-server:0.1.0` | `sha256:d30a6c5d` | `sha256:6de12ad8` | `sha256:1d27fd0d` |
+| `urgosxd7/agentdocumentor-web:0.1.0` | `sha256:540e2686` | `sha256:eae83a7c` | `sha256:3a589973` |
+
+Verificado **desde el registry**, no desde el cache local: `pull --platform linux/arm64`
+y `--platform linux/amd64` traen digests distintos, y cada uno corre en su
+arquitectura (`arch: arm64` / `arch: x64`). El web responde `HTTP 200` en ambas.
+El stack completo, levantado con `docker-compose.prod.yml` contra el Hub, pasa el
+smoke 7/7.
+
+Detalle que confunde al inspeccionar: `imagetools inspect` muestra dos entradas
+`unknown/unknown` además de amd64 y arm64. Son las atestaciones de provenance que
+buildx adjunta, no imágenes ejecutables.
+
 ## Nota de operación encontrada durante la verificación
 
 Levantar el compose de prod sobre el volumen de Postgres existente falla con
