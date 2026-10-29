@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseRoster, resolveRosterUser, tokenMatches } from "../src/http/users.ts";
-import { createAuthenticator } from "../src/http/auth.ts";
+import { createAuthenticator, resolveAuthMode } from "../src/http/auth.ts";
 import type { IncomingMessage } from "node:http";
 
 const ROSTER = "alice:alice-token-aaaaaaaa,bob:bob-token-bbbbbbbbbb";
@@ -76,4 +76,64 @@ test("the legacy shared token still works, and still trusts the claimed id", asy
   const authenticate = createAuthenticator({ devToken: "dev" });
   // Documented weakness of legacy mode, kept only for an existing setup.
   assert.equal(await authenticate(request({ "x-dev-token": "dev", "x-user-id": "anyone" })), "anyone");
+});
+
+/**
+ * Open mode: the name in the request IS the identity, with no secret behind it.
+ *
+ * These tests pin what the mode does AND what it refuses to pretend. The id is a
+ * claim the server cannot check, so the only thing worth asserting beyond "it is
+ * accepted" is that a malformed or missing id cannot reach the database as a row.
+ */
+test("open mode resolves a caller from the claimed id alone", async () => {
+  const authenticate = createAuthenticator({ mode: "open" });
+  assert.equal(await authenticate(request({ "x-user-id": "alice" })), "alice");
+  // No token anywhere in the request, and none required.
+  assert.equal(await authenticate(request({ "x-user-id": "someone-else" })), "someone-else");
+});
+
+test("open mode refuses a request with no id", async () => {
+  const authenticate = createAuthenticator({ mode: "open" });
+  assert.equal(await authenticate(request({})), undefined);
+  assert.equal(await authenticate(request({ "x-user-id": "   " })), undefined);
+});
+
+test("open mode refuses an id that would corrupt a row or a log line", async () => {
+  const authenticate = createAuthenticator({ mode: "open" });
+  // Not security: a slash or a space makes an unusable user_id, and an empty one
+  // silently shares one bucket between everybody.
+  assert.equal(await authenticate(request({ "x-user-id": "bad id!" })), undefined);
+  assert.equal(await authenticate(request({ "x-user-id": "a/b" })), undefined);
+  assert.equal(await authenticate(request({ "x-user-id": "x".repeat(65) })), undefined);
+});
+
+test("open mode accepts an id made of the characters this product uses", async () => {
+  const authenticate = createAuthenticator({ mode: "open" });
+  for (const id of ["alice", "ana.lopez", "j_doe", "ops@example.com", "team-1"]) {
+    assert.equal(await authenticate(request({ "x-user-id": id })), id);
+  }
+});
+
+test("inference never falls forward into open mode", async () => {
+  // A server started with no identity configuration must refuse everything. If the
+  // weakest mode were the fallback, forgetting an env var would silently publish
+  // every conversation to anyone who could reach the port.
+  assert.equal(resolveAuthMode({}), undefined);
+  assert.equal(await createAuthenticator({})(request({ "x-user-id": "alice" })), undefined);
+});
+
+test("an explicit open mode wins over a configured roster and a shared token", async () => {
+  // The precedence has to be stated, not inferred: with a roster present, an
+  // operator switching to AUTH_MODE=open must actually get open mode.
+  const authenticate = createAuthenticator({ mode: "open", users: ROSTER, devToken: "dev" });
+  assert.equal(await authenticate(request({ "x-user-id": "alice" })), "alice");
+});
+
+test("an explicit roster mode wins over a shared token", async () => {
+  const authenticate = createAuthenticator({ mode: "roster", users: ROSTER, devToken: "dev" });
+  // The roster still refuses a claimed id that disagrees with the token.
+  assert.equal(
+    await authenticate(request({ "x-dev-token": "bob-token-bbbbbbbbbb", "x-user-id": "alice" })),
+    undefined,
+  );
 });

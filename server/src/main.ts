@@ -14,7 +14,7 @@ import { ConversationStore } from "./db/conversation-store.ts";
 import { TenantRuntime, type TenantDefinition } from "./pi/tenant-runtime.ts";
 import { TurnService } from "./api/turn-service.ts";
 import { createRouter } from "./http/router.ts";
-import { createAuthenticator } from "./http/auth.ts";
+import { createAuthenticator, parseAuthMode, resolveAuthMode } from "./http/auth.ts";
 import { registerRoutes } from "./api/routes.ts";
 import { SYSTEM_PROMPT } from "./pi/system-prompt.ts";
 import { registerIngestRoutes } from "./api/ingest-routes.ts";
@@ -159,17 +159,38 @@ async function main(): Promise<void> {
     thinkingLevel: config.thinkingLevel,
   });
 
-  const authenticator = createAuthenticator({
+  const authConfig = {
+    mode: parseAuthMode(process.env.AUTH_MODE),
     users: process.env.CHAT_USERS,
     devToken: process.env.DEV_AUTH_TOKEN,
-  });
-  if (!process.env.CHAT_USERS && !process.env.DEV_AUTH_TOKEN) {
-    log.warn("no CHAT_USERS or DEV_AUTH_TOKEN: every request will be refused");
-  } else if (!process.env.CHAT_USERS) {
+  };
+  const authenticator = createAuthenticator(authConfig);
+
+  // Say which scheme is live, and say it loudly when the scheme has no secret. An
+  // operator reading the logs should never have to infer whether callers are
+  // identified or merely self-declared.
+  const authMode = resolveAuthMode(authConfig);
+  if (!authMode) {
+    log.warn("no AUTH_MODE, CHAT_USERS or DEV_AUTH_TOKEN: every request will be refused");
+  } else if (authMode === "open") {
     log.warn(
-      "DEV_AUTH_TOKEN is set but CHAT_USERS is not: one shared token means any client " +
-        "can claim any user id. Set CHAT_USERS=id:token,id:token for per-user identities.",
+      "AUTH_MODE=open: identity is the claimed x-user-id and there is no secret behind " +
+        "it. Anyone who can reach this server can act as any user.",
+      { authMode },
     );
+    if (process.env.CHAT_USERS?.trim()) {
+      log.warn("CHAT_USERS is set but AUTH_MODE=open: the roster is being ignored", {
+        authMode,
+      });
+    }
+  } else if (authMode === "shared-token") {
+    log.warn(
+      "AUTH_MODE resolves to shared-token: one token for everyone means any client can " +
+        "claim any user id. Set CHAT_USERS=id:token,id:token for per-user identities.",
+      { authMode },
+    );
+  } else {
+    log.info("identity resolved from a per-user roster", { authMode });
   }
 
   const router = createRouter({ authenticate: authenticator });
