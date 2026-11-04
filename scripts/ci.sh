@@ -43,14 +43,21 @@ cd "$ROOT"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-agentdocumentor}"
 export COMPOSE_PROJECT_NAME
 
-# The network name is DERIVED from compose itself, not written here. Compose names its
-# networks `<project>_<key>`, and asking it beats assuming: if the compose file ever
-# renames the network, or a deployment sets a different project, this still points at the
-# one compose will create.
-compose_project_name() {
-  docker compose config 2>/dev/null | awk '/^name:[[:space:]]/ { print $2; exit }'
+# The network name is DERIVED from compose itself — the whole name, not a prefix with a
+# suffix this script guessed. Compose renders the final name it will create (`networks:`
+# -> `name:`), so asking it beats assuming: rename the network key, set a different
+# project, or deploy somewhere with its own project name, and this still points at the one
+# compose will create. Anything else is the same assumption that cost a round already: a
+# name that matches on one machine and times out on another.
+compose_network_name() {
+  docker compose config 2>/dev/null | awk '
+    /^networks:[[:space:]]*$/ { inside = 1; next }
+    inside && /^[^[:space:]]/ { inside = 0 }
+    inside && /^[[:space:]]+name:[[:space:]]/ { print $2; found += 1 }
+    END { if (found != 1) exit 1 }
+  '
 }
-COMPOSE_NETWORK="${COMPOSE_NETWORK:-$(compose_project_name)_internal}"
+COMPOSE_NETWORK="${COMPOSE_NETWORK:-$(compose_network_name)}"
 TEST_DATABASE_URL="${TEST_DATABASE_URL:-postgres://agentdocumentor:agentdocumentor@postgres:5432/agentdocumentor}"
 DB_WAIT_SECONDS="${DB_WAIT_SECONDS:-120}"
 
@@ -65,8 +72,8 @@ fail() {
 
 # Checked here, after `fail` exists: a derivation that produced nothing would leave the
 # literal "_internal" and then time out with a message naming the wrong cause.
-if [ -z "${COMPOSE_NETWORK%_internal}" ]; then
-  fail "could not derive the compose project name; is docker-compose.yml readable here?"
+if [ -z "$COMPOSE_NETWORK" ]; then
+  fail "could not derive the compose network name: docker-compose.yml must declare exactly one network"
 fi
 
 step "docker is usable"

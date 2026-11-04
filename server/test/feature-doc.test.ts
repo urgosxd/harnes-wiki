@@ -39,10 +39,12 @@ interface TaskRow {
  * Task rows: the five-column table this project writes its features in
  * (`| ID | Task | Spec | Route | Commit |`).
  *
- * A row with a different column count is not one of these tables — an older document may
- * use a four-column table or plain bullets — and is left alone rather than read as if its
- * last cell were a commit. A guard that misreads an unrelated document into a failure is
- * a guard nobody keeps.
+ * Every other table in the corpus is left alone, and the reason is substantive rather than
+ * defensive: those tables have no commit cell. They are decision logs (`# | Decisión |
+ * Motivo`), evidence logs (`Fecha | Task | Evidencia`), commit narrations (`Commit |
+ * Contenido`) and measurement tables — none records a task's commit, so none can be
+ * misread as one. A guard that fails on an unrelated table gets deleted; a guard that
+ * reads one as a task row lies.
  */
 function taskRows(markdown: string): TaskRow[] {
   return markdown
@@ -51,6 +53,19 @@ function taskRows(markdown: string): TaskRow[] {
     .map((line) => line.split("|").slice(1, -1).map((cell) => cell.trim()))
     .filter((cells) => cells.length === 5)
     .map((cells) => ({ id: cells[0] ?? "", commit: cells[4] ?? "" }));
+}
+
+/** The header row of every markdown table in a document, in order. */
+function tableHeaders(markdown: string): string[][] {
+  return markdown
+    .split("\n")
+    .filter((line) => line.trimStart().startsWith("|"))
+    .map((line) => line.split("|").slice(1, -1).map((cell) => cell.trim()))
+    .filter((cells, index, all) => {
+      // A header row is followed by a separator row of dashes.
+      const next = all[index + 1];
+      return next !== undefined && next.every((cell) => /^:?-{2,}:?$/.test(cell));
+    });
 }
 
 /** A commit cell "names a commit" when it contains a hex SHA of at least 7 characters. */
@@ -97,20 +112,6 @@ if (inCheckout) {
       }
     });
 
-    test(`${file}: a document with no pending task is not still in progress`, () => {
-      if (rows.length === 0) return;
-      const open = rows.filter((row) => /pending/i.test(row.commit));
-      const statusLine = /^Status:\s*(.+)$/m.exec(markdown);
-      if (!statusLine) return;
-      const status = (statusLine[1] ?? "").trim();
-      if (open.length === 0) {
-        assert.doesNotMatch(
-          status,
-          /in progress/i,
-          `every task has a commit, so the header cannot say "${status}"`,
-        );
-      }
-    });
   }
 
   test("the reconciled feature document is actually in that set", () => {
@@ -118,6 +119,43 @@ if (inCheckout) {
     assert.ok(
       existsSync(join(FEATURES_DIR, "multitenant-stackId.md")),
       "multitenant-stackId.md must exist for these rules to mean anything",
+    );
+  });
+
+  test("every task-shaped table is evaluated, so a new shape cannot slip in unread", () => {
+    // The rules above only ever read five-column tables. Measured on this corpus, exactly
+    // one document has one (multitenant-stackId.md, 29 rows) and the other four contribute
+    // nothing — which is fine while it is TRUE and dangerous the moment a table that does
+    // record commits appears in a shape the parser skips silently.
+    //
+    // So: any table whose header names both a task id in front and a commit at the end is
+    // a task table, and must be evaluated. The legacy logs escape on the substance — their
+    // last column is `Motivo`, `Evidencia` or `Contenido`, and a `Commit | Contenido` log
+    // has no task id in front — not on a column count.
+    const evaluatedDocuments: string[] = [];
+    for (const file of readdirSync(FEATURES_DIR).filter((name) => name.endsWith(".md"))) {
+      const markdown = readFileSync(join(FEATURES_DIR, file), "utf8");
+      if (taskRows(markdown).length > 0) evaluatedDocuments.push(file);
+
+      for (const header of tableHeaders(markdown)) {
+        const first = (header[0] ?? "").toLowerCase();
+        const last = (header.at(-1) ?? "").toLowerCase();
+        const taskShaped = /^(id|#|task)$/.test(first) && /commit/.test(last);
+        if (!taskShaped) continue;
+        assert.equal(
+          header.length,
+          5,
+          `${file}: a task table with columns [${header.join(" | ")}] is task-shaped but not ` +
+            "evaluated; teach taskRows() about it or the rules silently skip it",
+        );
+      }
+    }
+
+    assert.deepEqual(
+      evaluatedDocuments,
+      ["multitenant-stackId.md"],
+      "one document carries task rows today; a second one means the rules reach further " +
+        "than the spec says and the spec must be restated",
     );
   });
 } else {

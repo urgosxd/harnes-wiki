@@ -57,8 +57,20 @@ test("the script never hardcodes a Docker name derived from the checkout directo
   // holding docker-compose.yml: `AgentDocumentor` here, the repository's name under
   // actions/checkout. A literal `*_internal` works on exactly one checkout and then
   // reports "no database answered" on every CI run, blaming the database for a path bug.
-  assert.doesNotMatch(script, /[A-Za-z0-9_-]+_internal/);
-  assert.match(script, /COMPOSE_PROJECT_NAME/);
+  //
+  // Read as CONFIGURATION, with comments stripped. This file's own history is the reason:
+  // the script documents that failure in prose, and a guard that fails on documentation
+  // teaches the next person to delete the documentation instead of keeping it.
+  const configured = configuration(script);
+  assert.doesNotMatch(configured, /[A-Za-z0-9_-]+_internal/);
+
+  // The PIN, in its EXPORT form. `COMPOSE_PROJECT_NAME=...` on its own line sets a shell
+  // variable and exports nothing, and the child `docker compose` calls never see it — the
+  // blocker would be back while a bare-name assertion stayed green.
+  assert.match(configured, /^export COMPOSE_PROJECT_NAME$/m);
+
+  // And the network name comes from compose, not from a suffix this script appends.
+  assert.match(configured, /COMPOSE_NETWORK="\$\{COMPOSE_NETWORK:-\$\(compose_network_name\)\}"/);
 });
 
 test("the database tier is required, and the suite is mounted rather than baked", { skip }, () => {
