@@ -55,16 +55,27 @@ S13 (scope guard). No hard gate on the chat surface in this unit: without a `sta
 
 | ID | Task | Spec | Route | Commit |
 |---|---|---|---|---|
-| T1 | Feature document and the supersede record | S1 / D5 | inline | `docs(odd)` |
-| T2 | Link parsing module (`web/src/lib/tenant.ts`) with its unit tests | S5, S2, S3 | inline | `feat(web)` |
-| T3 | Ingest hook resolves the StackId from the link and issues zero requests while blocked | S2, S3, S4, S6 | inline | `feat(web)` |
-| T4 | Panel loses the picker; the blocked state is the only thing it renders | S2, S3, S4 | inline | `feat(web)` |
-| T5 | Dead picker machinery removed (`stacks.ts` and its tests) | S2 | inline | `feat(web)` |
-| T6 | Public-surface tests for the four rules the requester named | S3, S4, S6 | inline | `test(web)` |
-| T7 | README describes the link, server contract untouched and its suite green | S1, S7 | inline | `docs` |
+| T1 | Feature document and the supersede record | S1 / D5 | inline | `0f55329` |
+| T2 | Link parsing module (`web/src/lib/tenant.ts`) with its unit tests | S5, S2, S3 | worker `stackid-link-resolution` | `490bef0` |
+| T3 | Ingest hook resolves the StackId from the link and issues zero requests while blocked | S2, S3, S4, S6 | worker | `490bef0` |
+| T4 | Panel loses the picker; the blocked state is the only thing it renders | S2, S3, S4 | worker | `490bef0` |
+| T5 | Dead picker machinery removed (`stacks.ts` and its tests) | S2 | parent (`git rm`, the worker's policy forbids deletion) | `490bef0` |
+| T6 | Public-surface tests for the four rules the requester named | S3, S4, S6 | worker | `490bef0` |
+| T7 | README describes the link, server contract untouched and its suite green | S1, S7 | inline | `c2ca32a` |
+| T8 | Stack context replaces the stored default in the tool path | S8, S9, S10, S11, S12 | worker | pending |
+| T9 | `MCP_DEFAULT_STACK_ID` optional in provisioning, with one deprecation warning | S8, D6 | inline | pending |
+| T10 | README:218 and :621 describe the variable as ignored, with the fail-closed consequence beside them | S13 | inline | pending |
+| T11 | Independent read-only verification pass over unit 2 | S8-S12 | `gentle-ai-verify` | pending |
 
 T2-T5 land as one work unit because the SPA must compile: the hook, the panel and the
 App all read the same value, so no intermediate commit can remove one end alone.
+
+## Delivery slices
+
+Unit 1 is one reviewable slice: `490bef0` (frontend + tests) with `c2ca32a` (docs).
+Measured after T5's deletion: web 166 tests pass, `tsc --noEmit` clean, production
+build clean; server 174 tests, 132 pass, 0 fail, 42 skipped, `server/` untouched.
+Unit 2 (T8-T11) is the next slice and must not be folded into unit 1's commits.
 
 ## Log
 
