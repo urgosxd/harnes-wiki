@@ -251,3 +251,34 @@ and absent mean no context, nothing inherited between requests, concurrency, and
 duplicate header refused) and `web/src/app-zero-requests.test.tsx` (App-level: four
 shapes of a link without a Stack issue zero requests and show the alert, and a link with
 one carries it everywhere). The duplicate-header case asserts the NEW expectation.
+
+L18 (C1, the proof we never had — requester's authorisation, verbatim):
+
+> "1 creemos un CI basico con docker que pruebe los tests 2 puedes eleminar todo es data de prueba"
+
+Deletion scope, exactly two targets and nothing else: the local dev volume
+`agentdocumentor_agentdoc-pgdata` (recreated by `docker-compose.yml` with the credentials
+that file declares) and the verification scratch `/tmp/verify-mts.MMOB6G`. The
+`agentdoc-workspace` volume was NOT touched, no image, network, remote host or other file
+was touched, and `docker compose down -v` was deliberately not used because it would have
+removed both volumes.
+
+Result of the run that follows a fresh `initdb`:
+
+    ok 154 - a turn's Stack survives into the background chain, per request
+    # tests 227
+    # pass 227
+    # fail 0
+    # skipped 0
+
+**The end-to-end inheritance of the request context is now proven, not asserted.** With a
+database this checkout can authenticate against, every tier ran — including the
+credential-gated live-model tests, because this machine has real Pi credentials — and all
+227 passed. The 19 failures and 19 cancellations seen earlier were the volume's password
+and nothing else, which is now measured rather than assumed.
+
+Consequence for the next task: the password the tests use is `agentdocumentor`, the
+compose file's default (`docker-compose.yml:12`), and it is in the repository — so CI
+needs no secret for the database, and no password has to be hardcoded outside the file
+that already declares it.
+
