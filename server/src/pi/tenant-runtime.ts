@@ -10,6 +10,7 @@ import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "typebox";
 import { agentToolNames, createAgentTools, type AgentToolOptions } from "./agent-tools.ts";
+import { currentStackId } from "./stack-context.ts";
 import { Type } from "typebox";
 import type { ThinkingLevelName } from "../config.ts";
 
@@ -38,16 +39,12 @@ export type TenantMcpServer =
       /** Streamable-HTTP endpoint, e.g. `http://host:4173/mcp`. */
       url: string;
       /**
-       * Stack to name on EVERY call to this server.
+       * Sent on every request; some servers refuse the call without them.
        *
-       * The tools take `stackId` optionally and omitting it inherits the host's
-       * binding. That default is not ours: on 2026-10-28 it moved to an empty Stack
-       * and the agent truthfully reported "0 pages" about a Stack the user had never
-       * heard of, while their real work sat in another one. Naming it explicitly
-       * turns a remote environment variable into a value this product chose.
+       * The Stack is deliberately NOT here. It is not deployment configuration: it
+       * comes from the request that started the turn, through `stack-context.ts`, so
+       * one shared upstream cannot be pointed at one Stack on everyone's behalf.
        */
-      defaultStackId?: string | null;
-      /** Sent on every request; some servers refuse the call without them. */
       headers?: Record<string, string>;
     };
 
@@ -199,7 +196,6 @@ export class TenantRuntime {
             tenant.id,
             client,
             wanted.map((name) => byName.get(name)!),
-            server.transport === "http" ? (server.defaultStackId ?? undefined) : undefined,
           ),
         );
         connections.set(server.name, { server, client, toolNames: wanted });
@@ -287,12 +283,14 @@ function toolName(tool: ToolDefinition): string {
  * The proxy narrows MCP to direct tools: codemode scripts, tool search and MCP
  * resources are not exposed. A business chat wants plain callable tools, and this
  * keeps one process per server instead of one per session.
+ *
+ * The Stack of every call is resolved HERE, per call, from the request's context —
+ * never from the tenant's row. See `resolveStackArgument`.
  */
 export function proxyMcpTools(
   tenantId: string,
   client: McpClient,
   tools: readonly { name: string; description?: string; inputSchema?: Record<string, unknown> }[],
-  defaultStackId?: string,
 ): ToolDefinition[] {
   return tools.map((tool) =>
     defineTool({
@@ -311,26 +309,97 @@ export function proxyMcpTools(
           : { type: "object", properties: {}, additionalProperties: true },
       ),
       execute: async (_toolCallId: string, params: Record<string, unknown>) => {
-        // Name the Stack ourselves rather than inheriting the host's binding, and
-        // let an explicit argument win: a tool the schema says takes `stackId` may
-        // legitimately be pointed somewhere else, and silently overriding the
-        // caller would be the same class of lie in the other direction.
-        const args =
-          defaultStackId !== undefined && (params ?? {}).stackId === undefined
-            ? { ...(params ?? {}), stackId: defaultStackId }
-            : (params ?? {});
-        const result = await client.callTool(tool.name, args);
-        const text = (result.content ?? [])
-          .filter((block) => block.type === "text")
-          .map((block) => ({ type: "text" as const, text: block.text }));
-        return {
-          content: text.length ? text : [{ type: "text" as const, text: "(no text content)" }],
-          details: {},
-          isError: Boolean(result.isError),
-        };
+        const args = params ?? {};
+        // A tool that belongs to no Stack is called exactly as before: injecting a
+        // Stack into it would send a field it never declared.
+        if (!isStackScoped(tool.inputSchema)) return await callAndShape(client, tool.name, args);
+
+        const resolved = resolveStackArgument(tool.name, args);
+        if ("error" in resolved) return toolError(resolved.error);
+        return await callAndShape(client, tool.name, resolved.args);
       },
     }) as unknown as ToolDefinition,
   );
+}
+
+/**
+ * Resolve the `stackId` a Stack-scoped call must carry.
+ *
+ * The link's Stack is the only source, so this either fills it in or refuses. It
+ * never falls back to a default and never silently replaces what the model asked
+ * for: a call naming a different Stack is a contradiction between the request and
+ * the argument, and the honest answer to a contradiction is an error naming both.
+ */
+function resolveStackArgument(
+  toolName: string,
+  args: Record<string, unknown>,
+): { args: Record<string, unknown> } | { error: string } {
+  const stackId = currentStackId();
+  if (!stackId) {
+    return {
+      error:
+        `${toolName} works on one Stack, and this turn has no Stack. ` +
+        "Open the app with a link that names it — ?user=<name>&stackId=<stack-id> — and ask again.",
+    };
+  }
+
+  const named = args.stackId;
+  // Absent or blank is not a choice: the model left the field out and the request
+  // supplies it. Blank counts here for the same reason the link does — `stackId: ""`
+  // names no Stack, it just looks like it does.
+  if (named === undefined || named === null || (typeof named === "string" && named.trim() === "")) {
+    return { args: { ...args, stackId } };
+  }
+  if (typeof named === "string" && named.trim() === stackId) {
+    return { args: { ...args, stackId } };
+  }
+  return {
+    error:
+      `${toolName} runs on Stack '${stackId}' in this turn, but the call named Stack ` +
+      `'${String(named)}'. Call it again without stackId to use this turn's Stack, or open ` +
+      `the app with a link naming Stack '${String(named)}'.`,
+  };
+}
+
+/**
+ * Is this tool scoped to one Stack?
+ *
+ * The schema is the test, not the tenant or the server: a tool declares `stackId`
+ * when it reads one Stack, and a tool that does not declare it must keep working
+ * untouched. Nobody has to configure this, and a tool added upstream later needs no
+ * change here.
+ */
+function isStackScoped(inputSchema: Record<string, unknown> | undefined): boolean {
+  const properties = (inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
+  return Boolean(properties && Object.prototype.hasOwnProperty.call(properties, "stackId"));
+}
+
+interface ToolResult {
+  content: Array<{ type: "text"; text: string }>;
+  details: Record<string, unknown>;
+  isError?: boolean;
+}
+
+/** Call the upstream and shape its answer for the model. */
+async function callAndShape(
+  client: McpClient,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<ToolResult> {
+  const result = await client.callTool(name, args);
+  const text = (result.content ?? [])
+    .filter((block) => block.type === "text")
+    .map((block) => ({ type: "text" as const, text: block.text }));
+  return {
+    content: text.length ? text : [{ type: "text" as const, text: "(no text content)" }],
+    details: {},
+    isError: Boolean(result.isError),
+  };
+}
+
+/** A refusal the model can read and act on, in the same shape as a tool error. */
+function toolError(text: string): ToolResult {
+  return { content: [{ type: "text", text }], details: {}, isError: true };
 }
 
 /**

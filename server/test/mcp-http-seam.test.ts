@@ -6,6 +6,7 @@ import { createDatabase, type Database } from "../src/db/pool.ts";
 import { migrate } from "../src/db/migrate.ts";
 import { ConversationStore } from "../src/db/conversation-store.ts";
 import { TenantRuntime } from "../src/pi/tenant-runtime.ts";
+import { withStackContext } from "../src/pi/stack-context.ts";
 import { databaseReady } from "./support/harness.ts";
 import { AGENT_DIR, hasCredentials, makeWorkspace } from "./support/env.ts";
 
@@ -29,6 +30,14 @@ class FakeMcpHttpServer {
   port = 0;
   /** Every request the server saw, so a test can prove headers arrived. */
   readonly seen: Array<{ method: string; accept: string | undefined; auth: string | undefined }> = [];
+  /**
+   * Every `tools/call` this server was asked to run.
+   *
+   * Counted separately from `seen` because the transport also POSTs `initialize` and
+   * `tools/list`: "the request reached the server" and "the tool was actually
+   * invoked" are different facts, and a read scope is protected by the second.
+   */
+  readonly calls: Array<{ name: string; args: Record<string, unknown> }> = [];
   /** Tool names this server advertises. */
   /**
    * Tool descriptors this server advertises.
@@ -117,6 +126,7 @@ class FakeMcpHttpServer {
           return;
         case "tools/call": {
           const params = (rpc.params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
+          this.calls.push({ name: params.name ?? "", args: params.arguments ?? {} });
           const stackId = params.arguments?.stackId;
           // Mirror the real guard: an id this server does not know is an ERROR, not
           // an empty listing. Without this distinction a caller cannot tell "no
@@ -298,13 +308,16 @@ describe("the tenant MCP seam can speak streamable HTTP", () => {
         execute: (...args: unknown[]) => Promise<{ content: Array<{ text?: string }>; isError?: boolean }>;
       };
 
-      // A known Stack: the argument must arrive intact.
-      const known = await tool.execute(
-        "c1",
-        { stackId: "11111111-1111-1111-1111-111111111111" },
-        undefined,
-        undefined,
-        undefined,
+      // A known Stack: the argument must arrive intact. The turn's context names the
+      // same Stack, which is the only way such a call is allowed through at all now.
+      const known = await withStackContext("11111111-1111-1111-1111-111111111111", () =>
+        tool.execute(
+          "c1",
+          { stackId: "11111111-1111-1111-1111-111111111111" },
+          undefined,
+          undefined,
+          undefined,
+        ),
       );
       assert.match(
         known.content.map((b) => b.text ?? "").join(""),
@@ -314,13 +327,17 @@ describe("the tenant MCP seam can speak streamable HTTP", () => {
       assert.ok(!known.isError);
 
       // An unknown Stack: an error, NOT an empty listing. If the proxy swallowed
-      // isError, a picker would show a non-existent Stack as a valid empty one.
-      const unknown = await tool.execute(
-        "c2",
-        { stackId: "00000000-0000-0000-0000-000000000000" },
-        undefined,
-        undefined,
-        undefined,
+      // isError, a picker would show a non-existent Stack as a valid empty one. The
+      // context names it too, so this is the upstream's answer and not the proxy's
+      // refusal to call.
+      const unknown = await withStackContext("00000000-0000-0000-0000-000000000000", () =>
+        tool.execute(
+          "c2",
+          { stackId: "00000000-0000-0000-0000-000000000000" },
+          undefined,
+          undefined,
+          undefined,
+        ),
       );
       assert.equal(unknown.isError, true, "isError must survive the proxy");
       assert.match(unknown.content.map((b) => b.text ?? "").join(""), /No Stack/);
@@ -329,7 +346,19 @@ describe("the tenant MCP seam can speak streamable HTTP", () => {
     }
   });
 
-  test("omitting stackId still works: the contract is backward compatible", { skip }, async () => {
+  /**
+   * One rule, both directions.
+   *
+   * For the upstream, an omitted `stackId` is still legitimate — the contract did not
+   * get stricter, this product simply fills the value in from the request now.
+   *
+   * And the same tool with NO Stack context must refuse to call at all. Both halves
+   * matter and they are different facts: "returned an error" says what the model was
+   * told, while "the upstream was never invoked" is what actually protects the read
+   * scope. A refusal that still called upstream would read the wrong Stack and only
+   * report the error afterwards.
+   */
+  test("fills an omitted stackId from the request context, and refuses to call at all without one", { skip }, async () => {
     const runtime = await TenantRuntime.create({
       tenant: {
         id: "no-stack",
@@ -353,8 +382,31 @@ describe("the tenant MCP seam can speak streamable HTTP", () => {
       const tool = runtime.customTools[0] as unknown as {
         execute: (...args: unknown[]) => Promise<{ isError?: boolean }>;
       };
-      const result = await tool.execute("c1", {}, undefined, undefined, undefined);
-      assert.ok(!result.isError, "a call with no stackId must behave exactly as before");
+
+      // Direction one: a context exists, the model omits the argument, the upstream
+      // receives the context's Stack.
+      const before = fake.calls.length;
+      const filled = await withStackContext("11111111-1111-1111-1111-111111111111", () =>
+        tool.execute("c1", {}, undefined, undefined, undefined),
+      );
+      assert.ok(!filled.isError, "an omitted stackId is filled in, not refused");
+      const filledCall = fake.calls[before];
+      assert.ok(filledCall, "the call must have reached the upstream");
+      assert.equal(
+        filledCall.args.stackId,
+        "11111111-1111-1111-1111-111111111111",
+        "the context's Stack is what the upstream must receive",
+      );
+
+      // Direction two: no context at all. The model is told, and nothing is sent.
+      const unscoped = fake.calls.length;
+      const refused = await tool.execute("c2", {}, undefined, undefined, undefined);
+      assert.equal(refused.isError, true, "with no Stack the call must fail visibly");
+      assert.equal(
+        fake.calls.length,
+        unscoped,
+        "and it must not reach the upstream: an error after a read is still a read",
+      );
     } finally {
       await runtime.close();
     }
@@ -384,7 +436,9 @@ describe("the tenant MCP seam can speak streamable HTTP", () => {
       const tool = runtime.customTools[0] as unknown as {
         execute: (...args: unknown[]) => Promise<{ content: Array<{ text?: string }>; isError?: boolean }>;
       };
-      const result = await tool.execute("call-1", { limit: 5 }, undefined, undefined, undefined);
+      const result = await withStackContext("11111111-1111-1111-1111-111111111111", () =>
+        tool.execute("call-1", { limit: 5 }, undefined, undefined, undefined),
+      );
       const text = result.content.map((block) => block.text ?? "").join("");
       assert.match(text, /ingest_jobs_list/, "the call must have reached the fake server");
     } finally {

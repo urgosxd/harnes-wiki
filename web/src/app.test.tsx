@@ -142,6 +142,9 @@ interface RecordedCall {
   method: string;
   url: string;
   body: Record<string, unknown> | null;
+  /** Every header the client sent, so a transport rule can be asserted rather than
+   *  inferred from the URL. */
+  headers: Record<string, string>;
 }
 
 const ACCEPTED = {
@@ -177,6 +180,7 @@ function stubApi(routes: Array<[string, (call: RecordedCall) => Response]> = [])
       method: (init.method ?? "GET").toUpperCase(),
       url: String(input),
       body: raw ? (JSON.parse(raw) as Record<string, unknown>) : null,
+      headers: (init.headers ?? {}) as Record<string, string>,
     };
     calls.push(call);
     for (const [needle, handler] of routes) {
@@ -315,3 +319,80 @@ describe("App ingest scoping from the link", () => {
   });
 });
 
+/**
+ * The turn transport carries the Stack too.
+ *
+ * The ingest surface already names its Stack in the URL and the body; the chat's own
+ * turn POST has no such place, so the link's Stack travels as `x-stack-id`. It is a
+ * SELECTION, never an authorisation: the server derives no entitlement from it, and
+ * it is the only way the agent's Stack-scoped tools learn which Stack to read.
+ *
+ * With no Stack in the link there is nothing to send, and the header must be absent
+ * rather than empty — an empty value would name a Stack called "".
+ */
+function chatRoutes(): Array<[string, (call: RecordedCall) => Response]> {
+  return [
+    [
+      "/conversations",
+      (call) => {
+        if (call.method === "POST" && call.url.endsWith("/conversations")) {
+          return json({ id: "c1", title: "hola", createdAt: "", updatedAt: "" }, 201);
+        }
+        if (call.url.endsWith("/conversations/c1/turns")) {
+          // A turn stream that closes immediately: the test reads the request, not
+          // the answer.
+          return new Response('data: {"type":"run_finished","outcome":"ok"}\n\n', {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        if (call.url.endsWith("/conversations/c1")) {
+          return json({ id: "c1", title: "hola", createdAt: "", updatedAt: "", messages: [] });
+        }
+        return json({ conversations: [] });
+      },
+    ],
+  ];
+}
+
+function turnPost(calls: readonly RecordedCall[]): RecordedCall | undefined {
+  return calls.find((call) => call.method === "POST" && call.url.endsWith("/turns"));
+}
+
+/** Open the chat, type one message and send it. */
+async function sendOneMessage(): Promise<void> {
+  render(<App />);
+  await screen.findByText("New chat");
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "hola" } });
+  fireEvent.click(screen.getByText("Send"));
+}
+
+describe("App turn transport carries the link's StackId", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("sends x-stack-id equal to the link's stackId on the turn", async () => {
+    const stack = "0f8b1e42-1111-2222-3333-444455556666";
+    useUrl(`?user=alice&stackId=${stack}`);
+    const calls = stubApi(chatRoutes());
+
+    await sendOneMessage();
+
+    await waitFor(() => expect(turnPost(calls)).toBeDefined());
+    expect(turnPost(calls)?.headers["x-stack-id"]).toBe(stack);
+  });
+
+  it("sends no x-stack-id at all when the link names no stackId", async () => {
+    useUrl("?user=alice");
+    const calls = stubApi(chatRoutes());
+
+    await sendOneMessage();
+
+    await waitFor(() => expect(turnPost(calls)).toBeDefined());
+    // Absent, not empty: the header names a Stack or it says nothing.
+    expect(turnPost(calls)?.headers["x-stack-id"]).toBeUndefined();
+    expect("x-stack-id" in (turnPost(calls)?.headers ?? {})).toBe(false);
+  });
+});

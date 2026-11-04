@@ -95,11 +95,17 @@ function InviteSession({
   const client = useMemo(
     () =>
       new ApiClient({
-        // The name is the identity. A token travels only if the link carried one.
-        headers: () => authHeaders(credentials),
+        headers: () => ({
+          // The name is the identity. A token travels only if the link carried one.
+          ...authHeaders(credentials),
+          // And the tenant travels as a selection, only when the link named one. The
+          // agent's Stack-scoped tools read this Stack; with no header they fail
+          // closed rather than reading whatever the server happens to default to.
+          ...(stackId ? { "x-stack-id": stackId } : {}),
+        }),
         onUnauthorized: () => setRejected("rejected"),
       }),
-    [credentials],
+    [credentials, stackId],
   );
 
   // Confirm the link before rendering the chat, so a rejected token explains itself
