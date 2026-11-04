@@ -308,8 +308,11 @@ describe("App ingest scoping from the link", () => {
     });
     fireEvent.click(screen.getByText("Start ingest"));
 
-    // The server's answer reaches the screen instead of being pre-validated away.
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/400/));
+    // The server's own message reaches the screen, not just its status code: a bare
+    // "request failed with 400" names nothing the user can act on.
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toContain("'not-a-stack' is not a Stack id."),
+    );
 
     // One attempt. A rejected tenant is a fact, not something to hammer.
     const creates = calls.filter((call) => call.method === "POST" && call.url.includes("/ingest/jobs"));

@@ -172,3 +172,76 @@ describe("titleFromMessage", () => {
     expect(title.endsWith("…")).toBe(true);
   });
 });
+
+/**
+ * Ingest errors carry the SERVICE's own message.
+ *
+ * The ingest service answers `{error: {code, message}}` and our server forwards that
+ * envelope unchanged, so "'not-a-stack' is not a Stack id." is available at the
+ * client. Reporting only `request failed with 400` would name the status and nothing
+ * the user can act on — the whole point of forwarding the envelope.
+ *
+ * The narrowing is deliberate: this formatter belongs to the ingest calls only. Every
+ * other route keeps `errorFrom`'s copy byte-identical, which is why the fallback here
+ * IS `errorFrom` rather than a second implementation of it.
+ */
+describe("ingest errors", () => {
+  const reply = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+
+  it("surfaces the service's message and code from the forwarded envelope", async () => {
+    const fetchMock = vi.fn(async () =>
+      reply(400, {
+        error: { code: "invalid_stack_id", message: "'not-a-stack' is not a Stack id." },
+      }),
+    );
+    const api = client(fetchMock as unknown as typeof fetch);
+
+    await expect(
+      api.startIngest("https://example.com/a", { compile: true, stackId: "not-a-stack" }),
+    ).rejects.toMatchObject({
+      status: 400,
+      code: "invalid_stack_id",
+      message: "'not-a-stack' is not a Stack id.",
+    });
+  });
+
+  it("reads the envelope on a read route too, not only on create", async () => {
+    const fetchMock = vi.fn(async () =>
+      reply(404, { error: { code: "stack_not_found", message: "no Stack 'x' exists." } }),
+    );
+    const api = client(fetchMock as unknown as typeof fetch);
+
+    await expect(api.listIngestJobs("x")).rejects.toMatchObject({
+      status: 404,
+      message: "no Stack 'x' exists.",
+    });
+  });
+
+  it("leaves a body that is not that envelope to the shared formatter", async () => {
+    // Chat routes answer `{error: "code", message: "..."}`. Delegating keeps their
+    // copy unchanged by construction rather than by inspection.
+    const fetchMock = vi.fn(async () => reply(400, { error: "invalid_message", message: "message is required" }));
+    const api = client(fetchMock as unknown as typeof fetch);
+
+    await expect(api.startIngest("", { stackId: "s" })).rejects.toMatchObject({
+      status: 400,
+      code: "invalid_message",
+      message: "message is required",
+    });
+  });
+
+  it("keeps the status-only message when the body carries none", async () => {
+    const fetchMock = vi.fn(async () => reply(400, { error: "bad_request" }));
+    const api = client(fetchMock as unknown as typeof fetch);
+
+    await expect(api.startIngest("https://example.com/a", { stackId: "s" })).rejects.toMatchObject({
+      status: 400,
+      code: "bad_request",
+      message: "request failed with 400",
+    });
+  });
+});
