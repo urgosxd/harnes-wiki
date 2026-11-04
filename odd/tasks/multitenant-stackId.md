@@ -64,12 +64,12 @@ S14 (unit 3, the S6 residual). The upstream message must reach the screen, not o
 | T5 | Dead picker machinery removed (`stacks.ts` and its tests) | S2 | parent (`git rm`, the worker's policy forbids deletion) | `490bef0` |
 | T6 | Public-surface tests for the four rules the requester named | S3, S4, S6 | worker | `490bef0` |
 | T7 | README describes the link, server contract untouched and its suite green | S1, S7 | inline | `c2ca32a` |
-| T8 | Stack context replaces the stored default in the tool path | S8, S9, S10, S11, S12 | worker | pending |
-| T9 | `MCP_DEFAULT_STACK_ID` optional in provisioning, with one deprecation warning | S8, D6 | inline | pending |
-| T10 | README:218 and :621 describe the variable as ignored, with the fail-closed consequence beside them | S13 | inline | pending |
-| T11 | Independent read-only verification pass over unit 2 | S8-S12 | `gentle-ai-verify` | pending |
-| T12 | `mcp-http-seam.test.ts` documents both sides of fail-closed: the permitted omitted-stackId call, and the no-context refusal that never reaches the upstream | S9, S10 | worker `stackid-request-context` | pending |
-| T13 | Ingest-local error formatter so the upstream message survives to the screen | S14 | inline | pending |
+| T8 | Stack context replaces the stored default in the tool path | S8, S9, S10, S11, S12 | worker `stackid-request-context` | `b34a578` |
+| T9 | `MCP_DEFAULT_STACK_ID` optional in provisioning, with one deprecation warning | S8, D6 | inline | `a25bf44` |
+| T10 | README:218 and :621 describe the variable as ignored, with the fail-closed consequence beside them | S13 | inline | `47abfce` |
+| T11 | Independent read-only verification pass over unit 2 | S8-S12 | `gentle-ai-verify` | in flight |
+| T12 | `mcp-http-seam.test.ts` documents both sides of fail-closed: the permitted omitted-stackId call, and the no-context refusal that never reaches the upstream | S9, S10 | worker `stackid-request-context` | `b34a578` |
+| T13 | Ingest-local error formatter so the upstream message survives to the screen | S14 | inline | `7de1a8e` |
 
 T2-T5 land as one work unit because the SPA must compile: the hook, the panel and the
 App all read the same value, so no intermediate commit can remove one end alone.
@@ -79,7 +79,13 @@ App all read the same value, so no intermediate commit can remove one end alone.
 Unit 1 is one reviewable slice: `490bef0` (frontend + tests) with `c2ca32a` (docs).
 Measured after T5's deletion: web 166 tests pass, `tsc --noEmit` clean, production
 build clean; server 174 tests, 132 pass, 0 fail, 42 skipped, `server/` untouched.
-Unit 2 (T8-T11) is the next slice and must not be folded into unit 1's commits.
+
+Unit 2 is its own slice: `b34a578` (request context replaces the stored default),
+`a25bf44` (provisioning deprecation), `47abfce` (README). Measured: server `tsc`
+clean, 188 tests, 146 pass, 0 fail, 42 skipped (Postgres-gated by design); web
+typecheck clean, 172 tests.
+
+Unit 3 is the smallest slice and closes the S6 residual: `7de1a8e`.
 
 ## Log
 
