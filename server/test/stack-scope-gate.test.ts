@@ -149,27 +149,83 @@ test("S12 concurrent turns never share a Stack", async () => {
 });
 
 /**
- * BLOCKER B1 — the scope gate is the published schema, so it decides "unscoped" for
- * any tool whose schema is not a flat property list. Both directions are wrong, and
- * both are the failure this unit exists to remove: unscoped on the read, and
- * un-injected on the write.
+ * D-B1 — WHICH TOOLS ARE STACK-SCOPED.
  *
- * Marked `todo`: these must become passing tests, never be deleted. See the feature
- * document's B1 entry for the two candidate fixes.
+ * The rule, stated so it cannot drift:
+ *
+ *   scoped   iff the published schema is unreadable or of unknown shape, OR it is a
+ *            readable flat object whose `properties` include `stackId`.
+ *   unscoped ONLY when the schema is a readable flat object with `properties` present
+ *            that does not include `stackId`.
+ *
+ * `additionalProperties: true`, `allOf`/`anyOf`/`oneOf`/`$ref`, and an absent
+ * `properties` are all UNKNOWN, not "no Stack".
+ *
+ * The argument is parity, not caution: the baseline injected a Stack into EVERY call
+ * without looking at the schema, so treating unknown as scoped can only NARROW the
+ * read scope relative to that baseline, never widen it. Judging a hidden schema as
+ * "unscoped" would do the opposite — silently, with a success exit.
+ *
+ * One test per shape, and each shape is asserted on BOTH branches, because the two
+ * failures are opposite: unscoped on the read (no context must refuse) and
+ * un-injected on the write (context must arrive).
  */
-test("S9 schema-hidden Stack tool: no context must not reach the upstream", { todo: "BLOCKER B1" }, async () => {
-  const target = mount(hidden("wiki_status")).get("wiki_status");
-  assert.ok(target);
-  const before = calls.length;
-  const result = await target.execute("c", { limit: 1 });
-  assert.equal(result.isError, true);
-  assert.equal(calls.length, before);
-});
+const unknownShapes: Array<[string, Record<string, unknown>]> = [
+  ["absent properties", { type: "object" }],
+  [
+    "additionalProperties: true",
+    { type: "object", properties: { limit: { type: "integer" } }, additionalProperties: true },
+  ],
+  [
+    "allOf composition",
+    { allOf: [{ type: "object", properties: { stackId: { type: "string" } } }] },
+  ],
+  ["$ref indirection", { $ref: "#/$defs/listArgs" }],
+];
 
-test("S10 schema-hidden Stack tool: the link's Stack must be injected", { todo: "BLOCKER B1" }, async () => {
-  const target = mount(hidden("wiki_status")).get("wiki_status");
+for (const [label, inputSchema] of unknownShapes) {
+  test(`unknown shape (${label}): no context refuses and never reaches the upstream`, async () => {
+    const target = mount({ name: "wiki_status", description: "wiki_status", inputSchema }).get(
+      "wiki_status",
+    );
+    assert.ok(target);
+    const before = calls.length;
+    const result = await target.execute("c", { limit: 1 });
+    assert.equal(result.isError, true);
+    assert.match(text(result), /no Stack/i);
+    assert.equal(calls.length, before, "an unscoped read is the failure this rule prevents");
+  });
+
+  test(`unknown shape (${label}): the link's Stack is injected`, async () => {
+    const target = mount({ name: "wiki_status", description: "wiki_status", inputSchema }).get(
+      "wiki_status",
+    );
+    assert.ok(target);
+    const before = calls.length;
+    const result = await withStackContext("s-a", () => target.execute("c", { limit: 1 }));
+    assert.notEqual(result.isError, true);
+    assert.equal(calls[before]?.args.stackId, "s-a");
+    assert.equal(calls[before]?.args.limit, 1, "the rest of the arguments survive");
+  });
+}
+
+test("a readable property list WITHOUT stackId is the only unscoped case", async () => {
+  // The one shape where "no Stack" is a fact rather than a guess: the tool publishes
+  // its parameters and none of them names a Stack, so injecting would send a field it
+  // never declared.
+  const target = mount({
+    name: "compile_wiki",
+    description: "compile_wiki",
+    inputSchema: { type: "object", properties: { limit: { type: "integer" } } },
+  }).get("compile_wiki");
   assert.ok(target);
+
   const before = calls.length;
-  await withStackContext("s-a", () => target.execute("c", { limit: 1 }));
-  assert.equal(calls[before]?.args.stackId, "s-a");
+  const withNoContext = await target.execute("c", { limit: 2 });
+  assert.notEqual(withNoContext.isError, true);
+  assert.deepEqual(calls[before]?.args, { limit: 2 });
+
+  const withContext = await withStackContext("s-a", () => target.execute("c", { limit: 2 }));
+  assert.notEqual(withContext.isError, true);
+  assert.deepEqual(calls[before + 1]?.args, { limit: 2 }, "no Stack is added to an unscoped tool");
 });

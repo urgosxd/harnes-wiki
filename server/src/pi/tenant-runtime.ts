@@ -364,14 +364,39 @@ function resolveStackArgument(
 /**
  * Is this tool scoped to one Stack?
  *
- * The schema is the test, not the tenant or the server: a tool declares `stackId`
- * when it reads one Stack, and a tool that does not declare it must keep working
- * untouched. Nobody has to configure this, and a tool added upstream later needs no
- * change here.
+ * ## The rule, stated so it cannot drift
+ *
+ * A tool is Stack-scoped iff its published schema is unreadable or of unknown shape,
+ * OR it is a readable flat object whose `properties` include `stackId`.
+ *
+ * It is NOT Stack-scoped only when the schema is a readable flat object with
+ * `properties` present that does not include `stackId` — the single shape where "no
+ * Stack" is a fact instead of a guess.
+ *
+ * ## Why unknown counts as scoped
+ *
+ * Parity, not caution. The baseline injected a Stack into EVERY call without looking
+ * at the schema at all, so treating an unknown shape as scoped can only NARROW the
+ * read scope relative to that baseline, never widen it. Reading it the other way —
+ * junk schema means "no Stack" — calls the upstream unscoped, silently, with a
+ * success exit, which is the failure this whole feature exists to remove.
+ *
+ * `additionalProperties: true`, `allOf`/`anyOf`/`oneOf`/`$ref` composition and an
+ * absent `properties` are unknown for exactly that reason: a `stackId` can hide
+ * inside any of them, so "I cannot see one" is not "there is none".
  */
 function isStackScoped(inputSchema: Record<string, unknown> | undefined): boolean {
-  const properties = (inputSchema as { properties?: Record<string, unknown> } | undefined)?.properties;
-  return Boolean(properties && Object.prototype.hasOwnProperty.call(properties, "stackId"));
+  if (!inputSchema || typeof inputSchema !== "object" || Array.isArray(inputSchema)) return true;
+
+  // Composition hides parameters from a flat read.
+  if (["allOf", "anyOf", "oneOf", "not", "$ref"].some((key) => key in inputSchema)) return true;
+  // `additionalProperties: true` says anything may travel, a Stack included.
+  if ((inputSchema as { additionalProperties?: unknown }).additionalProperties === true) return true;
+
+  const { properties } = inputSchema as { properties?: unknown };
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) return true;
+
+  return Object.prototype.hasOwnProperty.call(properties, "stackId");
 }
 
 interface ToolResult {
