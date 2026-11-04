@@ -229,3 +229,40 @@ test("a readable property list WITHOUT stackId is the only unscoped case", async
   assert.notEqual(withContext.isError, true);
   assert.deepEqual(calls[before + 1]?.args, { limit: 2 }, "no Stack is added to an unscoped tool");
 });
+
+/**
+ * D-A1 — a name this repository already maintains as a Stack tool is Stack-scoped,
+ * whatever its schema says.
+ *
+ * `list_stacks` is the case: it reads a Stack but publishes no `stackId`, so the schema
+ * alone judged it unscoped and let it out with no Stack at all. An unscoped listing is
+ * not a harmless read — it exposes the Stack inventory of every tenant the endpoint can
+ * reach, in exactly the dimension this feature protects.
+ *
+ * With a context it now receives a `stackId` its published schema does not declare. The
+ * baseline did exactly that in production, so it is empirically stable; and if the
+ * upstream ever rejects it, the tool fails visibly instead of reading unscoped, which
+ * is the correct direction of failure.
+ */
+test("a maintained Stack tool name is scoped even with no stackId in its schema", async () => {
+  // The schema must be a READABLE property list without `stackId`: that is the only
+  // shape the schema rules would call unscoped, so it is the only shape that exercises
+  // the name rule at all. An opaque schema would pass through rule (a) and prove
+  // nothing about the constant.
+  const target = mount({
+    name: "list_stacks",
+    description: "list_stacks",
+    inputSchema: { type: "object", properties: { limit: { type: "integer" } } },
+  }).get("list_stacks");
+  assert.ok(target);
+
+  const before = calls.length;
+  const refused = await target.execute("c", {});
+  assert.equal(refused.isError, true, "an unscoped listing is the leak, not a shortcut");
+  assert.equal(calls.length, before, "no context must not reach the upstream");
+
+  const injected = await withStackContext("s-a", () => target.execute("c", { limit: 5 }));
+  assert.notEqual(injected.isError, true);
+  assert.equal(calls[before]?.args.stackId, "s-a", "the maintained name carries the Stack");
+  assert.equal(calls[before]?.args.limit, 5, "and the rest of the arguments survive");
+});

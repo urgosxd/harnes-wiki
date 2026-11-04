@@ -1,3 +1,4 @@
+import { STACK_TOOLS } from "../../scripts/provision-mcp.mjs";
 import { McpClient, StdioTransport, StreamableHttpTransport } from "@earendil-works/pi-mcp";
 import {
   DefaultResourceLoader,
@@ -312,7 +313,7 @@ export function proxyMcpTools(
         const args = params ?? {};
         // A tool that belongs to no Stack is called exactly as before: injecting a
         // Stack into it would send a field it never declared.
-        if (!isStackScoped(tool.inputSchema)) return await callAndShape(client, tool.name, args);
+        if (!isStackScoped(tool.inputSchema, tool.name)) return await callAndShape(client, tool.name, args);
 
         const resolved = resolveStackArgument(tool.name, args);
         if ("error" in resolved) return toolError(resolved.error);
@@ -370,8 +371,9 @@ function resolveStackArgument(
  * OR it is a readable flat object whose `properties` include `stackId`.
  *
  * It is NOT Stack-scoped only when the schema is a readable flat object with
- * `properties` present that does not include `stackId` — the single shape where "no
- * Stack" is a fact instead of a guess.
+ * `properties` present that does not include `stackId` **and** the name is not one
+ * this repository already grants as a Stack tool — the single shape where "no Stack"
+ * is a fact instead of a guess.
  *
  * ## Why unknown counts as scoped
  *
@@ -385,7 +387,18 @@ function resolveStackArgument(
  * absent `properties` are unknown for exactly that reason: a `stackId` can hide
  * inside any of them, so "I cannot see one" is not "there is none".
  */
-function isStackScoped(inputSchema: Record<string, unknown> | undefined): boolean {
+function isStackScoped(inputSchema: Record<string, unknown> | undefined, name: string): boolean {
+  // Rule (c): a name this repository already maintains as a Stack tool is one, whatever
+  // its schema says. `list_stacks` is the case that needs it — it reads a Stack but
+  // publishes no `stackId`, so the schema alone would call it unscoped and an unscoped
+  // listing exposes other tenants' Stack inventory.
+  //
+  // This is not new knowledge about another service: `STACK_TOOLS` is the constant that
+  // already GRANTS those tools at provisioning time (`scripts/provision-mcp.mjs:127`),
+  // maintained in this repository. Reading it here keeps one definition instead of
+  // starting a second list that would drift.
+  if (STACK_TOOLS.includes(name)) return true;
+
   if (!inputSchema || typeof inputSchema !== "object" || Array.isArray(inputSchema)) return true;
 
   // Composition hides parameters from a flat read.

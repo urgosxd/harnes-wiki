@@ -13,6 +13,15 @@
  */
 export function deprecatedDefaultStack(env?: NodeJS.ProcessEnv): string | null;
 
+/**
+ * The tools that read one Stack, as this repository already maintains them.
+ *
+ * Exported here because the request path now reads that same constant instead of
+ * keeping a second copy: one definition, and a tool added to provisioning is
+ * Stack-scoped for the agent in the same edit.
+ */
+export const STACK_TOOLS: readonly string[];
+
 export function warnDeprecatedDefaultStack(
   env?: NodeJS.ProcessEnv,
   write?: (line: string) => void,
