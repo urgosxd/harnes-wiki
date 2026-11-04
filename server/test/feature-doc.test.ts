@@ -72,6 +72,31 @@ if (inCheckout) {
       );
     });
 
+    test(`${file}: the rows and the header agree about what is pending`, () => {
+      // Both directions, because a mutation test showed the one-directional version was
+      // decorative: flipping a committed row back to `pending` under a "complete" header
+      // slipped through. A row that says pending and a header that says complete cannot
+      // both be true, and neither can a header that says in progress with nothing pending.
+      if (rows.length === 0) return;
+      const statusLine = /^Status:\s*(.+)$/m.exec(markdown);
+      if (!statusLine) return;
+      const status = (statusLine[1] ?? "").trim();
+      const pendingRows = rows.filter((row) => /pending/i.test(row.commit)).map((row) => row.id);
+      if (pendingRows.length > 0) {
+        assert.match(
+          status,
+          /in progress/i,
+          `${file}: rows ${pendingRows.join(", ")} read pending, so the header cannot say "${status}"`,
+        );
+      } else {
+        assert.doesNotMatch(
+          status,
+          /in progress/i,
+          `${file}: every task has a commit, so the header cannot say "${status}"`,
+        );
+      }
+    });
+
     test(`${file}: a document with no pending task is not still in progress`, () => {
       if (rows.length === 0) return;
       const open = rows.filter((row) => /pending/i.test(row.commit));

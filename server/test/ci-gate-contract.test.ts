@@ -62,8 +62,12 @@ test("the script never hardcodes a Docker name derived from the checkout directo
 });
 
 test("the database tier is required, and the suite is mounted rather than baked", { skip }, () => {
-  assert.match(script, /CI_REQUIRE_DATABASE=1/);
-  assert.match(script, /test:\/app\/test:ro/);
+  // Read as CONFIGURATION: the script explains in comments what `CI_REQUIRE_DATABASE=1`
+  // is for, and an assertion over raw text passed happily when the flag was deleted from
+  // the docker run — the mutation proved it was measuring the explanation.
+  const configured = configuration(script);
+  assert.match(configured, /-e CI_REQUIRE_DATABASE=1/);
+  assert.match(configured, /test:\/app\/test:ro/);
   // The image deliberately carries no tests, so a test that only ever runs from the
   // image would prove nothing about the checked-out suite.
   assert.match(readFileSync(join(REPO_ROOT, "server", ".dockerignore"), "utf8"), /^test$/m);
