@@ -545,12 +545,8 @@ describe("noticeFor: 503 and 404 are different facts", () => {
 /** A hand-built result object, so the panel is testable without a live client. */
 function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
   return {
-    stacks: [],
-    stacksProblem: null,
-    selectedStackId: null,
-    selectStack: vi.fn(),
-    createTarget: { ok: true },
-    observeStacks: vi.fn(),
+    stackId: "0f8b1e42-1111-2222-3333-444455556666",
+    blockedProblem: null,
     documents: [],
     uploading: false,
     listDocuments: vi.fn(async () => {}),
@@ -618,48 +614,48 @@ describe("IngestJobsPanel", () => {
     expect(ingestDocument).toHaveBeenCalledWith("d1", { compile: true });
   });
 
-  it("offers a stack picker fed by the agent, and marks the bound one", () => {
-    const selectStack = vi.fn();
+  it("renders only the blocked state when the link names no stack", () => {
+    // The link is the only source of the tenant, so a link without one has nothing
+    // to read and nothing to write. What must appear is the reason and a way back —
+    // NOT an upload box, a document list or a job list attached to an unknown Stack.
+    const onClose = vi.fn();
     render(
       <IngestJobsPanel
         ingest={fakeIngest({
-          stacks: [
-            { id: "s1", name: "Formation", isCurrent: false },
-            { id: "s2", name: "Wire", isCurrent: true },
-          ],
-          selectedStackId: "s2",
-          selectStack,
+          stackId: null,
+          blockedProblem:
+            "This page needs a stackId in the link. Open the link you were given, " +
+            "which ends in ?user=<name>&stackId=<stack-id>.",
         })}
-        onClose={() => {}}
+        onClose={onClose}
       />,
     );
 
-    const select = screen.getByLabelText("Stack") as HTMLSelectElement;
-    expect(select.value).toBe("s2");
-    // The bound stack says so, because that is the one a user is most likely asking
-    // about and the fact is not otherwise visible.
-    expect(screen.getByText(/Wire \(bound\)/)).toBeDefined();
+    // The message names the parameter AND the shape the link must have: a user can
+    // only fix what is named.
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("stackId");
+    expect(alert.textContent).toContain("?user=<name>&stackId=<stack-id>");
 
-    fireEvent.change(select, { target: { value: "s1" } });
-    expect(selectStack).toHaveBeenCalledWith("s1");
+    expect(screen.queryByLabelText("Choose a document")).toBeNull();
+    expect(screen.queryByLabelText("Source")).toBeNull();
+    expect(screen.queryByText("Start ingest")).toBeNull();
+    expect(screen.queryByText("No documents uploaded yet.")).toBeNull();
+    expect(screen.queryByText("Recent")).toBeNull();
+
+    // Blocked is not a dead end: the chat still works without a tenant.
+    fireEvent.click(screen.getByText("Back to chat"));
+    expect(onClose).toHaveBeenCalled();
   });
 
-  it("explains an empty picker instead of showing a bare dropdown", () => {
+  it("shows the whole panel, and no picker, once the link names a stack", () => {
     render(<IngestJobsPanel ingest={fakeIngest()} onClose={() => {}} />);
-    expect(screen.getByText("No stacks known yet")).toBeDefined();
-    // The list comes from the agent, so an empty one is not a bug and must not read
-    // like one.
-    expect(screen.getByText(/Ask the assistant to list the stacks/)).toBeDefined();
-  });
 
-  it("shows a stack-list problem as a failure, not as an empty list", () => {
-    render(
-      <IngestJobsPanel
-        ingest={fakeIngest({ stacksProblem: "No Stack 'x' exists." })}
-        onClose={() => {}}
-      />,
-    );
-    expect(screen.getByRole("alert").textContent).toContain("No Stack 'x' exists.");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByLabelText("Stack")).toBeNull();
+    expect(screen.getByLabelText("Source")).toBeDefined();
+    expect(screen.getByText("Start ingest")).toBeDefined();
+    expect(screen.getByText("No documents uploaded yet.")).toBeDefined();
   });
 
   it("says so when nothing has been uploaded", () => {
@@ -756,8 +752,16 @@ describe("IngestJobsPanel", () => {
  * must arrive as an `unavailable` notice and NOT as a job that vanished.
  */
 describe("useIngest wiring", () => {
-  function Probe({ client, onRender }: { client: ApiClient; onRender: (r: UseIngestResult) => void }) {
-    const result = useIngest({ client });
+  function Probe({
+    client,
+    stackId,
+    onRender,
+  }: {
+    client: ApiClient;
+    stackId: string | null;
+    onRender: (r: UseIngestResult) => void;
+  }) {
+    const result = useIngest({ client, stackId });
     onRender(result);
     return (
       <div>
@@ -780,13 +784,47 @@ describe("useIngest wiring", () => {
     });
 
     let latest: UseIngestResult | undefined;
-    render(<Probe client={client} onRender={(r) => (latest = r)} />);
+    render(<Probe client={client} stackId="0f8b1e42" onRender={(r) => (latest = r)} />);
 
     await waitFor(() => expect(latest?.loadingList).toBe(false));
     latest!.follow("ing_1");
 
     await waitFor(() => expect(screen.getByTestId("notice").textContent).toBe("unavailable"));
     expect(screen.getByTestId("following").textContent).toBe("false");
+  });
+
+  it("issues no request at all when the link names no stack", async () => {
+    // This is the whole reason the block exists. A list read with no Stack is not an
+    // empty list: it is somebody else's data or an error the user cannot read, so
+    // the correct number of requests here is zero.
+    const seen: string[] = [];
+    const client = new ApiClient({
+      baseUrl: "/api",
+      headers: () => ({ "x-user-id": "alice" }),
+      fetchImpl: (async (url: string) => {
+        seen.push(String(url));
+        return new Response(JSON.stringify({ jobs: [], documents: [] }), { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+
+    let latest: UseIngestResult | undefined;
+    render(<Probe client={client} stackId={null} onRender={(r) => (latest = r)} />);
+
+    await waitFor(() => expect(latest).toBeDefined());
+    expect(seen).toEqual([]);
+    expect(latest!.loadingList).toBe(false);
+    expect(latest!.stackId).toBeNull();
+    expect(latest!.blockedProblem).toContain("stackId");
+
+    // Every action the panel could still reach, including the ones it no longer
+    // renders, stops at the hook instead of reaching the client.
+    latest!.follow("ing_1");
+    latest!.stopFollowing();
+    await latest!.start("https://example.com/a");
+    await latest!.ingestDocument("d1");
+    await latest!.refreshList();
+    await latest!.listDocuments();
+    expect(seen).toEqual([]);
   });
 
   it("reports a 404 as unknown", async () => {
@@ -802,7 +840,7 @@ describe("useIngest wiring", () => {
     });
 
     let latest: UseIngestResult | undefined;
-    render(<Probe client={client} onRender={(r) => (latest = r)} />);
+    render(<Probe client={client} stackId="0f8b1e42" onRender={(r) => (latest = r)} />);
 
     await waitFor(() => expect(latest?.loadingList).toBe(false));
     latest!.follow("ing_1");

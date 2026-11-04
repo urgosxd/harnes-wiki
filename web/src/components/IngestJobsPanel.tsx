@@ -48,14 +48,36 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
     setSource("");
   };
 
+  const header = (
+    <header className="jobs-panel__header">
+      <h2 className="jobs-panel__title">Ingest jobs</h2>
+      <button type="button" className="button button--small" onClick={onClose}>
+        Back to chat
+      </button>
+    </header>
+  );
+
+  // No tenant in the link means no ingest surface: no upload, no document list and
+  // no job list, because every one of those would either read another Stack or fail
+  // in a way the user cannot act on. The chat itself stays available — the block is
+  // scoped to ingest, not to the session.
+  if (ingest.blockedProblem) {
+    return (
+      <main className="jobs-panel">
+        {header}
+        <section aria-label="Stack required">
+          <h3 className="jobs-panel__subtitle">This link has no Stack</h3>
+          <p className="jobs-panel__notice jobs-panel__notice--warn" role="alert">
+            {ingest.blockedProblem}
+          </p>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="jobs-panel">
-      <header className="jobs-panel__header">
-        <h2 className="jobs-panel__title">Ingest jobs</h2>
-        <button type="button" className="button button--small" onClick={onClose}>
-          Back to chat
-        </button>
-      </header>
+      {header}
 
       {/*
         Upload and ingest are separate steps on purpose. A document is a resource
@@ -63,53 +85,6 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
         without being uploaded twice, and a file can be stored before anyone decides
         whether it belongs in the wiki.
       */}
-      {/*
-        The stack list arrives from the AGENT, so this picker can be empty until a
-        turn asked for it. That is stated rather than hidden: an empty dropdown with
-        no explanation reads as a bug.
-      */}
-      <section className="jobs-panel__stacks" aria-label="Stack selection">
-        <label className="jobs-panel__stackfield" htmlFor="stack-select">
-          <span className="jobs-panel__label">Stack</span>
-          <select
-            id="stack-select"
-            className="jobs-panel__select"
-            value={ingest.selectedStackId ?? ""}
-            onChange={(event) => ingest.selectStack(event.target.value || null)}
-            disabled={ingest.stacks.length === 0}
-          >
-            {ingest.stacks.length === 0 && <option value="">No stacks known yet</option>}
-            {ingest.stacks.map((stack) => (
-              <option key={stack.id} value={stack.id}>
-                {stack.name}
-                {stack.isCurrent ? " (bound)" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-        {ingest.stacksProblem && (
-          <p className="jobs-panel__notice jobs-panel__notice--warn" role="alert">
-            {ingest.stacksProblem}
-          </p>
-        )}
-        {ingest.stacks.length === 0 && !ingest.stacksProblem && (
-          <p className="jobs-panel__hint">
-            Ask the assistant to list the stacks and they will appear here.
-          </p>
-        )}
-        {/*
-          The service scopes READS by Stack but binds WRITES to the one it started
-          with. So a foreign selection filters the list correctly and still sends a
-          new job to the bound Stack. Saying that here, next to the picker, is the
-          difference between a limitation and a lie.
-        */}
-        {!ingest.createTarget.ok && (
-          <p className="jobs-panel__notice jobs-panel__notice--warn" role="alert">
-            {ingest.createTarget.reason}
-          </p>
-        )}
-      </section>
-
       <section className="jobs-panel__upload" aria-label="Upload a document">
         <label className="jobs-panel__filebutton">
           <input
@@ -147,8 +122,6 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
                 <button
                   type="button"
                   className="button button--small"
-                  disabled={!ingest.createTarget.ok}
-                  title={ingest.createTarget.ok ? undefined : ingest.createTarget.reason}
                   onClick={() => void ingest.ingestDocument(document.id, { compile })}
                 >
                   Ingest
@@ -189,10 +162,7 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
         <button
           type="submit"
           className="button button--primary"
-          disabled={
-            ingest.starting || source.trim().length === 0 || !ingest.createTarget.ok
-          }
-          title={ingest.createTarget.ok ? undefined : ingest.createTarget.reason}
+          disabled={ingest.starting || source.trim().length === 0}
         >
           {ingest.starting ? "Starting…" : "Start ingest"}
         </button>

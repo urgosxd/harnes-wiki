@@ -1,18 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiClient, ApiError, type UploadedDocument } from "./api.ts";
-import {
-  checkCreateTarget,
-  defaultStackId,
-  parseStacksPayload,
-  type CreateTargetCheck,
-  type StackOption,
-} from "./stacks.ts";
-import { pollJob, type IngestJob, type PollOutcome, type PollStopReason } from "./ingest.ts";
+import { type IngestJob, type PollOutcome, type PollStopReason } from "./ingest.ts";
 
 /**
  * Owns the ingest-jobs view: the list, the polled job, and the stop notice.
  *
- * Three things this hook deliberately does NOT do:
+ * ## The tenant is an input, not a choice
+ *
+ * `stackId` arrives already resolved from the link (see `tenant.ts`) and is used
+ * verbatim: the list, the poll and every create carry it, because the service scopes
+ * reads by Stack and records writes in the Stack the request names.
+ *
+ * When the link named no Stack, this hook is BLOCKED: it performs no request at all,
+ * not a listing, not a poll, not a create. The honest reason is not performance —
+ * a list read with no Stack is not an empty list, it is a read of whatever tenant the
+ * endpoint happens to be bound to, which is exactly the coupling this product is
+ * removing. `blockedProblem` is what the panel shows instead.
+ *
+ * ## Three things this hook deliberately does NOT do
  *
  *  - It does not merge the two dimensions into one state. The job object is
  *    passed through exactly as the server returned it.
@@ -20,6 +25,7 @@ import { pollJob, type IngestJob, type PollOutcome, type PollStopReason } from "
  *    `null` included.
  *  - It does not retry a 404 or a 503. Both are stated outcomes the user must
  *    see; a silent retry would turn "this job expired" into an endless spinner.
+ *    The same applies to a Stack the service rejects: the answer is shown once.
  */
 
 export type IngestNotice = {
@@ -32,7 +38,27 @@ export type IngestNotice = {
   message: string;
 } | null;
 
+/**
+ * What the ingest surface says when the link names no Stack.
+ *
+ * It names the parameter AND the shape of a working link, because the link is the
+ * only fix available: there is nothing to type here and no default to fall back on.
+ */
+export const MISSING_STACK_ID_PROBLEM =
+  "This page needs a stackId in the link. Ingest reads and writes belong to one " +
+  "Stack, so without it there is nothing safe to read. Open the link you were " +
+  "given, which ends in ?user=<name>&stackId=<stack-id>.";
+
 export interface UseIngestResult {
+  /**
+   * The tenant Stack, read once from the link and never defaulted or remembered.
+   *
+   * `null` means the link named none, which blocks every read and write below.
+   */
+  stackId: string | null;
+  /** Why the surface is blocked, or `null` once the link named a Stack. */
+  blockedProblem: string | null;
+
   /** Files this user has uploaded, newest first. Each is a resource, not a job. */
   documents: UploadedDocument[];
   uploading: boolean;
@@ -43,30 +69,6 @@ export interface UseIngestResult {
   ingestDocument(id: string, options?: { compile?: boolean }): Promise<void>;
   /** Set when an upload or listing failed. Distinct from a poll notice. */
   documentsNotice: IngestNotice;
-
-  /**
-   * Stacks offered by the picker.
-   *
-   * Populated from the AGENT's `list_stacks` result, not from a direct call: this
-   * server holds no registry of them, and a stack offered here but unknown to the
-   * agent would produce calls the service rejects.
-   */
-  stacks: StackOption[];
-  /** Set when the stack list could not be read — never merely because it was empty. */
-  stacksProblem: string | null;
-  /** The stack selected in the picker, or null when none was chosen. */
-  selectedStackId: string | null;
-  selectStack(id: string | null): void;
-  /**
-   * Whether a job started now would land in the Stack the picker shows.
-   *
-   * Exposed rather than enforced internally, so the panel can disable its controls
-   * AND say why. Silently refusing, or silently creating elsewhere, are the two ways
-   * this went wrong before.
-   */
-  createTarget: CreateTargetCheck;
-  /** Feed a `list_stacks` payload from the agent's turn. */
-  observeStacks(text: string, isError: boolean): void;
 
   jobs: IngestJob[];
   activeJob: IngestJob | null;
@@ -84,17 +86,27 @@ export interface UseIngestResult {
   clearPollNotice(): void;
 }
 
-export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
-  const [stacks, setStacks] = useState<StackOption[]>([]);
-  const [stacksProblem, setStacksProblem] = useState<string | null>(null);
-  const [selectedStackId, setSelectedStackId] = useState<string | null>(null);
+export function useIngest({
+  client,
+  stackId,
+}: {
+  client: ApiClient;
+  /** The tenant, already resolved from the link. `null` blocks the whole surface. */
+  stackId: string | null;
+}): UseIngestResult {
+  // Read once and never mutated: the link is the only source, so there is no
+  // selection to track and nothing a later render could contradict.
+  const blocked = stackId === null;
+
   const [documents, setDocuments] = useState<UploadedDocument[]>([]);
   const [uploading, setUploading] = useState(false);
   const [documentsNotice, setDocumentsNotice] = useState<IngestNotice>(null);
   const [jobs, setJobs] = useState<IngestJob[]>([]);
   const [activeJob, setActiveJob] = useState<IngestJob | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [loadingList, setLoadingList] = useState(true);
+  // Not "true then corrected": with no tenant there is no list to load, and a
+  // loading state that never resolves would look like a slow server.
+  const [loadingList, setLoadingList] = useState(!blocked);
   const [listNotice, setListNotice] = useState<IngestNotice>(null);
   const [pollNotice, setPollNotice] = useState<IngestNotice>(null);
   const [starting, setStarting] = useState(false);
@@ -103,13 +115,14 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
   const abortRef = useRef<AbortController | null>(null);
 
   const listDocuments = useCallback(async () => {
+    if (!stackId) return;
     try {
       setDocuments(await client.listDocuments());
       setDocumentsNotice(null);
     } catch (error) {
       setDocumentsNotice(noticeFor(error));
     }
-  }, [client]);
+  }, [client, stackId]);
 
   useEffect(() => {
     void listDocuments();
@@ -125,6 +138,7 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
    */
   const upload = useCallback(
     async (file: File): Promise<UploadedDocument | null> => {
+      if (!stackId) return null;
       setUploading(true);
       setDocumentsNotice(null);
       try {
@@ -138,11 +152,12 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
         setUploading(false);
       }
     },
-    [client, listDocuments],
+    [client, listDocuments, stackId],
   );
 
   const removeDocument = useCallback(
     async (id: string) => {
+      if (!stackId) return;
       try {
         await client.deleteDocument(id);
         await listDocuments();
@@ -150,17 +165,13 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
         setDocumentsNotice(noticeFor(error));
       }
     },
-    [client, listDocuments],
+    [client, listDocuments, stackId],
   );
 
-  // Read through a ref so a refresh always sees the LATEST selection without the
-  // callback being rebuilt on every keystroke of a picker.
-  const selectedStackRef = useRef<string | null>(null);
-  selectedStackRef.current = selectedStackId;
-
   const refreshList = useCallback(async () => {
+    if (!stackId) return;
     try {
-      const list = await client.listIngestJobs(selectedStackRef.current ?? undefined);
+      const list = await client.listIngestJobs(stackId);
       setJobs(list);
       setListNotice(null);
     } catch (error) {
@@ -168,7 +179,7 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
     } finally {
       setLoadingList(false);
     }
-  }, [client]);
+  }, [client, stackId]);
 
   useEffect(() => {
     void refreshList();
@@ -186,6 +197,9 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
 
   const follow = useCallback(
     (id: string) => {
+      // Nothing to follow without a tenant: the read would answer for whichever
+      // Stack the endpoint is bound to.
+      if (!stackId) return;
       stopFollowing();
       const controller = new AbortController();
       abortRef.current = controller;
@@ -196,7 +210,7 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
       void client
         .pollIngestJob(id, {
           signal: controller.signal,
-          ...(selectedStackRef.current ? { stackId: selectedStackRef.current } : {}),
+          stackId,
           onUpdate: (job) => setActiveJob(job),
         })
         .then((outcome) => {
@@ -216,7 +230,7 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
           }
         });
     },
-    [client, refreshList, stopFollowing],
+    [client, refreshList, stackId, stopFollowing],
   );
 
   /**
@@ -228,12 +242,10 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
    */
   const ingestDocument = useCallback(
     async (id: string, options: { compile?: boolean } = {}) => {
+      if (!stackId) return;
       setPollNotice(null);
       try {
-        const accepted = await client.startIngestForDocument(id, {
-          ...options,
-          ...(selectedStackRef.current ? { stackId: selectedStackRef.current } : {}),
-        });
+        const accepted = await client.startIngestForDocument(id, { ...options, stackId });
         follow(accepted.jobId);
       } catch (error) {
         setPollNotice(noticeFor(error));
@@ -241,20 +253,18 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
       }
       void refreshList();
     },
-    [client, follow, refreshList],
+    [client, follow, refreshList, stackId],
   );
 
   const start = useCallback(
     async (source: string, options: { compile?: boolean } = {}) => {
+      if (!stackId) return;
       const trimmed = source.trim();
       if (!trimmed || starting) return;
       setStarting(true);
       setPollNotice(null);
       try {
-        const accepted = await client.startIngest(trimmed, {
-          ...options,
-          ...(selectedStackRef.current ? { stackId: selectedStackRef.current } : {}),
-        });
+        const accepted = await client.startIngest(trimmed, { ...options, stackId });
         // Both dimensions arrive with the 202, so the view has something true to
         // render before the first poll returns.
         setActiveJob({
@@ -267,43 +277,20 @@ export function useIngest({ client }: { client: ApiClient }): UseIngestResult {
         });
         follow(accepted.jobId);
       } catch (error) {
+        // A rejected StackId lands here as the server's answer, shown once. There is
+        // no retry loop: the tenant is a fact of the link, not a transient failure.
         setPollNotice(noticeFor(error));
       } finally {
         setStarting(false);
         void refreshList();
       }
     },
-    [client, follow, refreshList, starting],
+    [client, follow, refreshList, stackId, starting],
   );
 
-  /**
-   * Read a `list_stacks` payload the agent produced.
-   *
-   * The service answers `isError` for an id that does not exist so that "no such
-   * stack" and "no stacks" cannot be confused; the same distinction is kept here,
-   * because a picker that showed emptiness for a failure would invite the user to
-   * pick from nothing.
-   */
-  const observeStacks = useCallback((text: string, isError: boolean) => {
-    if (isError) {
-      setStacksProblem(text.trim() || "The stack list could not be read.");
-      return;
-    }
-    const parsed = parseStacksPayload(text);
-    setStacks(parsed.stacks);
-    setStacksProblem(parsed.problem);
-    // Selecting the bound stack on first sight is convenience, not a decision the
-    // user made; an explicit choice is never overwritten by a later refresh.
-    setSelectedStackId((current) => current ?? defaultStackId(parsed.stacks));
-  }, []);
-
   return {
-    stacks,
-    stacksProblem,
-    selectedStackId,
-    createTarget: checkCreateTarget(stacks, selectedStackId),
-    selectStack: setSelectedStackId,
-    observeStacks,
+    stackId,
+    blockedProblem: blocked ? MISSING_STACK_ID_PROBLEM : null,
     documents,
     uploading,
     listDocuments,
