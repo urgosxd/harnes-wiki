@@ -215,7 +215,6 @@ read anything:
 cd server
 USERS=alice,bob \
 MCP_SERVER_URL=http://host.docker.internal:4240/mcp \
-MCP_DEFAULT_STACK_ID=<stack uuid> \
 DATABASE_URL=postgres://agentdocumentor:<pass>@127.0.0.1:5432/agentdocumentor \
 node scripts/provision-mcp.mjs            # --dry-run to preview
 ```
@@ -223,6 +222,10 @@ node scripts/provision-mcp.mjs            # --dry-run to preview
 It is idempotent, and it does not create users — it grants tools to the names you
 list. A name that never appears there still opens the product; it simply has no
 tools.
+
+`MCP_DEFAULT_STACK_ID` is **deprecated and ignored**. The Stack comes from the
+request link, not from provisioning: setting the variable still works, prints one
+deprecation warning, and changes nothing (see **Which Stack the agent reads**).
 
 ## Ingest jobs (external service)
 
@@ -618,7 +621,6 @@ acceptance checklist, and the evidence log.
 cd server
 USERS=alice,bob \
 MCP_SERVER_URL=http://172.17.0.1:4173/mcp \
-MCP_DEFAULT_STACK_ID=<stack uuid> \
 DATABASE_URL=postgres://... \
 node scripts/provision-mcp.mjs            # add --dry-run to preview
 ```
@@ -629,14 +631,33 @@ the same as running it once, and a corrected `MCP_SERVER_URL` replaces the old
 address instead of adding a second server. It grants tools; it does not create
 users, because with `AUTH_MODE=open` a user is just a name.
 
+`MCP_DEFAULT_STACK_ID` no longer appears in that command. It is **deprecated and
+ignored**: still tolerated, still warned about once per run, never read. A stored
+`tenant_mcp.default_stack_id` from an earlier run is left exactly as it is and is
+never consulted, so nothing needs cleaning up — and re-running this script neither
+resurrects nor destroys it.
+
 It exposes three tools — `list_stacks`, `ingest_jobs_list`, `ingest_job_status`.
 The other twelve the service offers are filesystem-scoped, and exposing them would
 allow operations this project never decided to permit.
 
-Without this step the agent sees no stack tools, and it cannot answer questions
-about Stacks. `MCP_DEFAULT_STACK_ID` is the AGENT's default Stack for its own reads;
-the ingest surface takes its Stack from the link instead (**The Stack comes from the
-link**). They are separate inputs, and neither one implies the other.
+Without this step the agent sees no Stack tools, and it cannot answer questions
+about Stacks.
+
+### Which Stack the agent reads
+
+The Stack an agent tool call reads is the `stackId` from the page's link: the page
+forwards it as `x-stack-id` on the turn request, and the MCP proxy reads it per call.
+It is a SELECTION of which Stack to read, never an authorisation — no entitlement is
+derived from it, nothing is stored with the conversation, and under `AUTH_MODE=open`
+any caller could set it, just as any caller can already claim any `x-user-id`.
+
+A link without `stackId` therefore cannot use the wiki tools at all: Stack-scoped
+tools fail closed with a visible error naming the link form, because the alternative
+— calling with no Stack — reads whatever tenant the remote endpoint happens to be
+bound to. That is why the provisioning variable above is gone rather than defaulted.
+Anything the model explicitly asks for that disagrees with the link's Stack is
+refused the same way, naming both Stacks instead of silently rewriting one.
 
 ## Reaching an MCP server over HTTP
 
