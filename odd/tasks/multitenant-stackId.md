@@ -111,6 +111,16 @@ typecheck clean, 172 tests.
 
 Unit 3 is the smallest slice and closes the S6 residual: `7de1a8e`.
 
+Unit 4 (the independent pass's findings) is four commits: `744eb52` (nested scan + type
+error), `d6448dd` (ambiguous header), `6adf0cf` (App-boundary probe), `2ee77e5` (docs).
+Measured: server 211 tests, 168 pass, 0 fail, 43 skipped; web 177.
+
+Unit 5 is the proof and the gate, one commit each: `840b3c9` (the executed end-to-end
+tier: 227 tests, 227 pass, 0 fail, 0 skipped, with `ok 154 - a turn's Stack survives into
+the background chain, per request`), `7da9c35` (`scripts/ci.sh` plus the workflow wrapper,
+executed here: exit 0, server 227 tests / 193 pass / 0 fail / 34 skipped for the
+live-model tier, web 177 tests and a production build), `3e05b06` (README and this log).
+
 ## Log
 
 L1 (requester's original request, verbatim):
@@ -185,7 +195,8 @@ L10 (two gates that could not run, reported rather than improvised):
   and the configured ingest host `192.168.32.1:4240` (on `/`, `/mcp`, `/api/stacks`)
   all failed to connect, and no `MCP_SERVER_URL` is configured anywhere here. No
   `tools/list`, no name list invented, A1 stays open.
-- **D-GATE blocked.** `fallow` is not a dependency of this repository, has no
+- **D-GATE blocked** (withdrawn later — see L12; this line records what happened at the
+  time, not a live blocker). `fallow` is not a dependency of this repository, has no
   `.fallowrc.json`, and is not installed globally; the only matches on this machine are
   scratch copies belonging to another project. Installing it would be a dependency
   change needing approval. The checks this repo actually declares — `tsc --noEmit`,
@@ -197,9 +208,8 @@ password this checkout does not have — the trap the README documents at line 1
 host connections fail with `password authentication failed`. `support/harness.ts`
 gates on CONTAINER HEALTH only, so with the container healthy the previously skipped
 tier ran and failed: 19 failures and 19 cancellations, none of them stack tests. The
-container was stopped again to leave the machine as it was found. A1's evidence and the
-e2e test both need a database this checkout can authenticate against, or the volume's
-password.
+container was stopped again to leave the machine as it was found. **Resolved by L18**: the
+volume was reset under the requester's written authorisation, and the tier executed.
 
 L12 (peer retraction): **D-GATE withdrawn.** `fallow` is a Pre-Commit Check of the
 `llm-wiki-compiler` agent instructions, not of this repository, so it was never this
@@ -221,6 +231,8 @@ that can authenticate to a dev database, and this checkout cannot. By the standa
 for it — a test that never runs is documentation, not proof — **the end-to-end
 inheritance of the request context into the background turn remains UNPROVEN.** It is
 pinned by `server/test/stack-turn-context.test.ts` and still needs a database.
+**SUPERSEDED by L18**: with a database this checkout can authenticate against, that test
+executed and passed, and the CI script keeps it executing.
 
 L15 (residual, not fixed here): `server/test/support/harness.ts:22-33` decides whether
 the database tier can run from CONTAINER HEALTH alone. A volume initialised with a
