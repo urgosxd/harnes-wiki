@@ -15,7 +15,11 @@ import { fileURLToPath } from "node:url";
  * They run wherever the repository exists on disk; in a container built from the image
  * there is no checkout above `test/`, so they skip rather than pretend.
  */
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+// `CI_REPO_ROOT` lets the CI container point at a read-only mount of the checkout: a
+// contract test that skips in CI checks nothing, which is the fiction this file exists to
+// prevent.
+const REPO_ROOT =
+  process.env.CI_REPO_ROOT ?? join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SCRIPT_PATH = join(REPO_ROOT, "scripts", "ci.sh");
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "ci.yml");
 const inCheckout = existsSync(SCRIPT_PATH) && existsSync(WORKFLOW_PATH);

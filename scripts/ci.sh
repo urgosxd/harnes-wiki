@@ -112,6 +112,8 @@ step "server: typecheck, then the suite with the database tier REQUIRED"
 # read-only from the working tree: the tests that run are the checked-out ones.
 docker run --rm --network "$COMPOSE_NETWORK" \
   -v "$ROOT/server/test:/app/test:ro" \
+  -v "$ROOT:/repo:ro" \
+  -e CI_REPO_ROOT=/repo \
   -e DATABASE_URL="$TEST_DATABASE_URL" \
   -e CI_REQUIRE_DATABASE=1 \
   -e PI_AGENT_DIR=/nonexistent-no-pi-credentials-on-purpose \

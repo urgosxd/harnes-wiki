@@ -4,7 +4,7 @@ The tenant StackId stops being deployment configuration and becomes request-scop
 context carried by the link. The ingest surface resolves it from the URL at mount and
 names it on every read and write; the Stack picker and its silent default are gone.
 
-Status: in progress
+Status: complete
 Branch: `feature/multitenant-stackId`
 Created: 2026-10-28
 Requester: llm-wiki-compiler (peer feature of the same name, delivered as D1-D6)
@@ -87,13 +87,13 @@ S14 (unit 3, the S6 residual). The upstream message must reach the screen, not o
 | T16 | S11 restated (the header is never stored) and S15 recorded | S11, S15 | inline | `dbd9672` |
 | T17 | A1 settled by reusing the maintained `STACK_TOOLS` constant, no host evidence needed | S16 | inline (RED first) | `03e6e9f` |
 | T18 | `fallow` on the branch | D-GATE | **withdrawn by the peer: not this repo's gate** | — |
-| T19 | A `stackId` nested under `properties` at any depth makes the tool scoped; scan bounded, cycle-guarded, cap means unknown | S15 (F1) | inline (RED first) | pending |
-| T20 | A duplicated or joined `x-stack-id` yields NO context | S17 (F2) | inline (RED first) | pending |
-| T21 | A non-string `stackId` is refused as a type problem, with its own message | S18 (F3) | inline (RED first) | pending |
-| T22 | The independent verification's two probes adapted into the repo (route boundary, App boundary) | S2-S5, S11, S12 | inline | `6adf0cf`, `744eb52` |
+| T19 | A `stackId` nested under `properties` at any depth makes the tool scoped; scan bounded, cycle-guarded, cap means unknown | S15 (F1) | inline (RED first) | `744eb52` |
+| T20 | A duplicated or joined `x-stack-id` yields NO context | S17 (F2) | inline (RED first) | `d6448dd` |
+| T21 | A non-string `stackId` is refused as a type problem, with its own message | S18 (F3) | inline (RED first) | `744eb52` |
+| T22 | The independent verification's two probes adapted into the repo (route boundary, App boundary) | S2-S5, S11, S12 | inline | `d6448dd`, `6adf0cf` |
 | C1 | Reset the dev database volume and run the Postgres tier so the end-to-end proof EXECUTES | S12, D-E2E | inline | `840b3c9` |
 | C2 | `scripts/ci.sh` plus a thin GitHub Actions wrapper, and the database gate asks a real query | D-GATE-CI | inline | `7da9c35` |
-| C3 | README: one command, which tiers run and which one does not, and why | D-GATE-CI | inline | pending |
+| C3 | README: one command, which tiers run and which one does not, and why | D-GATE-CI | inline | `3e05b06` |
 
 T2-T5 land as one work unit because the SPA must compile: the hook, the panel and the
 App all read the same value, so no intermediate commit can remove one end alone.
