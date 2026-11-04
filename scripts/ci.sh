@@ -42,7 +42,15 @@ cd "$ROOT"
 # same everywhere, which is the whole point of a script CI and a laptop share.
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-agentdocumentor}"
 export COMPOSE_PROJECT_NAME
-COMPOSE_NETWORK="${COMPOSE_NETWORK:-${COMPOSE_PROJECT_NAME}_internal}"
+
+# The network name is DERIVED from compose itself, not written here. Compose names its
+# networks `<project>_<key>`, and asking it beats assuming: if the compose file ever
+# renames the network, or a deployment sets a different project, this still points at the
+# one compose will create.
+compose_project_name() {
+  docker compose config 2>/dev/null | awk '/^name:[[:space:]]/ { print $2; exit }'
+}
+COMPOSE_NETWORK="${COMPOSE_NETWORK:-$(compose_project_name)_internal}"
 TEST_DATABASE_URL="${TEST_DATABASE_URL:-postgres://agentdocumentor:agentdocumentor@postgres:5432/agentdocumentor}"
 DB_WAIT_SECONDS="${DB_WAIT_SECONDS:-120}"
 
@@ -54,6 +62,12 @@ fail() {
   printf '\nFAILED: %s\n' "$1" >&2
   exit 1
 }
+
+# Checked here, after `fail` exists: a derivation that produced nothing would leave the
+# literal "_internal" and then time out with a message naming the wrong cause.
+if [ -z "${COMPOSE_NETWORK%_internal}" ]; then
+  fail "could not derive the compose project name; is docker-compose.yml readable here?"
+fi
 
 step "docker is usable"
 docker info >/dev/null 2>&1 || fail "docker is not available; this script needs it so CI and a laptop agree"
@@ -108,7 +122,13 @@ step "web: typecheck, tests, production build"
 docker run --rm agentdoc-web-test sh -c 'npx tsc --noEmit && npx vitest run && npx vite build' \
   || fail "web typecheck, tests or build failed"
 
+step "cleanup: stop the containers, keep the volumes"
+# `down` without `-v`: this removes the containers and the network and leaves every
+# volume alone. `-v` would delete the workspace volume too, which is exactly the kind of
+# over-reach that had to be scoped by hand once already.
+docker compose down >/dev/null 2>&1 || printf 'cleanup: nothing to stop\n'
+
 step "done"
 printf 'CI passed: production images built, server suite green with a real database,\n'
 printf 'web suite and build green. The live-model tier skipped by design (no Pi credentials here).\n'
-printf 'The database is left running so it can be inspected; `docker compose down` removes it.\n'
+printf 'Volumes were left in place; `docker compose down -v` would remove them, including the workspace.\n'
