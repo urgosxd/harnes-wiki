@@ -51,6 +51,8 @@ S12 (concurrency, named risk). Two turns started concurrently with different Sta
 
 S13 (scope guard). No hard gate on the chat surface in this unit: without a `stackId` in the link, Stack-scoped agent tools fail closed and the error text names the missing Stack, and the README states that consequence next to the deprecated variable line.
 
+S14 (unit 3, the S6 residual). The upstream message must reach the screen, not only its status code: `400 invalid_stack_id` has to read as "'not-a-stack' is not a Stack id", not "request failed with 400". Implemented as an INGEST-LOCAL formatter that prefers `body.error.message` from our envelope and delegates its fallback to `errorFrom` unchanged. `errorFrom` itself is not modified — it is shared with chat and every other call, so rewriting its copy would be an unrequested shared-behaviour change. Zero blast radius outside ingest, no duplicated parse logic, chat copy byte-identical by construction.
+
 ## Tasks
 
 | ID | Task | Spec | Route | Commit |
@@ -66,6 +68,8 @@ S13 (scope guard). No hard gate on the chat surface in this unit: without a `sta
 | T9 | `MCP_DEFAULT_STACK_ID` optional in provisioning, with one deprecation warning | S8, D6 | inline | pending |
 | T10 | README:218 and :621 describe the variable as ignored, with the fail-closed consequence beside them | S13 | inline | pending |
 | T11 | Independent read-only verification pass over unit 2 | S8-S12 | `gentle-ai-verify` | pending |
+| T12 | `mcp-http-seam.test.ts` documents both sides of fail-closed: the permitted omitted-stackId call, and the no-context refusal that never reaches the upstream | S9, S10 | worker `stackid-request-context` | pending |
+| T13 | Ingest-local error formatter so the upstream message survives to the screen | S14 | inline | pending |
 
 T2-T5 land as one work unit because the SPA must compile: the hook, the panel and the
 App all read the same value, so no intermediate commit can remove one end alone.
@@ -114,3 +118,18 @@ detail is `turn-service.ts:88`, where `execute` is launched synchronously inside
 `start()` and therefore inherits the store for the whole background turn — pinned by
 its own concurrency test (S12). Precedence becomes explicit instead of silent: a
 conflicting model argument blocks the call (S10).
+
+L6 (peer amendment to D2, approved): `mcp-http-seam.test.ts:332` cannot stay green
+as-is, because its scenario is a Stack-scoped tool executed with no Stack — exactly
+what the fail-closed rule now forbids. It is updated in unit 2 (never skipped, never
+deleted) to keep its real intent — an omitted `stackId` is fine for the upstream
+because the server fills it from the request context — and the same file gains the
+companion asserting the opposite branch: no context ⇒ `isError`, and `callTool`
+never invoked. `ingest-adapter.test.ts:481` stays untouched: that is the ingest API,
+which keeps `stackId` optional.
+
+L7 (unit 3 authorised, narrower than proposed): the `400` message finding is fixed
+by an ingest-local formatter only. `errorFrom` is NOT modified — it is shared with
+chat and every other call, so changing its copy would be precisely the unrequested
+shared-behaviour change the rules forbid. The R4 pin moves from `/400/` to the
+upstream message in that unit.
