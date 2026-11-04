@@ -478,9 +478,19 @@ Or by hand:
 CHAT_API_KEY=sk-... docker compose up -d --build
 docker compose ps                 # three services must be healthy
 docker compose logs -f server     # structured JSON
-docker compose down               # stops, keeps conversations
-docker compose down -v            # stops and deletes everything
+docker compose down               # stops, keeps conversations and volumes
+docker compose down -v            # DANGER: see below before using -v
 node scripts/smoke.mjs            # 8 acceptance checks against the running stack
+```
+
+**`-v` removes BOTH volumes, not just the database.** `docker-compose.yml` declares
+`agentdoc-pgdata` (the database) *and* `agentdoc-workspace` (the agent's workspace).
+`down -v` deletes the pair; there is no form of it that removes only the database. To
+reset just the database, name it:
+
+```bash
+docker compose rm -sf postgres && docker volume rm agentdocumentor_agentdoc-pgdata
+docker compose up -d postgres     # recreated from this file's own credentials
 ```
 
 The container is self-contained: it generates its own Pi model configuration from
