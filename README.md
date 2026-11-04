@@ -255,6 +255,38 @@ like `/api/ingest/jobs` to the browser and `/ingest/jobs` to the server.
    a rejected request becomes `502` with the reason named; only the service's own
    `200` / `404` / `503` / `409` reach the client unchanged.
 
+### The Stack comes from the link
+
+The ingest surface is tenant-scoped, and the tenant is the `stackId` in the URL:
+
+```
+http://localhost:8088/?user=alice&stackId=<stack-id>
+```
+
+That parameter is the **only** source. There is no Stack environment variable,
+nothing is injected at build time, there is no picker in the ingest view, and no
+default is assumed when it is absent — each of those would let one tenant's jobs be
+read under another tenant's name. It is read once, at mount, from
+`location.search`, right next to `?user=`; it is not stored in `localStorage`, not
+remembered between visits, and not accepted from a header or a cookie, so a reload
+without it is blocked exactly like a first visit.
+
+| Link | Ingest surface |
+|---|---|
+| `?user=alice&stackId=<stack-id>` | The job list, the poll and every create carry that Stack |
+| No `stackId`, or empty / whitespace-only | States the missing parameter and issues no request at all — no list, no poll, no create |
+
+The shape is checked before anything is sent: a value that is empty after trimming
+is refused without a request. Whether the Stack EXISTS is the service's answer, and
+it is shown as it arrives — `400 invalid_stack_id` for a malformed id, `404
+stack_not_found` (or the agent's `unknown_stack`) for an id the service does not
+know. A rejected Stack is a visible failure with no retry loop, because retrying the
+same rejected value can only produce the same answer.
+
+Chat is unaffected: a link without `stackId` still opens the product. Only the
+ingest surface is closed, and that is the point — an unscoped read would show one
+tenant the jobs of another.
+
 ### What the view will not guess
 
 `ingest` and `compile` are independent state machines. A finished ingest with a
@@ -442,7 +474,8 @@ that is the whole reason the two compose files exist.
 
 React 19 + Vite. The `?token=` in the URL IS how a user authenticates (`?user=` is
 an optional display hint), and the rules for reading it live in
-`web/src/lib/credentials.ts` with their own tests.
+`web/src/lib/credentials.ts` with their own tests. The ingest tenant is read the
+same way — once, at mount, from `location.search` — by `web/src/lib/tenant.ts`.
 
 One consequence worth stating: the token appears in the URL, so it also appears in
 nginx's access log (default `combined` format logs the query string). Use TLS in
@@ -600,8 +633,10 @@ It exposes three tools — `list_stacks`, `ingest_jobs_list`, `ingest_job_status
 The other twelve the service offers are filesystem-scoped, and exposing them would
 allow operations this project never decided to permit.
 
-Without this step the agent sees no stack tools, the stack picker stays empty, and
-nothing below can be exercised.
+Without this step the agent sees no stack tools, and it cannot answer questions
+about Stacks. `MCP_DEFAULT_STACK_ID` is the AGENT's default Stack for its own reads;
+the ingest surface takes its Stack from the link instead (**The Stack comes from the
+link**). They are separate inputs, and neither one implies the other.
 
 ## Reaching an MCP server over HTTP
 
