@@ -33,11 +33,15 @@ interface TurnBody {
  */
 function requestStackId(ctx: RequestContext): string | undefined {
   const header = ctx.req.headers["x-stack-id"];
-  // Array-safe like every other header read here: a duplicated header arrives as a
-  // list, and taking the first is the reading that cannot invent a value.
-  const raw = Array.isArray(header) ? header[0] : header;
-  const stackId = raw?.trim();
-  return stackId ? stackId : undefined;
+  // Two lines, or a value Node joined from two lines, is an AMBIGUOUS request: no
+  // context. Taking the first half would let a malformed request pick somebody's
+  // Stack, and a Stack is precisely what must never be guessed. Refusing costs one
+  // visible tool error; guessing costs a cross-tenant read.
+  if (Array.isArray(header)) return undefined;
+  const raw = header?.trim();
+  if (!raw) return undefined;
+  if (raw.includes(",")) return undefined;
+  return raw;
 }
 
 function requireMessage(body: unknown): string {
