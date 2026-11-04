@@ -55,6 +55,8 @@ S13 (scope guard). No hard gate on the chat surface in this unit: without a `sta
 
 S15 (B1, the scope gate — binding, and the reason it is not a heuristic). A tool is Stack-scoped **iff** its published schema is unreadable or of unknown shape, OR it is a readable flat object whose `properties` include `stackId`. It is NOT Stack-scoped **only** when the schema is a readable flat object with `properties` present that does not include `stackId`. Absent `properties`, `additionalProperties: true`, `allOf`/`anyOf`/`oneOf`/`$ref`, and anything nested or composed are all UNKNOWN ⇒ scoped. The argument for unknown-is-scoped is PARITY: the baseline injected a Stack into every call without reading the schema, so this rule can only narrow the read scope relative to that baseline, never widen it.
 
+S16 (A1, the name rule — binding). A tool is Stack-scoped **iff** (a) its schema is unreadable or of unknown shape, OR (b) its schema declares `stackId`, OR (c) its name is in `STACK_TOOLS`, the constant this repository already maintains at `server/scripts/provision-mcp.mjs:127`. Clause (c) is not new knowledge about another service: that constant is the thing that already GRANTS those tools at provisioning time. `list_stacks` is the case that needs it — it reads a Stack but publishes no `stackId`, so the schema rules alone called it unscoped, and an unscoped listing exposes other tenants' Stack inventory. With a context it now receives a `stackId` its schema does not declare; the baseline did exactly that in production, and if the upstream ever rejects it the tool fails visibly instead of reading unscoped.
+
 S14 (unit 3, the S6 residual). The upstream message must reach the screen, not only its status code: `400 invalid_stack_id` has to read as "'not-a-stack' is not a Stack id", not "request failed with 400". Implemented as an INGEST-LOCAL formatter that prefers `body.error.message` from our envelope and delegates its fallback to `errorFrom` unchanged. `errorFrom` itself is not modified — it is shared with chat and every other call, so rewriting its copy would be an unrequested shared-behaviour change. Zero blast radius outside ingest, no duplicated parse logic, chat copy byte-identical by construction.
 
 ## Tasks
@@ -77,8 +79,8 @@ S14 (unit 3, the S6 residual). The upstream message must reach the screen, not o
 | T14 | Scope gate: unknown/unreadable schema counts as Stack-scoped, with one test per shape and both branches | S15 | inline (RED first) | `9beddaf` |
 | T15 | Postgres-gated proof that a turn's Stack survives into the background chain, two concurrent turns of one user | S12, D-E2E | inline | `e461b0d` |
 | T16 | S11 restated (the header is never stored) and S15 recorded | S11, S15 | inline | pending |
-| T17 | One read-only `tools/list` against the real host, to settle A1 on facts | D-EVIDENCE | **blocked: host unreachable** | — |
-| T18 | `fallow` on the branch | D-GATE | **blocked: not a dependency here** | — |
+| T17 | A1 settled by reusing the maintained `STACK_TOOLS` constant, no host evidence needed | S16 | inline (RED first) | pending |
+| T18 | `fallow` on the branch | D-GATE | **withdrawn by the peer: not this repo's gate** | — |
 
 T2-T5 land as one work unit because the SPA must compile: the hook, the panel and the
 App all read the same value, so no intermediate commit can remove one end alone.
@@ -185,3 +187,30 @@ tier ran and failed: 19 failures and 19 cancellations, none of them stack tests.
 container was stopped again to leave the machine as it was found. A1's evidence and the
 e2e test both need a database this checkout can authenticate against, or the volume's
 password.
+
+L12 (peer retraction): **D-GATE withdrawn.** `fallow` is a Pre-Commit Check of the
+`llm-wiki-compiler` agent instructions, not of this repository, so it was never this
+branch's gate. Nothing installed, no dependency added, `package.json` untouched.
+
+L13 (A1 closed without host evidence, by reuse). The gate gains clause (c): the name is
+in `STACK_TOOLS`, the constant this repo already maintains to GRANT those tools
+(`server/scripts/provision-mcp.mjs:127`). That answers the T12 objection: it is not a
+fresh list describing another service's contract, it is the list that already exists
+here. The import direction is `src` → `scripts`, which works at runtime because
+`server/Dockerfile:21` copies `./scripts` into the image and `provision-mcp.mjs` is
+import-safe (its `main()` only runs when invoked directly). One definition, so a tool
+added to provisioning is Stack-scoped for the agent in the same edit.
+
+L14 (D-E2E, answered plainly): **this repository has no CI configuration at all** — no
+`.github/`, no GitLab/CircleCI/Jenkins file, no Makefile, and `git log -- .github` is
+empty. So the Postgres-gated tier does not execute in CI; it executes only on a machine
+that can authenticate to a dev database, and this checkout cannot. By the standard set
+for it — a test that never runs is documentation, not proof — **the end-to-end
+inheritance of the request context into the background turn remains UNPROVEN.** It is
+pinned by `server/test/stack-turn-context.test.ts` and still needs a database.
+
+L15 (residual, not fixed here): `server/test/support/harness.ts:22-33` decides whether
+the database tier can run from CONTAINER HEALTH alone. A volume initialised with a
+different password therefore turns 42 skips into 19 failures and 19 cancellations
+instead of a clean skip. Fixing it is a test-infrastructure change outside this feature;
+it is recorded because it cost a red suite to discover.
