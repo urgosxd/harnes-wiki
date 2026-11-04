@@ -8,13 +8,18 @@
 name: CI
 
 on:
+  # Pushes to main plus every pull request: listing all branches on `push` as well would
+  # run each branch twice.
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
 
 jobs:
   ci:
     runs-on: ubuntu-latest
+    # The script bounds its own database wait; this bounds everything else, so a hung
+    # step cannot occupy a runner for hours.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

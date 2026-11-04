@@ -329,3 +329,30 @@ No secret was invented: the database password is `docker-compose.yml:12`'s defau
 in the repository, so CI needs nothing stored. The Pi-credential tier is the one that is
 NOT covered in CI, and the README says so in a table rather than in a footnote.
 
+L20 (B1, found by the independent pass over the CI commit, and it was a real one): the gate
+pinned a Docker network named after THIS checkout. Docker derives the compose project from
+the directory holding `docker-compose.yml` — `AgentDocumentor` here, the repository's name
+under `actions/checkout` — so in the CI it was written for, the project would have been
+`harnes-wiki` and the network `harnes-wiki_internal`, and `docker run --network
+agentdocumentor_internal` would have failed on every push, with the failure reported as
+"no database answered a query". Measured from a scratch directory named `harnes-wiki`:
+
+    without the pin:  name: harnes-wiki
+    with the pin:     name: agentdocumentor
+
+That is the worst shape a gate can have: it does not pass when the code is broken, it fails
+when the code is fine, and it names the wrong cause. Fixed by pinning
+`COMPOSE_PROJECT_NAME` in the script (so the project, its containers and its network are
+identical on a laptop and in CI), by keeping and printing the last database error instead
+of discarding it, by running `push` on `main` only so a branch PR does not run twice, and by
+bounding the job with `timeout-minutes`. Two contract tests keep it fixed:
+`server/test/ci-gate-contract.test.ts` (the workflow runs the script and nothing else, no
+checkout-derived Docker name, the tier is required and the suite mounted, neither image has
+its test stage as the default) and `server/test/db-gate.test.ts` (both directions of
+`CI_REQUIRE_DATABASE`, including that the failure never echoes the password).
+
+Accepted without a fix, as advisories: under the flag an unreachable database throws at
+import in six files, so the run reports less than a skip list would; the script rebuilds
+four images and leaves the database running on every invocation, which is what its own
+output says.
+

@@ -32,9 +32,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# The compose project's own network: the name Docker derives from the directory plus the
-# `internal` network declared in docker-compose.yml.
-COMPOSE_NETWORK="${COMPOSE_NETWORK:-agentdocumentor_internal}"
+# The compose project name is PINNED, not inferred.
+#
+# Docker derives it from the directory holding docker-compose.yml: `AgentDocumentor` on
+# this machine, `harnes-wiki` under actions/checkout, because that is the repository's
+# name. A network name read off that would work on exactly one checkout and then fail in
+# CI with "no database answered" — an environmental bug reported as a database bug, on
+# every push. Pinning the project makes the project, its containers and its network the
+# same everywhere, which is the whole point of a script CI and a laptop share.
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-agentdocumentor}"
+export COMPOSE_PROJECT_NAME
+COMPOSE_NETWORK="${COMPOSE_NETWORK:-${COMPOSE_PROJECT_NAME}_internal}"
 TEST_DATABASE_URL="${TEST_DATABASE_URL:-postgres://agentdocumentor:agentdocumentor@postgres:5432/agentdocumentor}"
 DB_WAIT_SECONDS="${DB_WAIT_SECONDS:-120}"
 
@@ -60,15 +68,24 @@ docker build --target test -t agentdoc-web-test ./web || fail "web test image fa
 step "database: start it and wait for a real query, not just a healthy container"
 docker compose up -d postgres || fail "could not start postgres"
 
+# The error from the last attempt is kept and printed on failure: a wrong network and a
+# stale volume password both used to surface as "no database answered", which sends a
+# reader looking in the wrong place.
+LAST_DB_ERROR="$(mktemp)"
+trap 'rm -f "$LAST_DB_ERROR"' EXIT
+
 can_query_database() {
   docker run --rm --network "$COMPOSE_NETWORK" -e DATABASE_URL="$TEST_DATABASE_URL" agentdoc-server-test \
-    node -e 'const pg = require("pg"); const c = new pg.Client({ connectionString: process.env.DATABASE_URL }); c.connect().then(() => c.query("select 1")).then(() => { c.end(); process.exit(0); }).catch(() => process.exit(1));' \
-    >/dev/null 2>&1
+    node -e 'const pg = require("pg"); const c = new pg.Client({ connectionString: process.env.DATABASE_URL }); c.connect().then(() => c.query("select 1")).then(() => { c.end(); process.exit(0); }).catch((e) => { console.error(e.message); process.exit(1); });' \
+    >/dev/null 2>"$LAST_DB_ERROR"
 }
 
 deadline=$((SECONDS + DB_WAIT_SECONDS))
 until can_query_database; do
-  [ "$SECONDS" -lt "$deadline" ] || fail "no database answered a query within ${DB_WAIT_SECONDS}s; the Postgres tier would have been skipped, which in CI is a lie"
+  if [ "$SECONDS" -ge "$deadline" ]; then
+    printf 'last attempt said:\n%s\n' "$(tail -5 "$LAST_DB_ERROR" 2>/dev/null)" >&2
+    fail "no database answered a query within ${DB_WAIT_SECONDS}s on network ${COMPOSE_NETWORK}; the Postgres tier would have been skipped, which in CI is a lie"
+  fi
   sleep 2
 done
 printf 'database answered a query\n'
