@@ -351,14 +351,23 @@ function resolveStackArgument(
   if (named === undefined || named === null || (typeof named === "string" && named.trim() === "")) {
     return { args: { ...args, stackId } };
   }
-  if (typeof named === "string" && named.trim() === stackId) {
+  // Anything that is not a string is a TYPE problem, and saying "you named Stack 42"
+  // would describe a Stack that cannot exist. Different mistake, different sentence.
+  if (typeof named !== "string") {
+    return {
+      error:
+        `${toolName} takes stackId as a string, and the call sent a ${Array.isArray(named) ? "array" : typeof named}. ` +
+        "Call it again without stackId to use this turn's Stack.",
+    };
+  }
+  if (named.trim() === stackId) {
     return { args: { ...args, stackId } };
   }
   return {
     error:
       `${toolName} runs on Stack '${stackId}' in this turn, but the call named Stack ` +
-      `'${String(named)}'. Call it again without stackId to use this turn's Stack, or open ` +
-      `the app with a link naming Stack '${String(named)}'.`,
+      `'${named}'. Call it again without stackId to use this turn's Stack, or open ` +
+      `the app with a link naming Stack '${named}'.`,
   };
 }
 
@@ -407,9 +416,71 @@ function isStackScoped(inputSchema: Record<string, unknown> | undefined, name: s
   if ((inputSchema as { additionalProperties?: unknown }).additionalProperties === true) return true;
 
   const { properties } = inputSchema as { properties?: unknown };
+  // No readable property list at all: the shape is unknown, so it stays scoped. This is
+  // rule (a), and it must not be lost behind the nested scan below.
   if (!properties || typeof properties !== "object" || Array.isArray(properties)) return true;
 
-  return Object.prototype.hasOwnProperty.call(properties, "stackId");
+  // A `stackId` declared anywhere under `properties`, however deep, is a Stack
+  // declaration: a filter object is the obvious shape, and calling such a tool unscoped
+  // is exactly the read this feature removes.
+  // `unknown` counts as scoped, exactly like rule (a): a tree too deep or too tangled
+  // to read is not a promise that no Stack is in there.
+  return declaresStackId(inputSchema, 0, new Set()) !== "none";
+}
+
+/**
+ * How deep the search goes before it calls the schema unreadable.
+ *
+ * A contract does not nest eight levels; the cap exists so a hostile or generated schema
+ * cannot turn a tool call into a long walk. Exceeding it is `unknown`, never `none`:
+ * "I stopped looking" must not read as "there is nothing there".
+ */
+const NESTED_SCHEMA_DEPTH = 8;
+
+/** What a scan of the schema tree found. `unknown` counts as scoped. */
+type StackScan = "found" | "unknown" | "none";
+
+/**
+ * Find a `stackId` under any `properties` object in the tree.
+ *
+ * Bounded by `NESTED_SCHEMA_DEPTH`, and guarded against revisiting a node: a schema that
+ * shares or repeats a subschema is legal to hand us, and a walk that followed it
+ * forever would take the turn down instead of judging one call. Today a truly cyclic
+ * schema is refused earlier — `proxyMcpTools` clones the schema through typebox, which
+ * overflows first — so the guard is the belt to that braces: it costs a Set and it is
+ * the difference between "unknown, refuse" and a stack overflow if that ever changes.
+ */
+function declaresStackId(schema: unknown, depth: number, visited: Set<unknown>): StackScan {
+  if (depth > NESTED_SCHEMA_DEPTH) return "unknown";
+  if (!schema || typeof schema !== "object") return "none";
+  if (visited.has(schema)) return "unknown";
+  visited.add(schema);
+
+  const node = schema as Record<string, unknown>;
+  let sawUnknown = false;
+  const properties = node.properties;
+  if (properties && typeof properties === "object" && !Array.isArray(properties)) {
+    const declared = properties as Record<string, unknown>;
+    if (Object.prototype.hasOwnProperty.call(declared, "stackId")) return "found";
+    for (const nested of Object.values(declared)) {
+      const scan = declaresStackId(nested, depth + 1, visited);
+      if (scan === "found") return "found";
+      if (scan === "unknown") sawUnknown = true;
+    }
+  }
+
+  // Composition and array items can carry an object schema of their own.
+  for (const key of ["allOf", "anyOf", "oneOf", "items", "additionalProperties", "not"]) {
+    const branch = node[key];
+    const branches = Array.isArray(branch) ? branch : branch && typeof branch === "object" ? [branch] : [];
+    for (const entry of branches) {
+      const scan = declaresStackId(entry, depth + 1, visited);
+      if (scan === "found") return "found";
+      if (scan === "unknown") sawUnknown = true;
+    }
+  }
+
+  return sawUnknown ? "unknown" : "none";
 }
 
 interface ToolResult {

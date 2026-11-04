@@ -266,3 +266,80 @@ test("a maintained Stack tool name is scoped even with no stackId in its schema"
   assert.equal(calls[before]?.args.stackId, "s-a", "the maintained name carries the Stack");
   assert.equal(calls[before]?.args.limit, 5, "and the rest of the arguments survive");
 });
+
+/**
+ * F1 — a `stackId` NESTED under `properties` is still a Stack declaration.
+ *
+ * The gate used to read top-level `properties` only, so a filter object such as
+ * `{filter: {properties: {stackId: …}}}` was judged unscoped: no refusal without a
+ * context, and no injection with one. S15 says anything nested is unknown ⇒ scoped, and
+ * the code has to match the spec rather than the other way round.
+ */
+test("a stackId nested under properties makes the tool scoped, on both branches", async () => {
+  const nested = {
+    type: "object",
+    properties: {
+      limit: { type: "integer" },
+      filter: { type: "object", properties: { stackId: { type: "string" } } },
+    },
+  };
+
+  const refused = mount({ name: "query_wiki", description: "query_wiki", inputSchema: nested }).get(
+    "query_wiki",
+  );
+  assert.ok(refused);
+  const before = calls.length;
+  const withoutContext = await refused.execute("c", { limit: 1 });
+  assert.equal(withoutContext.isError, true, "a nested Stack declaration is a Stack declaration");
+  assert.equal(calls.length, before, "no context must not reach the upstream");
+
+  const injected = await withStackContext("s-a", () => refused.execute("c", { limit: 1 }));
+  assert.notEqual(injected.isError, true);
+  assert.equal(calls[before]?.args.stackId, "s-a");
+});
+
+test("a schema nested past the scan's depth cap is treated as scoped, not as empty", async () => {
+  // "I stopped looking" must never read as "there is no Stack in there". The cap only
+  // bounds the walk; the verdict for a tree beyond it is unknown, which is scoped.
+  let deep: Record<string, unknown> = { type: "object", properties: { stackId: { type: "string" } } };
+  for (let level = 0; level < 12; level += 1) {
+    deep = { type: "object", properties: { nested: deep } };
+  }
+
+  const target = mount({ name: "query_wiki", description: "query_wiki", inputSchema: deep }).get("query_wiki");
+  assert.ok(target);
+  const before = calls.length;
+  const withoutContext = await target.execute("c", {});
+  assert.equal(withoutContext.isError, true, "too deep to read is not a promise that nothing is hidden");
+  assert.equal(calls.length, before);
+});
+
+/**
+ * F3 — a non-string `stackId` is a type problem, not a conflict between two Stacks.
+ *
+ * The conflict message printed `String(named)`, which reads as "you named Stack 42" —
+ * a sentence about a Stack that cannot exist. The model needs to be told what is wrong
+ * with its argument, and the call must not go out.
+ */
+test("a non-string stackId is refused as a type problem, with no upstream call", async () => {
+  const target = tool("ingest_jobs_list");
+  const before = calls.length;
+
+  for (const sent of [42, true, { id: "s-a" }, ["s-a"]]) {
+    const result = await withStackContext("s-a", () => target.execute("c", { stackId: sent }));
+    assert.equal(result.isError, true, `${JSON.stringify(sent)} must be refused`);
+    assert.match(text(result), /string/i, "the message must name the expected type");
+    assert.doesNotMatch(text(result), /runs on Stack .* named Stack/, "not a conflict between Stacks");
+  }
+  assert.equal(calls.length, before, "none of them may reach the upstream");
+});
+
+test("two real but different Stacks are still a conflict, not a type problem", async () => {
+  const target = tool("ingest_jobs_list");
+  const before = calls.length;
+  const result = await withStackContext("s-a", () => target.execute("c", { stackId: "s-b" }));
+  assert.equal(result.isError, true);
+  assert.match(text(result), /Stack 's-a'/);
+  assert.match(text(result), /Stack 's-b'/);
+  assert.equal(calls.length, before);
+});
