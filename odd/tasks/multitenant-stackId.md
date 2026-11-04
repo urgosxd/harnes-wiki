@@ -90,7 +90,10 @@ S14 (unit 3, the S6 residual). The upstream message must reach the screen, not o
 | T19 | A `stackId` nested under `properties` at any depth makes the tool scoped; scan bounded, cycle-guarded, cap means unknown | S15 (F1) | inline (RED first) | pending |
 | T20 | A duplicated or joined `x-stack-id` yields NO context | S17 (F2) | inline (RED first) | pending |
 | T21 | A non-string `stackId` is refused as a type problem, with its own message | S18 (F3) | inline (RED first) | pending |
-| T22 | The independent verification's two probes adapted into the repo (route boundary, App boundary) | S2-S5, S11, S12 | inline | pending |
+| T22 | The independent verification's two probes adapted into the repo (route boundary, App boundary) | S2-S5, S11, S12 | inline | `6adf0cf`, `744eb52` |
+| C1 | Reset the dev database volume and run the Postgres tier so the end-to-end proof EXECUTES | S12, D-E2E | inline | `840b3c9` |
+| C2 | `scripts/ci.sh` plus a thin GitHub Actions wrapper, and the database gate asks a real query | D-GATE-CI | inline | `7da9c35` |
+| C3 | README: one command, which tiers run and which one does not, and why | D-GATE-CI | inline | pending |
 
 T2-T5 land as one work unit because the SPA must compile: the hook, the panel and the
 App all read the same value, so no intermediate commit can remove one end alone.
@@ -281,4 +284,36 @@ Consequence for the next task: the password the tests use is `agentdocumentor`, 
 compose file's default (`docker-compose.yml:12`), and it is in the repository — so CI
 needs no secret for the database, and no password has to be hardcoded outside the file
 that already declares it.
+
+L19 (C2, CI that cannot be fiction): the gate is `scripts/ci.sh`, one executable file a
+person runs with `bash scripts/ci.sh`; `.github/workflows/ci.yml` only checks out and
+calls it, so no command exists in YAML that is not in the script. GitHub Actions was the
+choice because `git remote -v` is `https://github.com/urgosxd/harnes-wiki.git`.
+The script builds the production images (`docker compose build`) and the `test` targets
+of both Dockerfiles (the runtime images omit dev dependencies on purpose), starts the
+compose database, waits for a real `select 1`, then runs `tsc --noEmit` and `npm test`
+inside the server test image with `CI_REQUIRE_DATABASE=1`, and the web typecheck, suite
+and `vite build`. Any failure exits non-zero; there is no `continue-on-error`.
+
+Executed here, not described: the whole script passed, the server suite reported 227
+tests with 193 passing and 34 skipped (the live-model tier, skipped because the script
+points `PI_AGENT_DIR` at a missing path), 0 failures — and
+`server/test/stack-turn-context.test.ts` executed inside the CI-shaped container and
+passed on its own:
+
+    ok 1 - a turn's Stack survives into the background chain, per request
+
+The `.dockerignore` keeps `test/` out of every image on purpose, so the suite is mounted
+read-only from the working tree instead of being baked in: the tests that run are always
+the checked-out ones, and the credential-baking risk the ignore file documents stays
+closed.
+
+Harness trap closed in the same unit (`server/test/support/harness.ts`): the tier is no
+longer gated on container health, which answers a different question than "can I
+connect". It asks a real query now, and with `CI_REQUIRE_DATABASE=1` an unreachable
+database fails the build instead of quietly dropping a tier from the run.
+
+No secret was invented: the database password is `docker-compose.yml:12`'s default and is
+in the repository, so CI needs nothing stored. The Pi-credential tier is the one that is
+NOT covered in CI, and the README says so in a table rather than in a footnote.
 

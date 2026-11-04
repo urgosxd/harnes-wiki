@@ -376,6 +376,40 @@ cd server && node --experimental-strip-types --test test/*.test.ts && npx tsc --
 cd web    && npx vitest run && npx tsc --noEmit
 ```
 
+### CI: one command, and it is the gate
+
+```bash
+bash scripts/ci.sh
+```
+
+That is the whole gate, and it is the same command GitHub Actions runs — the workflow at
+`.github/workflows/ci.yml` checks the repository out and calls it, with no commands of
+its own. If it is green on a laptop it is green in CI, because both run the same script,
+the same images and the same database.
+
+What it does, in order: builds the **production** images (so a broken Dockerfile fails
+the gate); builds the **test** images (`--target test`, which carry the dev dependencies
+the runtime images omit on purpose); starts Postgres from this repository's compose file
+and waits for a real `select 1`, not for a healthy container; runs `tsc --noEmit` and the
+server suite **inside** the test image with `CI_REQUIRE_DATABASE=1`; then runs the web
+`typecheck`, suite and production build. Any failure exits non-zero.
+
+Which tiers run where:
+
+| Tier | Locally (`scripts/ci.sh`) | In CI |
+|---|---|---|
+| Server unit tests, including the Postgres-gated ones | **yes** — `CI_REQUIRE_DATABASE=1` makes an unreachable database a failure, not a skip | **yes**, same image, same flag |
+| Web typecheck, tests and build | **yes** | **yes** |
+| Live-model tests (a real provider answering a real turn) | only if `~/.pi/agent/models.json` exists; `scripts/ci.sh` points `PI_AGENT_DIR` at a missing path so this tier **skips by decision** | **skipped**: CI has no Pi credentials and nothing here invents them |
+
+A tier that skips is not proof: that is why the database tier is required rather than
+merely available, and why the table above names the one tier CI does not cover.
+
+The database needs no secret: `scripts/ci.sh` uses the credentials `docker-compose.yml`
+already declares for the dev stack, so there is nothing to store in a repository setting.
+The database is left running after a local run for inspection; `docker compose down`
+removes it.
+
 ## Production (containers)
 
 Two paths, and they no longer share one file. **Development builds from source;
