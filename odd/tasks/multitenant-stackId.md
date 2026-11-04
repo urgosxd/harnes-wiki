@@ -53,9 +53,15 @@ S12 (concurrency, named risk). Two turns started concurrently with different Sta
 
 S13 (scope guard). No hard gate on the chat surface in this unit: without a `stackId` in the link, Stack-scoped agent tools fail closed and the error text names the missing Stack, and the README states that consequence next to the deprecated variable line.
 
-S15 (B1, the scope gate — binding, and the reason it is not a heuristic). A tool is Stack-scoped **iff** its published schema is unreadable or of unknown shape, OR it is a readable flat object whose `properties` include `stackId`. It is NOT Stack-scoped **only** when the schema is a readable flat object with `properties` present that does not include `stackId`. Absent `properties`, `additionalProperties: true`, `allOf`/`anyOf`/`oneOf`/`$ref`, and anything nested or composed are all UNKNOWN ⇒ scoped. The argument for unknown-is-scoped is PARITY: the baseline injected a Stack into every call without reading the schema, so this rule can only narrow the read scope relative to that baseline, never widen it.
+S15 (B1, the scope gate — binding, and the reason it is not a heuristic). A tool is Stack-scoped **iff** its published schema is unreadable or of unknown shape, OR it is a readable flat object whose `properties` include `stackId`. It is NOT Stack-scoped **only** when the schema is a readable flat object with `properties` present that does not include `stackId`. Absent `properties`, `additionalProperties: true`, `allOf`/`anyOf`/`oneOf`/`$ref`, and anything nested or composed are all UNKNOWN ⇒ scoped. A `stackId` declared under `properties` at ANY depth counts as declaring it — a filter object is the obvious shape — and the scan is bounded by a depth cap with a visited guard, where "the cap stopped me" is UNKNOWN, never "there is none". The argument for unknown-is-scoped is PARITY: the baseline injected a Stack into every call without reading the schema, so this rule can only narrow the read scope relative to that baseline, never widen it.
 
 S16 (A1, the name rule — binding). A tool is Stack-scoped **iff** (a) its schema is unreadable or of unknown shape, OR (b) its schema declares `stackId`, OR (c) its name is in `STACK_TOOLS`, the constant this repository already maintains at `server/scripts/provision-mcp.mjs:127`. Clause (c) is not new knowledge about another service: that constant is the thing that already GRANTS those tools at provisioning time. `list_stacks` is the case that needs it — it reads a Stack but publishes no `stackId`, so the schema rules alone called it unscoped, and an unscoped listing exposes other tenants' Stack inventory. With a context it now receives a `stackId` its schema does not declare; the baseline did exactly that in production, and if the upstream ever rejects it the tool fails visibly instead of reading unscoped.
+
+S17 (F2, ambiguous header — binding). A duplicated or joined `x-stack-id` means NO context, never the first value: Node joins two header lines into `"a, b"`, and slicing that string would let a malformed request choose a Stack. The array branch is kept and also yields no context. Guessing costs a cross-tenant read; refusing costs one visible tool error. The same pre-existing shape at `server/src/api/routes.ts:145` (idempotency key) and `server/src/http/auth.ts:82-85` is out of scope and reported, not fixed.
+
+S18 (F3, non-string `stackId` — binding). A `stackId` that is not a string is a TYPE problem with its own message naming the expected type, not a conflict between two Stacks. The conflict branch is reserved for two real strings, and no branch reaches the upstream with a non-string value.
+
+S19 (accepted breadth). `x-stack-id` travels on every request from this product to its own server, not only on the ingest and turn routes. Harmless: the header is a selection our own server reads where it matters, and varying it per route would add a second code path for no security gain.
 
 S14 (unit 3, the S6 residual). The upstream message must reach the screen, not only its status code: `400 invalid_stack_id` has to read as "'not-a-stack' is not a Stack id", not "request failed with 400". Implemented as an INGEST-LOCAL formatter that prefers `body.error.message` from our envelope and delegates its fallback to `errorFrom` unchanged. `errorFrom` itself is not modified — it is shared with chat and every other call, so rewriting its copy would be an unrequested shared-behaviour change. Zero blast radius outside ingest, no duplicated parse logic, chat copy byte-identical by construction.
 
@@ -73,14 +79,18 @@ S14 (unit 3, the S6 residual). The upstream message must reach the screen, not o
 | T8 | Stack context replaces the stored default in the tool path | S8, S9, S10, S11, S12 | worker `stackid-request-context` | `b34a578` |
 | T9 | `MCP_DEFAULT_STACK_ID` optional in provisioning, with one deprecation warning | S8, D6 | inline | `a25bf44` |
 | T10 | README:218 and :621 describe the variable as ignored, with the fail-closed consequence beside them | S13 | inline | `47abfce` |
-| T11 | Independent read-only verification pass over unit 2 | S8-S12 | `gentle-ai-verify` | in flight |
+| T11 | Independent read-only verification pass over unit 2 | S8-S12 | `gentle-ai-verify` | `result:verify-stack-context#1` (all twelve claims confirmed; findings F1-F3 raised) |
 | T12 | `mcp-http-seam.test.ts` documents both sides of fail-closed: the permitted omitted-stackId call, and the no-context refusal that never reaches the upstream | S9, S10 | worker `stackid-request-context` | `b34a578` |
 | T13 | Ingest-local error formatter so the upstream message survives to the screen | S14 | inline | `7de1a8e` |
 | T14 | Scope gate: unknown/unreadable schema counts as Stack-scoped, with one test per shape and both branches | S15 | inline (RED first) | `9beddaf` |
 | T15 | Postgres-gated proof that a turn's Stack survives into the background chain, two concurrent turns of one user | S12, D-E2E | inline | `e461b0d` |
-| T16 | S11 restated (the header is never stored) and S15 recorded | S11, S15 | inline | pending |
-| T17 | A1 settled by reusing the maintained `STACK_TOOLS` constant, no host evidence needed | S16 | inline (RED first) | pending |
+| T16 | S11 restated (the header is never stored) and S15 recorded | S11, S15 | inline | `dbd9672` |
+| T17 | A1 settled by reusing the maintained `STACK_TOOLS` constant, no host evidence needed | S16 | inline (RED first) | `03e6e9f` |
 | T18 | `fallow` on the branch | D-GATE | **withdrawn by the peer: not this repo's gate** | — |
+| T19 | A `stackId` nested under `properties` at any depth makes the tool scoped; scan bounded, cycle-guarded, cap means unknown | S15 (F1) | inline (RED first) | pending |
+| T20 | A duplicated or joined `x-stack-id` yields NO context | S17 (F2) | inline (RED first) | pending |
+| T21 | A non-string `stackId` is refused as a type problem, with its own message | S18 (F3) | inline (RED first) | pending |
+| T22 | The independent verification's two probes adapted into the repo (route boundary, App boundary) | S2-S5, S11, S12 | inline | pending |
 
 T2-T5 land as one work unit because the SPA must compile: the hook, the panel and the
 App all read the same value, so no intermediate commit can remove one end alone.
@@ -214,3 +224,30 @@ the database tier can run from CONTAINER HEALTH alone. A volume initialised with
 different password therefore turns 42 skips into 19 failures and 19 cancellations
 instead of a clean skip. Fixing it is a test-infrastructure change outside this feature;
 it is recorded because it cost a red suite to discover.
+
+L16 (peer's four fixes after the independent pass, all landed):
+- **F1, a real divergence.** The gate read top-level `properties` only, so a `stackId`
+  nested inside a filter object was judged unscoped: no refusal without a context and no
+  injection with one. The spec said nested is unknown ⇒ scoped, and the spec was right;
+  the code now scans the tree with a depth cap and a visited guard, where hitting the cap
+  is UNKNOWN rather than "none".
+- **F2, duplicate header.** Node joins two `x-stack-id` lines into `"first, second"`, so
+  the array branch was unreachable through the real server and the joined string became
+  the Stack. Both shapes now yield no context.
+- **F3, non-string `stackId`.** A number or boolean was reported as a conflict with
+  `String(named)` — a sentence about a Stack that cannot exist. It is now a type error
+  with its own message, and the conflict branch is reserved for two real strings.
+- **F4, this document.** T11/T16/T17 now match their commits instead of contradicting
+  them. A tracked document that disagrees with its own history is worse than none.
+
+Accepted without a code change: the header travels on every request to our own server
+(S19). Reported, not fixed: the same duplicate-header shape at `routes.ts:145` and
+`auth.ts:82-85`.
+
+L17 (probes kept, adapted): the verification pass left two unusable-as-is probes; both
+now live in the repository testing the boundary rather than the seam —
+`server/test/stack-route-context.test.ts` (real router over a real socket: trim, blank
+and absent mean no context, nothing inherited between requests, concurrency, and the
+duplicate header refused) and `web/src/app-zero-requests.test.tsx` (App-level: four
+shapes of a link without a Stack issue zero requests and show the alert, and a link with
+one carries it everywhere). The duplicate-header case asserts the NEW expectation.
