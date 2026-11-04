@@ -12,12 +12,37 @@ export async function openTestDatabase(): Promise<Database> {
   return db;
 }
 
+/**
+ * In CI a database that cannot be reached is a FAILURE, not a reason to skip a tier.
+ *
+ * Skipping is the honest answer on a laptop; in a gate it is a lie that looks like a
+ * pass, because the Postgres tier would silently disappear from the run. `scripts/ci.sh`
+ * sets this, so an unreachable database stops the build.
+ */
+export const REQUIRE_DATABASE = process.env.CI_REQUIRE_DATABASE === "1";
+
+/** The connection target without its password, safe to print in a failure message. */
+function targetDescription(): string {
+  try {
+    const url = new URL(DATABASE_URL);
+    return `${url.hostname}:${url.port || "5432"}${url.pathname}`;
+  } catch {
+    return "the configured DATABASE_URL";
+  }
+}
+
 export async function databaseAvailable(): Promise<boolean> {
   const db = createDatabase(DATABASE_URL);
   try {
     await db.query("SELECT 1");
     return true;
-  } catch {
+  } catch (error) {
+    if (REQUIRE_DATABASE) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `CI_REQUIRE_DATABASE=1 but no database answered at ${targetDescription()}: ${reason}`,
+      );
+    }
     return false;
   } finally {
     await db.close();

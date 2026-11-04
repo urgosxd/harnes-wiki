@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+#
+# The gate, in one executable file.
+#
+# ## Why everything lives here and not in the workflow
+#
+# A workflow that a person cannot run is documentation wearing a gate's clothes. Every
+# command CI executes is in this script, so `bash scripts/ci.sh` on a laptop is the same
+# gate as a failing check on a pull request — same images, same database, same
+# assertions. The YAML only checks out the repository and calls this file.
+#
+# ## Why Docker for the tests as well as the images
+#
+# The runtime images deliberately omit the test toolchain (`npm ci --omit=dev`), so the
+# tests run in dedicated `test` targets of the same Dockerfiles. That keeps CI and a
+# laptop on one Node version, one lockfile and one set of images, and it means the
+# Dockerfiles themselves are part of what this script proves.
+#
+# ## What it does NOT prove
+#
+# The live-model tier needs real Pi credentials, which CI does not have and must not
+# fake: those tests skip, and `PI_AGENT_DIR` is pointed at a path that does not exist so
+# the skip is a decision rather than an accident of the runner. Everything that only
+# needs Postgres does run, and a missing database FAILS this script instead of quietly
+# skipping the tier — that is what `CI_REQUIRE_DATABASE=1` is for.
+#
+# Usage, from anywhere in the repository:
+#   bash scripts/ci.sh
+#
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+# The compose project's own network: the name Docker derives from the directory plus the
+# `internal` network declared in docker-compose.yml.
+COMPOSE_NETWORK="${COMPOSE_NETWORK:-agentdocumentor_internal}"
+TEST_DATABASE_URL="${TEST_DATABASE_URL:-postgres://agentdocumentor:agentdocumentor@postgres:5432/agentdocumentor}"
+DB_WAIT_SECONDS="${DB_WAIT_SECONDS:-120}"
+
+step() {
+  printf '\n== %s ==\n' "$1"
+}
+
+fail() {
+  printf '\nFAILED: %s\n' "$1" >&2
+  exit 1
+}
+
+step "docker is usable"
+docker info >/dev/null 2>&1 || fail "docker is not available; this script needs it so CI and a laptop agree"
+
+step "build the production images (a broken Dockerfile fails the gate here)"
+docker compose build || fail "docker compose build failed"
+
+step "build the test images (dev dependencies the runtime image omits on purpose)"
+docker build --target test -t agentdoc-server-test ./server || fail "server test image failed to build"
+docker build --target test -t agentdoc-web-test ./web || fail "web test image failed to build"
+
+step "database: start it and wait for a real query, not just a healthy container"
+docker compose up -d postgres || fail "could not start postgres"
+
+can_query_database() {
+  docker run --rm --network "$COMPOSE_NETWORK" -e DATABASE_URL="$TEST_DATABASE_URL" agentdoc-server-test \
+    node -e 'const pg = require("pg"); const c = new pg.Client({ connectionString: process.env.DATABASE_URL }); c.connect().then(() => c.query("select 1")).then(() => { c.end(); process.exit(0); }).catch(() => process.exit(1));' \
+    >/dev/null 2>&1
+}
+
+deadline=$((SECONDS + DB_WAIT_SECONDS))
+until can_query_database; do
+  [ "$SECONDS" -lt "$deadline" ] || fail "no database answered a query within ${DB_WAIT_SECONDS}s; the Postgres tier would have been skipped, which in CI is a lie"
+  sleep 2
+done
+printf 'database answered a query\n'
+
+step "server: typecheck, then the suite with the database tier REQUIRED"
+# `CI_REQUIRE_DATABASE` turns an unreachable database into a failure instead of a skip;
+# `PI_AGENT_DIR` names a path that does not exist so the live-model tier skips by
+# decision, and the summary says so.
+# `test/` is excluded from every image on purpose (see the Dockerfile), so it is mounted
+# read-only from the working tree: the tests that run are the checked-out ones.
+docker run --rm --network "$COMPOSE_NETWORK" \
+  -v "$ROOT/server/test:/app/test:ro" \
+  -e DATABASE_URL="$TEST_DATABASE_URL" \
+  -e CI_REQUIRE_DATABASE=1 \
+  -e PI_AGENT_DIR=/nonexistent-no-pi-credentials-on-purpose \
+  agentdoc-server-test sh -c 'npx tsc --noEmit && npm test' \
+  || fail "server typecheck or tests failed"
+
+step "web: typecheck, tests, production build"
+docker run --rm agentdoc-web-test sh -c 'npx tsc --noEmit && npx vitest run && npx vite build' \
+  || fail "web typecheck, tests or build failed"
+
+step "done"
+printf 'CI passed: production images built, server suite green with a real database,\n'
+printf 'web suite and build green. The live-model tier skipped by design (no Pi credentials here).\n'
+printf 'The database is left running so it can be inspected; `docker compose down` removes it.\n'

@@ -3,6 +3,38 @@
 # constraint: type stripping rejects syntax that emits JavaScript (parameter
 # properties, enum, namespace, decorators). Pinning the Node image exactly is what
 # keeps that guarantee stable across rebuilds.
+# ---- test ----
+#
+# The runtime image below installs with `--omit=dev` on purpose, so it cannot run the
+# suite. This stage carries the test toolchain instead of a workflow installing it ad
+# hoc: CI and a laptop then build the same image from the same lockfile, and the
+# Dockerfile itself is part of what the gate proves.
+#
+# It is FIRST so the runtime stage stays the last (and therefore default) target:
+# `docker compose build` keeps producing the production image, and
+# `docker build --target test` produces this one.
+FROM node:22.23.2-alpine AS test
+
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci && npm cache clean --force
+
+COPY src ./src
+COPY scripts ./scripts
+COPY tsconfig.json ./
+
+# The suite is NOT copied in: `.dockerignore` keeps `test/` out of every image on
+# purpose — it is the one place a real credential could be baked in by accident — and
+# that reasoning outranks the convenience of a self-contained test image.
+# `scripts/ci.sh` mounts the checked-out `test/` read-only at run time instead, which
+# also means the tests that run are always the ones in the working tree.
+#
+# The database is supplied the same way: `scripts/ci.sh` starts one, points DATABASE_URL
+# at it, and CI_REQUIRE_DATABASE makes a missing one a failure rather than a skip.
+CMD ["npm", "test"]
+
+# ---- runtime (default target) ----
 FROM node:22.23.2-alpine
 
 WORKDIR /app

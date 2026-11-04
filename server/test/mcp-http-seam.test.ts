@@ -447,8 +447,12 @@ describe("the tenant MCP seam can speak streamable HTTP", () => {
   });
 });
 
+// Decided once at module load: the gate needs a query, and a describe callback cannot
+// await. Availability is per-run, not per-test.
+const databaseTierReady = await databaseReady();
+
 describe("tenant_mcp rows are constrained to a connectable shape", () => {
-  const canRun = databaseReady();
+  const canRun = databaseTierReady;
   const skip = canRun ? false : "needs Postgres";
 
   let db: Database;

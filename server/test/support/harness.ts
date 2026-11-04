@@ -1,9 +1,9 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createDatabase } from "../../src/db/pool.ts";
+import { databaseAvailable } from "./db.ts";
 
 export const AGENT_DIR = process.env.PI_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
 export const PROVIDER = process.env.CHAT_PROVIDER ?? "synthetic";
@@ -15,19 +15,20 @@ export function hasCredentials(): boolean {
   return existsSync(join(AGENT_DIR, "models.json")) || existsSync(join(AGENT_DIR, "auth.json"));
 }
 
-/** Synchronous on purpose: `before()` in node:test cannot skip, so availability is
- *  decided at module load and passed to each test as its `skip` option. */
-export function databaseReady(): boolean {
-  try {
-    const status = execFileSync(
-      "docker",
-      ["inspect", "--format", "{{.State.Health.Status}}", "agentdoc-postgres"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    ).trim();
-    return status === "healthy";
-  } catch {
-    return false;
-  }
+/**
+ * Whether the database tier can run, decided by a QUERY.
+ *
+ * It used to ask Docker for the container's health, which answers a different question:
+ * a container can be perfectly healthy while every connection fails — a volume
+ * initialised with a password this checkout does not have does exactly that. Measured
+ * consequence of asking the wrong question: a tier that used to skip ran, 19 tests
+ * failed for a reason nothing in the failure named, and 19 more were cancelled.
+ *
+ * Availability is still decided at module load, because `before()` cannot skip; callers
+ * therefore `await` this once at the top of their file and pass the result as `skip`.
+ */
+export async function databaseReady(): Promise<boolean> {
+  return databaseAvailable();
 }
 
 export function makeWorkspace(): string {

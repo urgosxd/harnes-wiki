@@ -1,0 +1,22 @@
+# The gate for this repository.
+#
+# It is a thin wrapper on purpose: every command lives in `scripts/ci.sh`, so a failure
+# here can be reproduced on a laptop with `bash scripts/ci.sh`, and nothing can be true
+# in CI and false locally. Do not add `run:` steps here — add them to the script.
+#
+# No `continue-on-error` anywhere: a step that cannot fail is not a step.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run scripts/ci.sh
+        run: bash scripts/ci.sh

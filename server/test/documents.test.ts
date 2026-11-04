@@ -36,7 +36,7 @@ const headers = {
   "content-type": "application/pdf",
 };
 
-const canRun = databaseReady();
+const canRun = await databaseReady();
 const skip = canRun ? false : "needs Postgres";
 
 describe("documents: storage and the capability URL", { skip }, () => {

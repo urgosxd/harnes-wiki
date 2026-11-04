@@ -16,7 +16,7 @@ import { registerRoutes } from "../src/api/routes.ts";
 import { projectMessages } from "../src/api/routes.ts";
 import { AGENT_DIR, MODEL_ID, PROVIDER, databaseReady, hasCredentials, makeWorkspace, testUser } from "./support/harness.ts";
 
-const canRun = databaseReady() && hasCredentials();
+const canRun = (await databaseReady()) && hasCredentials();
 const skip = canRun ? false : "needs Postgres and Pi credentials";
 
 const DEV_TOKEN = "test-token";

@@ -27,7 +27,7 @@ import { AGENT_DIR, MODEL_ID, PROVIDER, databaseReady, hasCredentials, makeWorks
  */
 const USER_COUNT = Number(process.env.ISOLATION_USERS ?? 2);
 
-const canRun = databaseReady() && hasCredentials();
+const canRun = (await databaseReady()) && hasCredentials();
 const skip = canRun ? false : "needs Postgres and Pi credentials";
 
 const fixtureDir = dirname(fileURLToPath(import.meta.url));
