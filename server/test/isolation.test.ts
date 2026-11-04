@@ -27,8 +27,18 @@ import { AGENT_DIR, MODEL_ID, PROVIDER, databaseReady, hasCredentials, makeWorks
  */
 const USER_COUNT = Number(process.env.ISOLATION_USERS ?? 2);
 
-const canRun = (await databaseReady()) && hasCredentials();
-const skip = canRun ? false : "needs Postgres and Pi credentials";
+/**
+ * Two gates, not one — this is the tenancy file, so the split matters more here.
+ *
+ * The two ownership tests below are HTTP and SQL: they need a database and nothing else.
+ * Gating them on Pi credentials is why CI would have run zero tenancy assertions while the
+ * README called the skipped tier "live-model". Only the tests that drive a real turn need
+ * a model.
+ */
+const databaseTierReady = await databaseReady();
+const skipDatabase = databaseTierReady ? false : "needs a reachable Postgres";
+const skipModel = databaseTierReady && hasCredentials() ? false : "needs a reachable Postgres and Pi credentials";
+const skip = skipDatabase;
 
 const fixtureDir = dirname(fileURLToPath(import.meta.url));
 const FAKE_MCP = join(fixtureDir, "fixtures", "fake-mcp-server.mjs");
@@ -60,7 +70,7 @@ const TENANTS: TenantSpec[] = Array.from({ length: USER_COUNT }, (_unused, index
 const runtimes = new Map<string, Promise<TenantRuntime>>();
 
 before(async () => {
-  if (!canRun) return;
+  if (skipDatabase) return;
   db = createDatabase(process.env.DATABASE_URL ?? "postgres://agentdocumentor:agentdocumentor@127.0.0.1:5432/agentdocumentor");
   await migrate(db);
   store = new ConversationStore(db);
@@ -179,7 +189,7 @@ async function messagesOf(userId: string, conversationId: string) {
   return ((await response.json()) as { messages: Array<{ role: string; text: string }> }).messages;
 }
 
-test("each user keeps their own history when running at the same time", { skip }, async () => {
+test("each user keeps their own history when running at the same time", { skip: skipModel }, async () => {
   // One conversation per user, all first turns in flight together.
   const conversations = await Promise.all(
     TENANTS.map(async (tenant) => ({
@@ -299,7 +309,7 @@ test("the sidebar shows each user only their own conversations", { skip }, async
   }
 });
 
-test("two simultaneous turns on one conversation cannot both run", { skip }, async () => {
+test("two simultaneous turns on one conversation cannot both run", { skip: skipModel }, async () => {
   const tenant = TENANTS[0]!;
   const conversation = await createConversation(tenant.userId, "race");
 
@@ -322,7 +332,7 @@ test("two simultaneous turns on one conversation cannot both run", { skip }, asy
   }
 });
 
-test("MCP connections are per tenant and do not grow with turns", { skip }, async () => {
+test("MCP connections are per tenant and do not grow with turns", { skip: skipModel }, async () => {
   if (!existsSync(pidFile)) {
     assert.fail("the fake MCP server never started; the process count cannot be measured");
   }
@@ -362,7 +372,7 @@ test("MCP connections are per tenant and do not grow with turns", { skip }, asyn
   }
 });
 
-test("each tenant's MCP tool runs against its own connection, not a shared one", { skip }, async () => {
+test("each tenant's MCP tool runs against its own connection, not a shared one", { skip: skipModel }, async () => {
   const [first, second] = [TENANTS[0]!, TENANTS[1]!];
   const firstRuntime = await runtimes.get(first.userId)!;
   const secondRuntime = await runtimes.get(second.userId)!;
@@ -388,7 +398,7 @@ test("each tenant's MCP tool runs against its own connection, not a shared one",
   assert.doesNotMatch(answers[1]!, new RegExp(first.userId), "the second answer must not name the first tenant");
 });
 
-test("a business tool enforces the tenant's scope and nothing else", { skip }, async () => {
+test("a business tool enforces the tenant's scope and nothing else", { skip: skipModel }, async () => {
   // TENANTS alternates scopes: even index has orders:read, odd does not.
   const allowed = TENANTS.find((tenant) => tenant.scope.includes("orders:read"));
   const denied = TENANTS.find((tenant) => !tenant.scope.includes("orders:read"));
