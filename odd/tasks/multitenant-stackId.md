@@ -61,6 +61,14 @@ S17 (F2, ambiguous header — binding). A duplicated or joined `x-stack-id` mean
 
 S18 (F3, non-string `stackId` — binding). A `stackId` that is not a string is a TYPE problem with its own message naming the expected type, not a conflict between two Stacks. The conflict branch is reserved for two real strings, and no branch reaches the upstream with a non-string value.
 
+S20 (B2, path independence — binding). The gate must not depend on the directory it is checked out into. The compose project is pinned (`COMPOSE_PROJECT_NAME`) and the network name is DERIVED from `docker compose config`, never written as a literal; cleanup uses `down` without `-v`. Proven by running the whole script from a copy of the repository at a different directory name (`/tmp/ci-proof/harnes-wiki`) and requiring exit 0, and guarded by a test that no `*_internal` literal returns.
+
+S21 (B1, documents that lie). A task row whose commit cell names a SHA may not read `pending`, and a document with no pending row may not say `Status: in progress`. Two reconciliations were promised in commit messages and did not land, so this is a test over `odd/tasks/*.md`, not another promise.
+
+S22 (false green). A test that needs only a database must not be gated on model credentials: tenancy isolation is a database property, and gating it on Pi credentials meant CI would run zero isolation assertions while the README called the skipped tier live-model. The two gates are separate, and each skip message names the requirement that is actually missing.
+
+S23 (workflow hygiene and the destructive hint). One run per branch with `cancel-in-progress`; and where the README shows `docker compose down -v`, it states that `-v` removes BOTH volumes and gives the named form that resets only the database.
+
 S19 (accepted breadth). `x-stack-id` travels on every request from this product to its own server, not only on the ingest and turn routes. Harmless: the header is a selection our own server reads where it matters, and varying it per route would add a second code path for no security gain.
 
 S14 (unit 3, the S6 residual). The upstream message must reach the screen, not only its status code: `400 invalid_stack_id` has to read as "'not-a-stack' is not a Stack id", not "request failed with 400". Implemented as an INGEST-LOCAL formatter that prefers `body.error.message` from our envelope and delegates its fallback to `errorFrom` unchanged. `errorFrom` itself is not modified — it is shared with chat and every other call, so rewriting its copy would be an unrequested shared-behaviour change. Zero blast radius outside ingest, no duplicated parse logic, chat copy byte-identical by construction.
@@ -94,6 +102,10 @@ S14 (unit 3, the S6 residual). The upstream message must reach the screen, not o
 | C1 | Reset the dev database volume and run the Postgres tier so the end-to-end proof EXECUTES | S12, D-E2E | inline | `840b3c9` |
 | C2 | `scripts/ci.sh` plus a thin GitHub Actions wrapper, and the database gate asks a real query | D-GATE-CI | inline | `7da9c35` |
 | C3 | README: one command, which tiers run and which one does not, and why | D-GATE-CI | inline | `3e05b06` |
+| C4 | Compose network derived, cleanup without `-v`, and the differently-named-directory proof | S20 | inline | `0bf9b6b` |
+| C5 | The task table reconciled for real, with a test that keeps it honest | S21 | inline | `eae902f` |
+| C6 | Tenancy tests split from the model gate so CI exercises isolation | S22 | inline (RED reasoned, not decorative) | `8fb228a` |
+| C7 | Concurrency, and the `-v` warning where the README advertises it | S23 | inline | `077ca64` |
 
 T2-T5 land as one work unit because the SPA must compile: the hook, the panel and the
 App all read the same value, so no intermediate commit can remove one end alone.
@@ -355,4 +367,35 @@ Accepted without a fix, as advisories: under the flag an unreachable database th
 import in six files, so the run reports less than a skip list would; the script rebuilds
 four images and leaves the database running on every invocation, which is what its own
 output says.
+
+L21 (the audit's blockers, and the false green). Two blockers, both cases of an artefact
+contradicting its own commits, plus one false-green vector that mattered more than either.
+
+- **B2, path dependence.** The gate named a network derived from the checkout directory. It
+  was pinned first and then DERIVED from `docker compose config`, and the proof the audit
+  asked for exists: `bash scripts/ci.sh` run from a copy of the repository at
+  `/tmp/ci-proof/harnes-wiki` — a different directory name — exited **0**, server 233 tests,
+  195 pass, 0 fail, 38 skipped, web suite and build green. A path-independent gate that has
+  only ever run at one path was not proven; now it has run at two.
+- **B1, the document lied twice.** T19/T20/T21/T22 and C3 named their commits and still read
+  `pending`, and the header said `in progress` with nothing pending. `eae902f` fixes the
+  rows and the status, and `server/test/feature-doc.test.ts` now asserts the two rules over
+  every five-column task table — reading only that table shape, because the first draft
+  misread four legacy documents and failed on their column counts.
+- **The false green.** `http-api.test.ts` and `isolation.test.ts` gated every assertion on
+  database AND credentials, so CI skipped about eighteen tests including the tenancy
+  isolation ones. That is the property the whole feature exists to protect. The gates are
+  split now: in the CI shape (database present, no credentials) **eleven of those nineteen
+  tests run and pass** where all nineteen used to skip, and only the eight that drive a real
+  turn skip, each saying "needs a reachable Postgres and Pi credentials".
+  The gate run after the split: **244 tests, 220 pass, 0 fail, 24 skipped** — ten more
+  executed than before it, and the four contract tests and five feature-doc tests now run
+  in the container too, because `CI_REPO_ROOT` points them at a read-only mount of the
+  checkout instead of skipping for lack of one.
+
+Accepted, not fixed: the audit's certification of the requester's quote (verbatim, including
+the missing accent in "eleminar") closes that claim from the peer's side; the comma
+narrowing in `x-stack-id` is documented rather than softened, because a Stack id containing
+a comma is not a real case and the rule is fail-closed; and no lint tier exists in this
+repository, so none was added.
 
