@@ -63,7 +63,7 @@ S18 (F3, non-string `stackId` — binding). A `stackId` that is not a string is 
 
 S20 (B2, path independence — binding). The gate must not depend on the directory it is checked out into. The compose project is pinned (`COMPOSE_PROJECT_NAME`) and the network name is DERIVED from `docker compose config`, never written as a literal; cleanup uses `down` without `-v`. Proven by running the whole script from a copy of the repository at a different directory name (`/tmp/ci-proof/harnes-wiki`) and requiring exit 0, and guarded by a test that no `*_internal` literal returns.
 
-S21 (B1, documents that lie). A task row whose commit cell names a SHA may not read `pending`, and a document with no pending row may not say `Status: in progress`. Two reconciliations were promised in commit messages and did not land, so this is a test over `odd/tasks/*.md`, not another promise.
+S21 (B1-DOC, documents that lie) — RESTATED to say what it actually covers. The guard evaluates exactly ONE table: `multitenant-stackId.md`'s five-column task table, 29 rows when this was written. The other four documents in `odd/tasks/` contribute zero rows and their `Status: in progress` headers are never compared, because their tables have no commit cell at all — decision logs (`# | Decisión | Motivo`), evidence logs (`Fecha | Task | Evidencia`), commit narrations (`Commit | Contenido`) and measurement tables. `pi-chat-mvp.md` records its tasks in a long evidence table with SHAs inside prose, which is not a task-commit table. So: S21 governs one document, and the rules are (a) a row whose commit cell names a SHA may not read `pending`, (b) rows and header must agree about what is pending in BOTH directions, and (c) a census sentinel fails if any table shaped like a task table — a task id in front, a commit at the end — is not evaluated, or if a second document starts carrying task rows. That last clause is what stops a third table shape from slipping in unread.
 
 S22 (false green). A test that needs only a database must not be gated on model credentials: tenancy isolation is a database property, and gating it on Pi credentials meant CI would run zero isolation assertions while the README called the skipped tier live-model. The two gates are separate, and each skip message names the requirement that is actually missing.
 
@@ -106,6 +106,10 @@ S14 (unit 3, the S6 residual). The upstream message must reach the screen, not o
 | C5 | The task table reconciled for real, with a test that keeps it honest | S21 | inline | `eae902f` |
 | C6 | Tenancy tests split from the model gate so CI exercises isolation | S22 | inline (RED reasoned, not decorative) | `8fb228a` |
 | C7 | Concurrency, and the `-v` warning where the README advertises it | S23 | inline | `077ca64` |
+| C8 | The pin guard asserts the EXPORT form on configuration, and no assertion reads prose | S20 | inline (mutation-proven) | `fa470dd` |
+| C9 | The whole network name is derived from `docker compose config`, requiring exactly one network | S20 (NET-KEY) | inline | `fa470dd` |
+| C10 | S21 restated to one document, plus the census sentinel | S21 | inline | `fa470dd` |
+| C11 | The pending test that could not fail is gone | S21 | inline | `fa470dd` |
 
 T2-T5 land as one work unit because the SPA must compile: the hook, the panel and the
 App all read the same value, so no intermediate commit can remove one end alone.
@@ -398,4 +402,26 @@ the missing accent in "eleminar") closes that claim from the peer's side; the co
 narrowing in `x-stack-id` is documented rather than softened, because a Stack id containing
 a comma is not a real case and the rule is fail-closed; and no lint tier exists in this
 repository, so none was added.
+
+L22 (the audit's five, and the mutation habit paying off). Each was a guard that measured
+the wrong thing, which is now the dominant failure mode of this feature's tests — five
+instances, every one of them green.
+- **FG-PIN**: deleting `export COMPOSE_PROJECT_NAME` reinstated the checkout-derived naming
+  (the original blocker) while both assertions stayed green: one matched a bare string, the
+  other matched a comment. The guard now requires the EXPORT form, in configuration.
+  Proven: deleting the line fails it.
+- **FR-RAW**: the same assertion read raw text, so a comment documenting the historical
+  failure would have failed the guard and taught the next person to delete the
+  documentation. Proven: adding that comment now passes.
+- **NET-KEY**: the script appended a hardcoded `_internal` to the project name, so renaming
+  the compose network key would have pointed at a network compose never creates — B2 again,
+  with B2's misleading timeout. The whole name now comes from `docker compose config`, one
+  network required, failure loud. Proven: `agentdocumentor_internal` by default,
+  `demo_internal` with the project overridden.
+- **S21-REACH**: the spec overstated its reach (five documents), and one comment described a
+  four-column-with-commit table that does not exist anywhere in the corpus. Both corrected,
+  and a census sentinel now fails if a task-shaped table is skipped or a second document
+  starts carrying task rows.
+- **DEAD-ASSERT**: one pending test could not fail while the bi-directional one passed, so
+  it was deleted rather than kept as decoration; both mutations remain caught.
 
