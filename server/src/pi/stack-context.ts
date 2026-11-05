@@ -26,8 +26,11 @@ import { AsyncLocalStorage } from "node:async_hooks";
  * no conversation row, no schema, no default to fall back on. Without a context the
  * Stack-scoped tools fail closed rather than going out unscoped.
  *
- * The value is never logged: a Stack id is a tenant identifier, and this module
- * exists so the identifier travels without being written down anywhere.
+ * The value is not written down, with one exception: when a tool call carries an
+ * explicit `stackId` naming a different Stack, `resolveStackArgument` in
+ * `tenant-runtime.ts` records that override once, naming the tool and both Stacks.
+ * A Stack id is a tenant identifier, so a divergence from the page's Stack is the
+ * only trace this module's value leaves.
  */
 const storage = new AsyncLocalStorage<string>();
 
