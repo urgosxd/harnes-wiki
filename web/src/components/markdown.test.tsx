@@ -175,6 +175,17 @@ describe("security: model output is untrusted", () => {
     expect(link?.textContent).toBe("click me");
     expect(link?.getAttribute("href") ?? "").not.toMatch(/^javascript:/i);
   });
+
+  it("neutralises a data: link target", () => {
+    const { container } = renderAnswer("[d](data:text/html,<script>alert(1)</script>)");
+    expect(container.querySelector("a")?.getAttribute("href") ?? "").not.toMatch(/^data:/i);
+  });
+
+  it("keeps an iframe in an answer as inert text", () => {
+    const { container } = renderAnswer('<iframe src="https://evil.test"></iframe>');
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(container.textContent).toContain("<iframe");
+  });
 });
 
 describe("streaming: half-written markdown still renders", () => {
