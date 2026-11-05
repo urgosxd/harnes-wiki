@@ -27,7 +27,7 @@ export type ChatFrame =
    * `label` is the SAME text `tool_started` sent: the client closes the running row by
    * matching it, so a per-call remark must never be appended to it.
    *
-   * `notice` is set only when the call ran on a Stack the turn's own Stack did not name
+   * `notice` is set only when the call was sent to a Stack the turn's own Stack did not name
    * — already a sentence, naming both Stacks (see `resolveStackArgument` in
    * `tenant-runtime.ts`). It rides this frame rather than a new one because it is one
    * fact about one finished call, and the client must be able to show it without

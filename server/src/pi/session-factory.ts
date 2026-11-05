@@ -49,7 +49,7 @@ export interface TurnHooks {
   /**
    * Called when a tool finishes.
    *
-   * `notice` is set only when the call ran on a Stack the turn's own Stack did not name
+   * `notice` is set only when the call was sent to a Stack the turn's own Stack did not name
    * (`resolveStackArgument` in `tenant-runtime.ts`), and it is already a sentence: the
    * caller's job is to carry it to the person, not to word it again.
    */
@@ -241,7 +241,7 @@ export async function runTurn(options: {
  * The Stack notice a finished tool call carries, if any.
  *
  * `resolveStackArgument` attaches it to the tool result's `details` when — and only
- * when — the call ran on a Stack the turn's own Stack did not name. Reading it here
+ * when — the call was sent to a Stack the turn's own Stack did not name. Reading it here
  * rather than re-deriving it keeps one author of the sentence: the proxy knows which
  * two Stacks were involved, and this function only decides whether a value is a
  * notice at all.

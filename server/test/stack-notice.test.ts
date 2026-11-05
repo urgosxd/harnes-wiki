@@ -8,7 +8,7 @@ import { toolLabel } from "../src/pi/activity.ts";
 import { Logger } from "../src/log.ts";
 
 /**
- * The Stack a call actually ran on must be VISIBLE to the person using the product.
+ * The Stack a call was actually sent to must be VISIBLE to the person using the product.
  *
  * A log line is not that: the reviewer's objection, accepted by the requester, was that
  * the log replaced the old refusal with something nobody reads — the refusal at least
@@ -105,15 +105,15 @@ function capturedLog(): { logger: Logger; lines: string[] } {
   return { logger: new Logger({ level: "debug", sink: (line) => lines.push(line) }), lines };
 }
 
-test("a call that runs on another Stack shows it, naming the tool and both Stacks", async () => {
+test("a call sent to another Stack shows it, naming the tool and both Stacks", async () => {
   const tool = mount();
   const result = await withStackContext("stack-a", () => tool.execute("c1", { stackId: "stack-b" }));
 
   assert.notEqual(result.isError, true);
   assert.equal(
     result.details.stackNotice,
-    "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.",
-    "the person must be able to read WHICH CALL ran on which Stack, and which one was expected",
+    "ingest_jobs_list was sent to Stack stack-b, not the session's Stack stack-a.",
+    "the person must be able to read WHICH CALL was sent to which Stack, and which one was expected",
   );
 });
 
@@ -129,11 +129,11 @@ test("two tools diverging to the same foreign Stack stay two attributed sentence
 
   assert.equal(
     onList.details.stackNotice,
-    "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.",
+    "ingest_jobs_list was sent to Stack stack-b, not the session's Stack stack-a.",
   );
   assert.equal(
     onGet.details.stackNotice,
-    "ingest_job_get ran on Stack stack-b, not the session's Stack stack-a.",
+    "ingest_job_get was sent to Stack stack-b, not the session's Stack stack-a.",
   );
   assert.notEqual(onList.details.stackNotice, onGet.details.stackNotice, "two calls, two sentences");
 });
@@ -148,7 +148,7 @@ test("with no session Stack, the notice says so instead of claiming one", async 
   assert.notEqual(result.isError, true);
   assert.equal(
     result.details.stackNotice,
-    "ingest_jobs_list ran on Stack stack-b; the session had no Stack.",
+    "ingest_jobs_list was sent to Stack stack-b; the session had no Stack.",
   );
 });
 
@@ -172,7 +172,7 @@ test("the notice is details, not content: what the model reads is unchanged", as
   assert.equal(textOf(result), "ok", "the model's tool result is exactly what the upstream said");
   assert.equal(
     result.details.stackNotice,
-    "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.",
+    "ingest_jobs_list was sent to Stack stack-b, not the session's Stack stack-a.",
     "the sentence the person sees is on details, which is where it can be read",
   );
   assert.doesNotMatch(textOf(result), /Stack/, "the bookkeeping never enters the model's context");
@@ -187,7 +187,7 @@ test("the structured log record is kept alongside the visible notice", async () 
   // length check here stayed green with the notice dropped altogether.
   assert.equal(
     result.details.stackNotice,
-    "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.",
+    "ingest_jobs_list was sent to Stack stack-b, not the session's Stack stack-a.",
     "the log record complements the visible notice, it does not replace it",
   );
   assert.equal(log.lines.length, 1, "one record per overridden call, as before");
@@ -198,7 +198,7 @@ test("the notice rides the finished-call frame without touching its label", () =
   // The client closes the running activity row by MATCHING the label it got from
   // `tool_started`, so a remark appended to the label would leave the row spinning and
   // the notice still unread. One field of its own, same label.
-  const notice = "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.";
+  const notice = "ingest_jobs_list was sent to Stack stack-b, not the session's Stack stack-a.";
   assert.deepEqual(toolFinishedFrame("ingest_jobs_list", false, notice), {
     type: "tool_finished",
     tool: "ingest_jobs_list",
@@ -222,8 +222,8 @@ test("a call with nothing to say carries no notice field at all", () => {
  */
 test("the turn pipeline lifts a notice out of a finished call", () => {
   assert.equal(
-    stackNoticeFromResult({ details: { stackNotice: "Ran on Stack b, not the session's Stack a." } }),
-    "Ran on Stack b, not the session's Stack a.",
+    stackNoticeFromResult({ details: { stackNotice: "ingest_jobs_list was sent to Stack stack-b, not the session's Stack stack-a." } }),
+    "ingest_jobs_list was sent to Stack stack-b, not the session's Stack stack-a.",
   );
 });
 

@@ -733,10 +733,15 @@ refused — and it is not silent, in either of the two places a divergent call c
 noticed. The person whose turn it was reads it in that turn's own output, under the
 answer:
 
-| The call ran on | What the chat window says |
+| The call was sent to | What the chat window says |
 |---|---|
-| a Stack other than the link's | `<tool> ran on Stack <argument's Stack>, not the session's Stack <link's Stack>.` |
-| a Stack the argument named, with no Stack in the link | `<tool> ran on Stack <argument's Stack>; the session had no Stack.` |
+| a Stack other than the link's | `<tool> was sent to Stack <argument's Stack>, not the session's Stack <link's Stack>.` |
+| a Stack the argument named, with no Stack in the link | `<tool> was sent to Stack <argument's Stack>; the session had no Stack.` |
+
+The sentence says what the proxy SENT, not what the host did with it: whether the remote
+service honours a per-call `stackId` is unproven from this repository — a host that binds
+its Stack at MCP `initialize` or from its own process environment would ignore the
+argument — so the line reports the forwarding it can see and claims no outcome.
 
 Each divergent call gets its own line, and the line names the tool: two calls that left
 the link's Stack for the same foreign one are two facts, not one, and a sentence naming

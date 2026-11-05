@@ -11,7 +11,7 @@ import {
 import { parseChatFrame } from "./lib/sse.ts";
 
 /**
- * The Stack a call ran on must reach the PERSON, not just the log.
+ * The Stack a call was sent to must reach the PERSON, not just the log.
  *
  * The reviewer's objection, accepted by the requester: the old refusal named a foreign
  * Stack on screen, and a structured log record does not replace that — nobody reads it.
@@ -27,9 +27,9 @@ function run(actions: Parameters<typeof chatReducer>[1][], from: ChatState = ini
   return actions.reduce(chatReducer, from);
 }
 
-const NOTICE = "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.";
+const NOTICE = "ingest_jobs_list was sent to Stack stack-b, not the session's Stack stack-a.";
 /** The same foreign Stack, reached by a different tool: a second, distinct fact. */
-const NOTICE_OTHER = "ingest_job_get ran on Stack stack-b, not the session's Stack stack-a.";
+const NOTICE_OTHER = "ingest_job_get was sent to Stack stack-b, not the session's Stack stack-a.";
 /** Two conversations, so a notice can be attributed to the turn that produced it. */
 const A = "conv-a";
 const B = "conv-b";
@@ -347,7 +347,7 @@ describe("App shows the divergent Stack in the turn's output", () => {
     // client must not invent a sentence of its own.
     await sendOneMessage([STARTED, finished(), DONE]);
     await waitFor(() => expect(screen.queryByText("Stop")).toBeNull());
-    expect(screen.queryByText(/Ran on Stack/)).toBeNull();
+    expect(screen.queryByText(/sent to Stack/)).toBeNull();
     expect(screen.queryByText(/session had no Stack/)).toBeNull();
   });
 });

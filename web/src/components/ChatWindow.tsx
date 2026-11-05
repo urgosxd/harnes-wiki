@@ -82,7 +82,7 @@ export function ChatWindow({
         )}
 
         {/*
-          Which Stack a tool call actually ran on, when it was not the session's.
+          Which Stack a tool call was actually sent to, when it was not the session's.
 
           Here, in the turn's own output, because the point of the sentence is that a
           person reads it: the server's log record is for an operator weeks later, and a

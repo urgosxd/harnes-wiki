@@ -39,7 +39,7 @@ export interface ChatState {
   /** True when the last failure is worth retrying. */
   canRetry: boolean;
   /**
-   * Which Stack a tool call actually ran on, when it was not the Stack the session was
+   * Which Stack a tool call was actually sent to, when it was not the Stack the session was
    * opened with.
    *
    * The server words the sentence and this only carries it: it names both Stacks, so a

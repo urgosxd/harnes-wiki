@@ -24,8 +24,8 @@ import {
  * what keeps an older client working.
  */
 
-const NOTICE = "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.";
-const OTHER = "ingest_job_get ran on Stack stack-c, not the session's Stack stack-a.";
+const NOTICE = "ingest_jobs_list was sent to Stack stack-b, not the session's Stack stack-a.";
+const OTHER = "ingest_job_get was sent to Stack stack-c, not the session's Stack stack-a.";
 /** The conversation these turns run in. A notice about a turn belongs to its thread. */
 const CONVERSATION = "conv-a";
 

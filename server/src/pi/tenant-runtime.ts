@@ -410,10 +410,18 @@ function resolveStackArgument(
 /**
  * What a divergent call says out loud, in one factual sentence.
  *
- * Both Stacks are named because the fact is the DIFFERENCE: "a foreign Stack was used"
- * is what the old refusal told a human, and it is still the thing a person needs to know.
- * With no session Stack there is none to name, and claiming one would describe a request
- * that never happened — the argument was the only source, so only it is named.
+ * The claim is deliberately about what WE FORWARDED, not about what the host then did with
+ * it. The proxy controls exactly one thing: the per-call `stackId` it sends. Whether the
+ * remote service honours a different Stack per call is UNPROVEN from here — nothing in
+ * this repository shows how the host binds a Stack, and a host that binds it at MCP
+ * `initialize` or from its own process environment would ignore the argument entirely.
+ * "ran on" asserted that outcome; "was sent to" states the one thing we can see.
+ *
+ * Both Stacks are named because the fact is the DIFFERENCE: "a foreign Stack was
+ * forwarded" is what the old refusal told a human, and it is still the thing a person
+ * needs to know. With no session Stack there is none to name, and claiming one would
+ * describe a request that never happened — the argument was the only source, so only it
+ * is named.
  *
  * The TOOL is named as well, because the sentence is one line in a turn that can make
  * several calls: without it, two divergent calls to the same foreign Stack are worded
@@ -427,8 +435,8 @@ function stackNotice(
   turnStackId: string | undefined,
 ): string {
   return turnStackId === undefined
-    ? `${toolName} ran on Stack ${effectiveStackId}; the session had no Stack.`
-    : `${toolName} ran on Stack ${effectiveStackId}, not the session's Stack ${turnStackId}.`;
+    ? `${toolName} was sent to Stack ${effectiveStackId}; the session had no Stack.`
+    : `${toolName} was sent to Stack ${effectiveStackId}, not the session's Stack ${turnStackId}.`;
 }
 
 let processLogger: Logger | undefined;

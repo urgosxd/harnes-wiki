@@ -104,13 +104,13 @@ test("a divergent call names the tool and both Stacks, and forwards the argument
 
   assert.equal(
     result.details.stackNotice,
-    "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.",
+    "ingest_jobs_list was sent to Stack stack-b, not the session's Stack stack-a.",
   );
   assert.deepEqual(calls[before]?.args, { stackId: "stack-b" }, "the argument is the one used");
   assert.equal(text(result), "UPSTREAM", "the model's tool result is unchanged");
   assert.equal(
     stackNoticeFromResult(result),
-    "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.",
+    "ingest_jobs_list was sent to Stack stack-b, not the session's Stack stack-a.",
     "the turn pipeline can lift it out of the finished call",
   );
   assert.deepEqual(
@@ -120,7 +120,7 @@ test("a divergent call names the tool and both Stacks, and forwards the argument
       tool: "ingest_jobs_list",
       label: toolLabel("ingest_jobs_list"),
       isError: false,
-      notice: "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.",
+      notice: "ingest_jobs_list was sent to Stack stack-b, not the session's Stack stack-a.",
     },
     "and the frame carries it to the client, with the label unchanged",
   );
@@ -132,7 +132,7 @@ test("with no session Stack the notice names none, for every empty context", asy
     const result = await withStackContext(empty, () => target.execute("c", { stackId: "stack-b" }));
     assert.equal(
       result.details.stackNotice,
-      "ingest_jobs_list ran on Stack stack-b; the session had no Stack.",
+      "ingest_jobs_list was sent to Stack stack-b; the session had no Stack.",
       `${JSON.stringify(empty)} is no session Stack`,
     );
     assert.doesNotMatch(
@@ -182,7 +182,7 @@ test("the log record fires once per divergent call, with its three fields, besid
   assert.equal(record.argumentStackId, "stack-b");
   assert.equal(
     first.details.stackNotice,
-    "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.",
+    "ingest_jobs_list was sent to Stack stack-b, not the session's Stack stack-a.",
   );
 
   // A second divergent call is a second record AND a second, differently attributed

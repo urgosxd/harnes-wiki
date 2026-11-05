@@ -141,7 +141,7 @@ export function useChat({ client, onToolResult }: UseChatOptions) {
                 label: frame.label,
                 isError: frame.isError,
               });
-              // A call that ran on another Stack says so in the turn's own output. The
+              // A call sent to another Stack says so in the turn's own output. The
               // server already worded it, naming the tool and both Stacks; the client
               // only shows it. The conversation the run belongs to travels with it —
               // this loop keeps draining after the user opens another thread, and the
