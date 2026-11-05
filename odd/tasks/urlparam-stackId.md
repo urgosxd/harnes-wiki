@@ -19,13 +19,13 @@ S4. When the stackId is resolvable from neither source, the surface says so inst
 
 ## Tasks
 
-| ID | S# | Route | Commit |
-| --- | --- | --- | --- |
-| T1 | S1, S4 | worker: explicit tool argument wins over the turn's URL-derived stackId; the URL stays the only fallback; a clear error when neither exists | 1b1514e |
-| T2 | S3 | worker: read-only `GET /stacks` exposing the known stack ids | pending |
-| T3 | S2, S3, S4 | worker: `listStackIds` client method and useIngest effective stackId (selection wins, URL is fallback, notice when neither) | pending |
-| T4 | S3, S4 | worker: ingest stackId selector preselected from the URL, submitting the chosen value | pending |
-| T5 | S1-S4 | worker: docs and help copy for the new order and the selection | pending |
+| ID | Task | Spec | Route | Commit |
+| --- | --- | --- | --- | --- |
+| T1 | Explicit tool argument wins over the turn's URL-derived stackId; the URL stays the only fallback; a clear error when neither exists | S1, S4 | worker | 1b1514e |
+| T2 | Read-only `GET /stacks` exposing the known stack ids | S3 | worker | 0b05b18 |
+| T3 | `listStackIds` client method and useIngest effective stackId (selection wins, URL is fallback, notice when neither) | S2, S3, S4 | worker | pending |
+| T4 | Ingest stackId selector preselected from the URL, submitting the chosen value | S3, S4 | worker | pending |
+| T5 | Docs and help copy for the new order and the selection | S1-S4 | worker | pending |
 
 ## Log
 
