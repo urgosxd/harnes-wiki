@@ -288,4 +288,44 @@ export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): voi
   router.get("/ingest/jobs", async (ctx) => {
     await forward(ctx.res, (c) => c.listJobs(stackIdFrom(ctx.url)));
   });
+
+  // ---------------------------------------------------------------------------
+  // Stacks
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The Stack ids this endpoint can reach, so a client can offer a choice.
+   *
+   * Read-only and additive: it publishes the SAME listing the create path already
+   * validates against, and it reuses it rather than describing Stacks on its own. Ids
+   * only — a name, a count or a page envelope would be a second source of truth about
+   * a taxonomy this server does not own, and widening the body later binds a client.
+   *
+   * An unreadable listing answers `[]` with `200` instead of failing. `listStackIds()`
+   * returns `undefined` when the host is down or answers something that is not a list,
+   * and the create path already treats that as "fall through to the service's own
+   * validation". An empty choice is a surface a client can recover from with a retry;
+   * a `5xx` on a listing breaks an ingest form over a side-channel read.
+   *
+   * A host that cannot be REACHED, however, is a different fact and keeps the reads'
+   * existing translation to `502`: it is a deployment fault, not an empty taxonomy.
+   */
+  router.get("/stacks", async (ctx) => {
+    const c = requireClient();
+    let known: string[] | undefined;
+    try {
+      known = await c.listStackIds();
+    } catch (error) {
+      // Same rule as `forward`, deliberately repeated in its shape rather than
+      // generalised: `forward` passes an upstream body through unchanged, and this
+      // route answers a body of its own.
+      if (error instanceof IngestServiceUnreachable) {
+        throw new HttpError(502, `ingest_service_${error.reason}`, error.message);
+      }
+      throw error;
+    }
+    // Non-array as well as `undefined`: a caller that trusts a shape it did not get
+    // is the bug this guards, and an empty list states "nothing to offer" honestly.
+    sendJson(ctx.res, 200, { stackIds: Array.isArray(known) ? known : [] });
+  });
 }

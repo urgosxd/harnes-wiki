@@ -20,8 +20,12 @@
  *
  * It does not create users, and it does not invent a URL. A missing `CHAT_USERS` or
  * `MCP_SERVER_URL` is a configuration error that should be named, not defaulted:
- * pointing at the wrong endpoint silently would surface as an empty stack picker
+ * pointing at the wrong endpoint silently would surface as tools that cannot answer,
  * with no explanation.
+ *
+ * It also no longer stores a Stack. `MCP_DEFAULT_STACK_ID` was the last piece of
+ * deployment-scoped tenant context, and it is deprecated: the Stack now travels with
+ * the request that asks for it. A value still set is named once and ignored.
  *
  * Usage (from `server/`, where `pg` is installed):
  *   MCP_SERVER_URL=http://172.17.0.1:4173/mcp \
@@ -133,22 +137,50 @@ export const TOOLS = [...STACK_TOOLS, ...READ_ONLY_WIKI_TOOLS];
 export const HEADERS = { accept: "application/json, text/event-stream" };
 
 /**
- * The Stack every MCP call will name.
+ * The Stack every MCP call used to name.
  *
- * Required on purpose. Leaving it unset means the agent inherits whatever Stack the
- * remote host happens to be bound to, and that binding changed under us once already
- * (2026-10-28: it moved to an empty Stack and the agent truthfully told the user their
- * wiki had 0 pages). A product should not depend on another process's environment.
+ * ## DEPRECATED, and now ignored
+ *
+ * This used to be REQUIRED, and leaving it unset made every agent call inherit
+ * whatever Stack the remote host happened to be bound to (2026-10-28: that binding
+ * moved to an empty Stack, and the agent truthfully reported 0 pages about a Stack
+ * the user had never heard of). Storing the Stack here was the fix at the time.
+ *
+ * The Stack is no longer deployment context. It travels with the REQUEST: the page
+ * forwards the `stackId` from its link, the turn route opens a context for that
+ * request, and the MCP proxy reads it per call — failing closed when the request
+ * names none. So this variable is neither read into the database nor consulted at
+ * call time, and nothing here writes it.
+ *
+ * Kept as a parser only, so a value someone still has set can be NAMED in a warning
+ * instead of silently ignored: an operator who believes a variable still scopes their
+ * reads is worse off than one who is told it does not.
  */
-export function requireDefaultStack(env = process.env) {
+export function deprecatedDefaultStack(env = process.env) {
   const value = (env.MCP_DEFAULT_STACK_ID ?? "").trim();
-  if (!value) {
-    throw new Error(
-      "MCP_DEFAULT_STACK_ID is required: the Stack the agent should read. " +
-        "Omitting it would make every call inherit the remote host's binding.",
-    );
-  }
-  return value;
+  return value ? value : null;
+}
+
+/**
+ * Say once that the variable no longer does anything. Never fails.
+ *
+ * Absence is silent and provisions normally: refusing to provision because a
+ * deprecated variable is missing would break every deployment that already stopped
+ * setting it. Presence is tolerated and reported, which is also why an existing
+ * stored value needs no cleanup — it is left where it is and never consulted.
+ */
+export function warnDeprecatedDefaultStack(
+  env = process.env,
+  write = (line) => process.stderr.write(line),
+) {
+  const ignored = deprecatedDefaultStack(env);
+  if (!ignored) return null;
+  write(
+    "provision-mcp: MCP_DEFAULT_STACK_ID is deprecated and ignored. " +
+      "The Stack now comes from the request link (x-stack-id), so no default is " +
+      "stored or used. Remove the variable when convenient.\n",
+  );
+  return ignored;
 }
 
 async function main() {
@@ -166,7 +198,8 @@ async function main() {
   if (!databaseUrl) throw new Error("DATABASE_URL is required.");
 
   const users = loadRoster();
-  const defaultStack = requireDefaultStack();
+  // One deprecation line per run, before any row is touched, and never an error.
+  warnDeprecatedDefaultStack();
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
 
@@ -178,20 +211,24 @@ async function main() {
       }
       // Upsert on the natural key: running twice is the same as running once, and a
       // corrected address REPLACES the old row rather than adding a second server.
+      //
+      // `default_stack_id` is deliberately absent from both halves: not written on
+      // insert, not touched on conflict. A value provisioned before the deprecation
+      // stays exactly as it is and is never read, so re-running this script can
+      // neither resurrect nor destroy it.
       await client.query(
         `INSERT INTO tenant_mcp
            (user_id, server_name, command, transport, url, headers, exposed_tools,
-            default_stack_id, enabled)
-         VALUES ($1, 'wiki', '', 'http', $2, $3::jsonb, $4::jsonb, $5, true)
+            enabled)
+         VALUES ($1, 'wiki', '', 'http', $2, $3::jsonb, $4::jsonb, true)
          ON CONFLICT (user_id, server_name) DO UPDATE
            SET transport = 'http',
                command = '',
                url = excluded.url,
                headers = excluded.headers,
                exposed_tools = excluded.exposed_tools,
-               default_stack_id = excluded.default_stack_id,
                enabled = true`,
-        [userId, url, JSON.stringify(HEADERS), JSON.stringify(TOOLS), defaultStack],
+        [userId, url, JSON.stringify(HEADERS), JSON.stringify(TOOLS)],
       );
       process.stdout.write(`provisioned ${userId} -> ${url}\n`);
     }
@@ -203,7 +240,12 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`provision-mcp: ${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
-});
+// Importing this module must not provision anything: the tests import the warning
+// parser above, and a script that runs on import cannot be tested at all.
+const invokedPath = process.argv[1] ?? "";
+if (invokedPath.endsWith("provision-mcp.mjs")) {
+  main().catch((error) => {
+    process.stderr.write(`provision-mcp: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  });
+}

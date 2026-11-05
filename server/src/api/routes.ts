@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Router, RequestContext } from "../http/router.ts";
 import { HttpError, sendJson } from "../http/router.ts";
 import { encodeFrame } from "../pi/events.ts";
+import { withStackContext } from "../pi/stack-context.ts";
 import type { ConversationStore } from "../db/conversation-store.ts";
 import type { TurnService } from "./turn-service.ts";
 
@@ -16,6 +17,31 @@ interface CreateBody {
 
 interface TurnBody {
   message?: unknown;
+}
+
+/**
+ * The Stack this turn must read, as the page named it.
+ *
+ * A SELECTION, never an authorisation: no entitlement is derived from it, nothing
+ * is stored with the conversation, and under `AUTH_MODE=open` any caller could set
+ * it — the same caller can already claim any `x-user-id`. Its only job is to say
+ * which Stack the agent's Stack-scoped tools should read, so that no tool call has
+ * to fall back to a Stack this deployment guessed.
+ *
+ * Absent and blank are the same fact — no Stack — and the tools then fail closed
+ * with a visible error instead of reading something nobody chose.
+ */
+function requestStackId(ctx: RequestContext): string | undefined {
+  const header = ctx.req.headers["x-stack-id"];
+  // Two lines, or a value Node joined from two lines, is an AMBIGUOUS request: no
+  // context. Taking the first half would let a malformed request pick somebody's
+  // Stack, and a Stack is precisely what must never be guessed. Refusing costs one
+  // visible tool error; guessing costs a cross-tenant read.
+  if (Array.isArray(header)) return undefined;
+  const raw = header?.trim();
+  if (!raw) return undefined;
+  if (raw.includes(",")) return undefined;
+  return raw;
 }
 
 function requireMessage(body: unknown): string {
@@ -128,32 +154,34 @@ export function registerRoutes(router: Router, deps: RouteDeps): void {
       });
     }
 
-    const outcome = await turns.start({
-      userId: ctx.userId,
-      conversationId: ctx.params.id ?? "",
-      message,
-      idempotencyKey,
-    });
+    await withStackContext(requestStackId(ctx), async () => {
+      const started = await turns.start({
+        userId: ctx.userId,
+        conversationId: ctx.params.id ?? "",
+        message,
+        idempotencyKey,
+      });
 
-    switch (outcome.kind) {
-      case "not_found":
-        return sendJson(ctx.res, 404, { error: "not_found" });
-      case "busy":
-        return sendJson(ctx.res, 409, {
-          error: "turn_in_progress",
-          runId: outcome.running?.id ?? null,
-          message: "this conversation already has a running turn",
-        });
-      case "replayed":
-        return sendJson(ctx.res, 200, {
-          error: "duplicate_turn",
-          runId: outcome.run.id,
-          status: outcome.run.status,
-          message: "this idempotency key was already used",
-        });
-      case "started":
-        return streamFrames(ctx, outcome.runId, outcome.frames);
-    }
+      switch (started.kind) {
+        case "not_found":
+          return sendJson(ctx.res, 404, { error: "not_found" });
+        case "busy":
+          return sendJson(ctx.res, 409, {
+            error: "turn_in_progress",
+            runId: started.running?.id ?? null,
+            message: "this conversation already has a running turn",
+          });
+        case "replayed":
+          return sendJson(ctx.res, 200, {
+            error: "duplicate_turn",
+            runId: started.run.id,
+            status: started.run.status,
+            message: "this idempotency key was already used",
+          });
+        case "started":
+          return streamFrames(ctx, started.runId, started.frames);
+      }
+    });
   });
 }
 

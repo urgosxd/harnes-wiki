@@ -16,8 +16,22 @@ import { registerRoutes } from "../src/api/routes.ts";
 import { projectMessages } from "../src/api/routes.ts";
 import { AGENT_DIR, MODEL_ID, PROVIDER, databaseReady, hasCredentials, makeWorkspace, testUser } from "./support/harness.ts";
 
-const canRun = databaseReady() && hasCredentials();
-const skip = canRun ? false : "needs Postgres and Pi credentials";
+/**
+ * Two gates, not one.
+ *
+ * Most of this file is transport and ownership: who may read a conversation, what a
+ * missing idempotency key answers, what a foreign conversation answers. None of that needs
+ * a model, and gating it on Pi credentials meant roughly a dozen tenancy assertions were
+ * skipped in CI — including the security property the product exists to protect. Only the
+ * tests that actually run a turn to completion need one.
+ *
+ * The messages say which requirement is missing, because "needs Postgres and Pi
+ * credentials" tells a reader nothing about which one to fix.
+ */
+const databaseTierReady = await databaseReady();
+const skipDatabase = databaseTierReady ? false : "needs a reachable Postgres";
+const skipModel = databaseTierReady && hasCredentials() ? false : "needs a reachable Postgres and Pi credentials";
+const skip = skipDatabase;
 
 const DEV_TOKEN = "test-token";
 let server: Server;
@@ -27,7 +41,7 @@ let store: ConversationStore;
 let workspace: string;
 
 before(async () => {
-  if (!canRun) return;
+  if (skipDatabase) return;
   db = createDatabase(process.env.DATABASE_URL ?? "postgres://agentdocumentor:agentdocumentor@127.0.0.1:5432/agentdocumentor");
   await migrate(db);
   store = new ConversationStore(db);
@@ -172,7 +186,7 @@ test("rename and archive only affect the owner", { skip }, async () => {
   assert.equal(delOwn.status, 204);
 });
 
-test("a turn streams frames and the conversation keeps the reply", { skip }, async () => {
+test("a turn streams frames and the conversation keeps the reply", { skip: skipModel }, async () => {
   const user = testUser("turn");
   const conv = await createConversation(user, "chat");
 
@@ -215,7 +229,7 @@ test("a turn without an Idempotency-Key is refused", { skip }, async () => {
   assert.equal(((await response.json()) as { error: string }).error, "idempotency_key_required");
 });
 
-test("reusing an idempotency key does not start a second turn", { skip }, async () => {
+test("reusing an idempotency key does not start a second turn", { skip: skipModel }, async () => {
   const user = testUser("replay");
   const conv = await createConversation(user);
   const send = () =>
@@ -241,7 +255,7 @@ test("reusing an idempotency key does not start a second turn", { skip }, async 
   assert.equal(detail.messages.length, 2, "the second request must not append another turn");
 });
 
-test("a second turn on a busy conversation answers 409", { skip }, async () => {
+test("a second turn on a busy conversation answers 409", { skip: skipModel }, async () => {
   const user = testUser("busy");
   const conv = await createConversation(user);
 

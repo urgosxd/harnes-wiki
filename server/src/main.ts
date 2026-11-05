@@ -102,7 +102,6 @@ async function main(): Promise<void> {
                 transport: "http" as const,
                 name: server.serverName,
                 url: server.url ?? "",
-                defaultStackId: server.defaultStackId,
                 ...(Object.keys(server.headers).length > 0 ? { headers: server.headers } : {}),
               }
             : {

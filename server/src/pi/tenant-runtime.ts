@@ -1,3 +1,4 @@
+import { STACK_TOOLS } from "../../scripts/provision-mcp.mjs";
 import { McpClient, StdioTransport, StreamableHttpTransport } from "@earendil-works/pi-mcp";
 import {
   DefaultResourceLoader,
@@ -7,9 +8,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
+import { Logger, type LogLevel } from "../log.ts";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "typebox";
 import { agentToolNames, createAgentTools, type AgentToolOptions } from "./agent-tools.ts";
+import { currentStackId } from "./stack-context.ts";
 import { Type } from "typebox";
 import type { ThinkingLevelName } from "../config.ts";
 
@@ -38,16 +41,12 @@ export type TenantMcpServer =
       /** Streamable-HTTP endpoint, e.g. `http://host:4173/mcp`. */
       url: string;
       /**
-       * Stack to name on EVERY call to this server.
+       * Sent on every request; some servers refuse the call without them.
        *
-       * The tools take `stackId` optionally and omitting it inherits the host's
-       * binding. That default is not ours: on 2026-10-28 it moved to an empty Stack
-       * and the agent truthfully reported "0 pages" about a Stack the user had never
-       * heard of, while their real work sat in another one. Naming it explicitly
-       * turns a remote environment variable into a value this product chose.
+       * The Stack is deliberately NOT here. It is not deployment configuration: it
+       * comes from the request that started the turn, through `stack-context.ts`, so
+       * one shared upstream cannot be pointed at one Stack on everyone's behalf.
        */
-      defaultStackId?: string | null;
-      /** Sent on every request; some servers refuse the call without them. */
       headers?: Record<string, string>;
     };
 
@@ -199,7 +198,6 @@ export class TenantRuntime {
             tenant.id,
             client,
             wanted.map((name) => byName.get(name)!),
-            server.transport === "http" ? (server.defaultStackId ?? undefined) : undefined,
           ),
         );
         connections.set(server.name, { server, client, toolNames: wanted });
@@ -287,12 +285,16 @@ function toolName(tool: ToolDefinition): string {
  * The proxy narrows MCP to direct tools: codemode scripts, tool search and MCP
  * resources are not exposed. A business chat wants plain callable tools, and this
  * keeps one process per server instead of one per session.
+ *
+ * The Stack of every call is resolved HERE, per call: from the `stackId` the caller
+ * stated explicitly, else from the request's context — never from the tenant's row.
+ * See `resolveStackArgument`.
  */
 export function proxyMcpTools(
   tenantId: string,
   client: McpClient,
   tools: readonly { name: string; description?: string; inputSchema?: Record<string, unknown> }[],
-  defaultStackId?: string,
+  log: Logger = processLog(),
 ): ToolDefinition[] {
   return tools.map((tool) =>
     defineTool({
@@ -311,26 +313,280 @@ export function proxyMcpTools(
           : { type: "object", properties: {}, additionalProperties: true },
       ),
       execute: async (_toolCallId: string, params: Record<string, unknown>) => {
-        // Name the Stack ourselves rather than inheriting the host's binding, and
-        // let an explicit argument win: a tool the schema says takes `stackId` may
-        // legitimately be pointed somewhere else, and silently overriding the
-        // caller would be the same class of lie in the other direction.
-        const args =
-          defaultStackId !== undefined && (params ?? {}).stackId === undefined
-            ? { ...(params ?? {}), stackId: defaultStackId }
-            : (params ?? {});
-        const result = await client.callTool(tool.name, args);
-        const text = (result.content ?? [])
-          .filter((block) => block.type === "text")
-          .map((block) => ({ type: "text" as const, text: block.text }));
-        return {
-          content: text.length ? text : [{ type: "text" as const, text: "(no text content)" }],
-          details: {},
-          isError: Boolean(result.isError),
-        };
+        const args = params ?? {};
+        // A tool that belongs to no Stack is called exactly as before: injecting a
+        // Stack into it would send a field it never declared.
+        if (!isStackScoped(tool.inputSchema, tool.name)) return await callAndShape(client, tool.name, args);
+
+        const resolved = resolveStackArgument(tool.name, args, log);
+        if ("error" in resolved) return toolError(resolved.error);
+        const result = await callAndShape(client, tool.name, resolved.args);
+        // A divergence travels as DETAILS, not as content: the sentence is for the person
+        // watching the turn, while the model's own tool result must stay exactly what the
+        // upstream said. `details` is the part of a tool result Pi keeps for the UI.
+        return resolved.notice
+          ? { ...result, details: { ...result.details, stackNotice: resolved.notice } }
+          : result;
       },
     }) as unknown as ToolDefinition,
   );
+}
+
+/**
+ * Resolve the `stackId` a Stack-scoped call must carry, and say so out loud when it
+ * differs from what the turn's link names.
+ *
+ * The order is the user's, verbatim: "si el usuario indica que se use otro se usará,
+ * pero como fallback siempre el de la URL". An explicit argument therefore WINS, the
+ * link's Stack is the FALLBACK, and neither is ever read from a stored default. When
+ * neither source names a Stack the call is refused rather than sent with an empty one:
+ * an empty `stackId` inherits whatever Stack the upstream happens to sit on, which is
+ * the 2026-10-28 incident this feature exists to remove.
+ *
+ * A differing argument is a choice, not the contradiction the previous rule read it as
+ * (S10 of `multitenant-stackId.md`, superseded). It is still a divergence from the
+ * Stack the page was showing, so it is never silent: it is recorded once in the log AND
+ * returned as a `notice` the turn's own output can show. The log line alone was not
+ * enough — the refusal this replaced at least told a human that a foreign Stack had been
+ * used, and a record nobody reads does not. The notice is what a person sees.
+ */
+function resolveStackArgument(
+  toolName: string,
+  args: Record<string, unknown>,
+  log: Logger,
+): { args: Record<string, unknown>; notice?: string } | { error: string } {
+  const turnStackId = currentStackId();
+  const named = args.stackId;
+  const absent = named === undefined || named === null;
+  // Trimmed, because the link is trimmed too (`withStackContext`): `" B "` and `"B"`
+  // name the same Stack, and one Stack must not travel under two spellings.
+  const explicitStackId = typeof named === "string" ? named.trim() : "";
+
+  // An explicit choice wins, with or without a Stack of the turn's own. The record is
+  // written only for a real divergence: no context means nothing was overridden.
+  if (explicitStackId !== "") {
+    const diverges = turnStackId !== explicitStackId;
+    if (diverges && turnStackId !== undefined) {
+      log.info("tool call overrides the turn's Stack", {
+        tool: toolName,
+        turnStackId,
+        argumentStackId: explicitStackId,
+      });
+    }
+    return {
+      args: { ...args, stackId: explicitStackId },
+      // The same fact the record carries, in words the turn's output can show. Built
+      // here so the sentence and the record cannot end up describing different calls.
+      ...(diverges ? { notice: stackNotice(toolName, explicitStackId, turnStackId) } : {}),
+    };
+  }
+
+  // Nothing explicit and no link Stack: the one case with no source at all.
+  if (!turnStackId) {
+    return {
+      error:
+        `${toolName} works on one Stack, and this turn has no Stack. ` +
+        "Open the app with a link that names it — ?user=<name>&stackId=<stack-id> — and ask again.",
+    };
+  }
+
+  // Anything that is neither absent nor a string is a TYPE problem, and saying "you
+  // named Stack 42" would describe a Stack that cannot exist. Different mistake,
+  // different sentence. `null` counts as absent, exactly as it always has.
+  if (!absent && typeof named !== "string") {
+    return {
+      error:
+        `${toolName} takes stackId as a string, and the call sent a ${Array.isArray(named) ? "array" : typeof named}. ` +
+        "Call it again without stackId to use this turn's Stack.",
+    };
+  }
+
+  // Absent or blank is not a choice: the model left the field out and the request
+  // supplies it. Blank counts here for the same reason the link does — `stackId: ""`
+  // names no Stack, it just looks like it does.
+  return { args: { ...args, stackId: turnStackId } };
+}
+
+/**
+ * What a divergent call says out loud, in one factual sentence.
+ *
+ * Both Stacks are named because the fact is the DIFFERENCE: "a foreign Stack was used"
+ * is what the old refusal told a human, and it is still the thing a person needs to know.
+ * With no session Stack there is none to name, and claiming one would describe a request
+ * that never happened — the argument was the only source, so only it is named.
+ *
+ * The TOOL is named as well, because the sentence is one line in a turn that can make
+ * several calls: without it, two divergent calls to the same foreign Stack are worded
+ * identically, and the reader cannot tell which call left the session's Stack — or how
+ * many did. That is also why the client keys its dedupe on (tool, sentence) instead of
+ * the sentence alone.
+ */
+function stackNotice(
+  toolName: string,
+  effectiveStackId: string,
+  turnStackId: string | undefined,
+): string {
+  return turnStackId === undefined
+    ? `${toolName} ran on Stack ${effectiveStackId}; the session had no Stack.`
+    : `${toolName} ran on Stack ${effectiveStackId}, not the session's Stack ${turnStackId}.`;
+}
+
+let processLogger: Logger | undefined;
+
+/**
+ * The logger an override record goes to when the caller supplies none.
+ *
+ * `main.ts` builds the process `Logger` from `LOG_LEVEL`, and `TenantRuntime.create`
+ * does not carry one down to the proxy, so the same shape is built here: one JSON
+ * object per line, same threshold, the existing `log.ts` class rather than a second
+ * logging mechanism. Tests inject their own through `proxyMcpTools` instead of
+ * scraping the process output.
+ */
+function processLog(): Logger {
+  processLogger ??= new Logger({
+    level: (process.env.LOG_LEVEL as LogLevel | undefined) ?? "info",
+  });
+  return processLogger;
+}
+
+/**
+ * Is this tool scoped to one Stack?
+ *
+ * ## The rule, stated so it cannot drift
+ *
+ * A tool is Stack-scoped iff its published schema is unreadable or of unknown shape,
+ * OR it is a readable flat object whose `properties` include `stackId`.
+ *
+ * It is NOT Stack-scoped only when the schema is a readable flat object with
+ * `properties` present that does not include `stackId` **and** the name is not one
+ * this repository already grants as a Stack tool — the single shape where "no Stack"
+ * is a fact instead of a guess.
+ *
+ * ## Why unknown counts as scoped
+ *
+ * Parity, not caution. The baseline injected a Stack into EVERY call without looking
+ * at the schema at all, so treating an unknown shape as scoped can only NARROW the
+ * read scope relative to that baseline, never widen it. Reading it the other way —
+ * junk schema means "no Stack" — calls the upstream unscoped, silently, with a
+ * success exit, which is the failure this whole feature exists to remove.
+ *
+ * `additionalProperties: true`, `allOf`/`anyOf`/`oneOf`/`$ref` composition and an
+ * absent `properties` are unknown for exactly that reason: a `stackId` can hide
+ * inside any of them, so "I cannot see one" is not "there is none".
+ */
+function isStackScoped(inputSchema: Record<string, unknown> | undefined, name: string): boolean {
+  // Rule (c): a name this repository already maintains as a Stack tool is one, whatever
+  // its schema says. `list_stacks` is the case that needs it — it reads a Stack but
+  // publishes no `stackId`, so the schema alone would call it unscoped and an unscoped
+  // listing exposes other tenants' Stack inventory.
+  //
+  // This is not new knowledge about another service: `STACK_TOOLS` is the constant that
+  // already GRANTS those tools at provisioning time (`scripts/provision-mcp.mjs:127`),
+  // maintained in this repository. Reading it here keeps one definition instead of
+  // starting a second list that would drift.
+  if (STACK_TOOLS.includes(name)) return true;
+
+  if (!inputSchema || typeof inputSchema !== "object" || Array.isArray(inputSchema)) return true;
+
+  // Composition hides parameters from a flat read.
+  if (["allOf", "anyOf", "oneOf", "not", "$ref"].some((key) => key in inputSchema)) return true;
+  // `additionalProperties: true` says anything may travel, a Stack included.
+  if ((inputSchema as { additionalProperties?: unknown }).additionalProperties === true) return true;
+
+  const { properties } = inputSchema as { properties?: unknown };
+  // No readable property list at all: the shape is unknown, so it stays scoped. This is
+  // rule (a), and it must not be lost behind the nested scan below.
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) return true;
+
+  // A `stackId` declared anywhere under `properties`, however deep, is a Stack
+  // declaration: a filter object is the obvious shape, and calling such a tool unscoped
+  // is exactly the read this feature removes.
+  // `unknown` counts as scoped, exactly like rule (a): a tree too deep or too tangled
+  // to read is not a promise that no Stack is in there.
+  return declaresStackId(inputSchema, 0, new Set()) !== "none";
+}
+
+/**
+ * How deep the search goes before it calls the schema unreadable.
+ *
+ * A contract does not nest eight levels; the cap exists so a hostile or generated schema
+ * cannot turn a tool call into a long walk. Exceeding it is `unknown`, never `none`:
+ * "I stopped looking" must not read as "there is nothing there".
+ */
+const NESTED_SCHEMA_DEPTH = 8;
+
+/** What a scan of the schema tree found. `unknown` counts as scoped. */
+type StackScan = "found" | "unknown" | "none";
+
+/**
+ * Find a `stackId` under any `properties` object in the tree.
+ *
+ * Bounded by `NESTED_SCHEMA_DEPTH`, and guarded against revisiting a node: a schema that
+ * shares or repeats a subschema is legal to hand us, and a walk that followed it
+ * forever would take the turn down instead of judging one call. Today a truly cyclic
+ * schema is refused earlier — `proxyMcpTools` clones the schema through typebox, which
+ * overflows first — so the guard is the belt to that braces: it costs a Set and it is
+ * the difference between "unknown, refuse" and a stack overflow if that ever changes.
+ */
+function declaresStackId(schema: unknown, depth: number, visited: Set<unknown>): StackScan {
+  if (depth > NESTED_SCHEMA_DEPTH) return "unknown";
+  if (!schema || typeof schema !== "object") return "none";
+  if (visited.has(schema)) return "unknown";
+  visited.add(schema);
+
+  const node = schema as Record<string, unknown>;
+  let sawUnknown = false;
+  const properties = node.properties;
+  if (properties && typeof properties === "object" && !Array.isArray(properties)) {
+    const declared = properties as Record<string, unknown>;
+    if (Object.prototype.hasOwnProperty.call(declared, "stackId")) return "found";
+    for (const nested of Object.values(declared)) {
+      const scan = declaresStackId(nested, depth + 1, visited);
+      if (scan === "found") return "found";
+      if (scan === "unknown") sawUnknown = true;
+    }
+  }
+
+  // Composition and array items can carry an object schema of their own.
+  for (const key of ["allOf", "anyOf", "oneOf", "items", "additionalProperties", "not"]) {
+    const branch = node[key];
+    const branches = Array.isArray(branch) ? branch : branch && typeof branch === "object" ? [branch] : [];
+    for (const entry of branches) {
+      const scan = declaresStackId(entry, depth + 1, visited);
+      if (scan === "found") return "found";
+      if (scan === "unknown") sawUnknown = true;
+    }
+  }
+
+  return sawUnknown ? "unknown" : "none";
+}
+
+interface ToolResult {
+  content: Array<{ type: "text"; text: string }>;
+  details: Record<string, unknown>;
+  isError?: boolean;
+}
+
+/** Call the upstream and shape its answer for the model. */
+async function callAndShape(
+  client: McpClient,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<ToolResult> {
+  const result = await client.callTool(name, args);
+  const text = (result.content ?? [])
+    .filter((block) => block.type === "text")
+    .map((block) => ({ type: "text" as const, text: block.text }));
+  return {
+    content: text.length ? text : [{ type: "text" as const, text: "(no text content)" }],
+    details: {},
+    isError: Boolean(result.isError),
+  };
+}
+
+/** A refusal the model can read and act on, in the same shape as a tool error. */
+function toolError(text: string): ToolResult {
+  return { content: [{ type: "text", text }], details: {}, isError: true };
 }
 
 /**

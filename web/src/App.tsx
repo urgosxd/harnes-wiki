@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ApiClient, ApiError, type Identity } from "./lib/api.ts";
 import { authHeaders, parseCredentials, type Credentials } from "./lib/credentials.ts";
+import { parseStackId } from "./lib/tenant.ts";
 import { useChat } from "./lib/use-chat.ts";
 import { useIngest } from "./lib/use-ingest.ts";
 import { Sidebar } from "./components/Sidebar.tsx";
@@ -8,7 +9,8 @@ import { ChatWindow } from "./components/ChatWindow.tsx";
 import { IngestJobsPanel } from "./components/IngestJobsPanel.tsx";
 
 /**
- * The link names the account: `?user=alice`.
+ * The link names the account: `?user=alice`. It also names the tenant:
+ * `?user=alice&stackId=<stack-id>`.
  *
  * There is deliberately no sign-in screen, and no longer any secret to ask for:
  * identity IS the name in the link. A form would be theatre — it could not verify
@@ -23,12 +25,21 @@ export function App() {
   const [credentials] = useState<Credentials | null>(() =>
     parseCredentials(window.location.search),
   );
+  // The tenant comes from the same place, read once for the same reason. There is no
+  // env var, no picker and no remembered value behind it: a link without a Stack is
+  // blocked, which is why a reload cannot silently re-scope the session.
+  const [stackId] = useState<string | null>(() => {
+    const resolution = parseStackId(window.location.search);
+    return resolution.ok ? resolution.stackId : null;
+  });
 
   if (!credentials) return <MissingInviteLink problem="no-user" />;
 
   // Remounting on identity change is deliberate: a different user must not inherit
   // the previous user's conversations or in-flight stream.
-  return <InviteSession key={credentials.user} credentials={credentials} />;
+  return (
+    <InviteSession key={credentials.user} credentials={credentials} stackId={stackId} />
+  );
 }
 
 /** Why no usable identity is on screen, so the message can be specific. */
@@ -70,18 +81,31 @@ function MissingInviteLink({ problem }: { problem: InviteProblem }) {
   );
 }
 
-function InviteSession({ credentials }: { credentials: Credentials }) {
+function InviteSession({
+  credentials,
+  stackId,
+}: {
+  credentials: Credentials;
+  /** The tenant from the link, or `null` when it named none. */
+  stackId: string | null;
+}) {
   const [identity, setIdentity] = useState<Identity | null>(null);
   const [rejected, setRejected] = useState<InviteProblem | null>(null);
 
   const client = useMemo(
     () =>
       new ApiClient({
-        // The name is the identity. A token travels only if the link carried one.
-        headers: () => authHeaders(credentials),
+        headers: () => ({
+          // The name is the identity. A token travels only if the link carried one.
+          ...authHeaders(credentials),
+          // And the tenant travels as a selection, only when the link named one. The
+          // agent's Stack-scoped tools read this Stack; with no header they fail
+          // closed rather than reading whatever the server happens to default to.
+          ...(stackId ? { "x-stack-id": stackId } : {}),
+        }),
         onUnauthorized: () => setRejected("rejected"),
       }),
-    [credentials],
+    [credentials, stackId],
   );
 
   // Confirm the link before rendering the chat, so a rejected token explains itself
@@ -110,22 +134,23 @@ function InviteSession({ credentials }: { credentials: Credentials }) {
     return <div className="boot">Connecting…</div>;
   }
 
-  return <Chat identity={identity} client={client} />;
+  return <Chat identity={identity} client={client} stackId={stackId} />;
 }
 
-function Chat({ identity, client }: { identity: Identity; client: ApiClient }) {
+function Chat({
+  identity,
+  client,
+  stackId,
+}: {
+  identity: Identity;
+  client: ApiClient;
+  stackId: string | null;
+}) {
   // Built once here, not inside the panel: the poll loop must survive a switch to
   // the chat tab and back, otherwise returning to the view would restart a poll
   // for a job that is already being followed.
-  const ingest = useIngest({ client });
-  // The stack list comes FROM the agent: this server holds no registry of them, and
-  // a stack the picker offered but the agent could not reach would produce calls the
-  // service rejects. So the chat's tool result feeds the picker, and the ordering is
-  // deliberate — `ingest` must exist before the hook that reports into it.
-  const chat = useChat({
-    client,
-    onToolResult: (_tool, text, isError) => ingest.observeStacks(text, isError),
-  });
+  const ingest = useIngest({ client, stackId });
+  const chat = useChat({ client });
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [view, setView] = useState<"chat" | "jobs">("chat");
 
@@ -159,6 +184,7 @@ function Chat({ identity, client }: { identity: Identity; client: ApiClient }) {
 
       <ChatWindow
         state={chat.state}
+        conversationId={chat.activeId}
         loadingThread={chat.loadingThread}
         onSend={(text) => void chat.send(text)}
         onRetry={chat.retry}

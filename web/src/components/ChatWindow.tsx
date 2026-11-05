@@ -1,9 +1,17 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
-import type { ChatState } from "../lib/chat-reducer.ts";
+import { stackNoticesFor, type ChatState } from "../lib/chat-reducer.ts";
 import { MessageList } from "./MessageList.tsx";
 
 export interface ChatWindowProps {
   state: ChatState;
+  /**
+   * The conversation on screen, or `null` before one exists.
+   *
+   * The Stack notice is about one turn in one conversation, so the window is told which
+   * thread it is showing and paints only that thread's notices: a frame still draining
+   * from the run the user just left must not write a claim into this thread.
+   */
+  conversationId: string | null;
   loadingThread: boolean;
   onSend(text: string): void;
   onRetry(): void;
@@ -13,6 +21,7 @@ export interface ChatWindowProps {
 
 export function ChatWindow({
   state,
+  conversationId,
   loadingThread,
   onSend,
   onRetry,
@@ -68,6 +77,23 @@ export function ChatWindow({
         ) : (
           <MessageList state={state} />
         )}
+
+        {/*
+          Which Stack a tool call actually ran on, when it was not the session's.
+
+          Here, in the turn's own output, because the point of the sentence is that a
+          person reads it: the server's log record is for an operator weeks later, and a
+          tool's result text never reaches this window. Rendered outside the thread/hint
+          choice above so it stays visible after the turn ends and the thread reloads,
+          and filtered to the conversation on screen so a late frame from another thread
+          cannot paint here. Position is the only stable key a line can have: the same
+          sentence can be two different facts (two tools, one foreign Stack).
+        */}
+        {stackNoticesFor(state, conversationId).map((notice, position) => (
+          <p key={`${position}-${notice}`} className="chat__stack-notice" role="status">
+            {notice}
+          </p>
+        ))}
 
         {state.error && (
           <div className="chat__error" role="alert">

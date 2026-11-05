@@ -51,6 +51,7 @@ Under `AUTH_MODE=roster`, `x-dev-token` is what identifies the caller and a clai
 | `POST` | `/ingest/jobs` | Start an async ingest job; `202` with a job id |
 | `GET` | `/ingest/jobs` | Retained jobs, newest first |
 | `GET` | `/ingest/jobs/:id` | One job snapshot; the poller's only read |
+| `GET` | `/stacks` | The Stack ids the service lists, so a client can offer a choice. Read-only |
 
 `POST /conversations/:id/turns` **requires** an `Idempotency-Key` header. Responses:
 
@@ -215,7 +216,6 @@ read anything:
 cd server
 USERS=alice,bob \
 MCP_SERVER_URL=http://host.docker.internal:4240/mcp \
-MCP_DEFAULT_STACK_ID=<stack uuid> \
 DATABASE_URL=postgres://agentdocumentor:<pass>@127.0.0.1:5432/agentdocumentor \
 node scripts/provision-mcp.mjs            # --dry-run to preview
 ```
@@ -223,6 +223,11 @@ node scripts/provision-mcp.mjs            # --dry-run to preview
 It is idempotent, and it does not create users — it grants tools to the names you
 list. A name that never appears there still opens the product; it simply has no
 tools.
+
+`MCP_DEFAULT_STACK_ID` is **deprecated and ignored**. The Stack comes from the
+request link (or an explicit tool argument), not from provisioning: setting the
+variable still works, prints one deprecation warning, and changes nothing (see
+**Which Stack the agent reads**).
 
 ## Ingest jobs (external service)
 
@@ -254,6 +259,59 @@ like `/api/ingest/jobs` to the browser and `/ingest/jobs` to the server.
 4. **A deployment fault is never shown as a job state.** An unreachable service or
    a rejected request becomes `502` with the reason named; only the service's own
    `200` / `404` / `503` / `409` reach the client unchanged.
+
+### The Stack comes from the link
+
+The ingest surface is tenant-scoped, and the tenant is the `stackId` in the URL:
+
+```
+http://localhost:8088/?user=alice&stackId=<stack-id>
+```
+
+Every READ — the document list, the job list, an upload — takes that parameter and
+nothing else. There is no Stack environment variable, nothing is injected at build
+time, and no default is assumed when it is absent; each of those would let one
+tenant's jobs be read under another tenant's name. It is read once, at mount, from
+`location.search`, right next to `?user=`; it is not stored in `localStorage`, not
+remembered between visits, and not accepted from a header or a cookie, so a reload
+without it is blocked exactly like a first visit.
+
+A WRITE resolves its Stack in one place, in the same order the agent's tools use: the
+Stack chosen in the panel wins, and the link's is the fallback. The panel's **Stack**
+control is filled from `GET /stacks` — `200 {"stackIds": string[]}`, ids only, and
+`{"stackIds": []}` when the service lists none; the same auth as the routes beside
+it, additive and read-only, publishing the listing the create path already validates
+against — and it is preselected with the link's value, so a user who does not choose
+keeps exactly the old behavior. A chosen Stack also scopes the poll of the job that
+choice started, because a job created in one Stack cannot be followed in another.
+
+| Link | Ingest surface |
+|---|---|
+| `?user=alice&stackId=<stack-id>` | The reads and the prefill carry that Stack, and so does every write while the control is left alone |
+| No `stackId`, or empty / whitespace-only | States the missing parameter and issues no READ at all — no list, no upload, no poll. A Stack chosen in the control can still start an ingest |
+| Neither the link nor the control names one | No request at all, and the notice below is on screen |
+
+That last state is named, never guessed: with nothing resolved the panel says "This
+ingest names no Stack: no Stack was chosen for it and the link names none. Choose a
+Stack, or open a link that ends in ?stackId=<stack-id>." and sends nothing — a
+request into a tenant nobody named is worse than no request.
+
+The shape is checked before anything is sent: a value that is empty after trimming
+is refused without a request. Whether the Stack EXISTS is the service's answer, and
+it is shown as it arrives — `400 invalid_stack_id` for a malformed id, `404
+stack_not_found` (or the agent's `unknown_stack`) for an id the service does not
+know. A rejected Stack is a visible failure with no retry loop, because retrying the
+same rejected value can only produce the same answer.
+
+Two consequences of that split are worth knowing in advance. The **Recent** list stays
+scoped to the link's Stack, so a job started in a Stack the link does not name shows
+its own progress in the detail pane and is not listed there. And a failed `GET
+/stacks` degrades silently to the link's value instead of blocking: the control then
+offers only that Stack, and the write path is unaffected.
+
+Chat is unaffected: a link without `stackId` still opens the product. Only the
+ingest surface is closed, and that is the point — an unscoped read would show one
+tenant the jobs of another.
 
 ### What the view will not guess
 
@@ -341,6 +399,40 @@ cd server && node --experimental-strip-types --test test/*.test.ts && npx tsc --
 cd web    && npx vitest run && npx tsc --noEmit
 ```
 
+### CI: one command, and it is the gate
+
+```bash
+bash scripts/ci.sh
+```
+
+That is the whole gate, and it is the same command GitHub Actions runs — the workflow at
+`.github/workflows/ci.yml` checks the repository out and calls it, with no commands of
+its own. If it is green on a laptop it is green in CI, because both run the same script,
+the same images and the same database.
+
+What it does, in order: builds the **production** images (so a broken Dockerfile fails
+the gate); builds the **test** images (`--target test`, which carry the dev dependencies
+the runtime images omit on purpose); starts Postgres from this repository's compose file
+and waits for a real `select 1`, not for a healthy container; runs `tsc --noEmit` and the
+server suite **inside** the test image with `CI_REQUIRE_DATABASE=1`; then runs the web
+`typecheck`, suite and production build. Any failure exits non-zero.
+
+Which tiers run where:
+
+| Tier | Locally (`scripts/ci.sh`) | In CI |
+|---|---|---|
+| Server unit tests, including the Postgres-gated ones | **yes** — `CI_REQUIRE_DATABASE=1` makes an unreachable database a failure, not a skip | **yes**, same image, same flag |
+| Web typecheck, tests and build | **yes** | **yes** |
+| Live-model tests (a real provider answering a real turn) | only if `~/.pi/agent/models.json` exists; `scripts/ci.sh` points `PI_AGENT_DIR` at a missing path so this tier **skips by decision** | **skipped**: CI has no Pi credentials and nothing here invents them |
+
+A tier that skips is not proof: that is why the database tier is required rather than
+merely available, and why the table above names the one tier CI does not cover.
+
+The database needs no secret: `scripts/ci.sh` uses the credentials `docker-compose.yml`
+already declares for the dev stack, so there is nothing to store in a repository setting.
+The database is left running after a local run for inspection; `docker compose down`
+removes it.
+
 ## Production (containers)
 
 Two paths, and they no longer share one file. **Development builds from source;
@@ -409,9 +501,19 @@ Or by hand:
 CHAT_API_KEY=sk-... docker compose up -d --build
 docker compose ps                 # three services must be healthy
 docker compose logs -f server     # structured JSON
-docker compose down               # stops, keeps conversations
-docker compose down -v            # stops and deletes everything
+docker compose down               # stops, keeps conversations and volumes
+docker compose down -v            # DANGER: see below before using -v
 node scripts/smoke.mjs            # 8 acceptance checks against the running stack
+```
+
+**`-v` removes BOTH volumes, not just the database.** `docker-compose.yml` declares
+`agentdoc-pgdata` (the database) *and* `agentdoc-workspace` (the agent's workspace).
+`down -v` deletes the pair; there is no form of it that removes only the database. To
+reset just the database, name it:
+
+```bash
+docker compose rm -sf postgres && docker volume rm agentdocumentor_agentdoc-pgdata
+docker compose up -d postgres     # recreated from this file's own credentials
 ```
 
 The container is self-contained: it generates its own Pi model configuration from
@@ -442,7 +544,8 @@ that is the whole reason the two compose files exist.
 
 React 19 + Vite. The `?token=` in the URL IS how a user authenticates (`?user=` is
 an optional display hint), and the rules for reading it live in
-`web/src/lib/credentials.ts` with their own tests.
+`web/src/lib/credentials.ts` with their own tests. The ingest tenant is read the
+same way — once, at mount, from `location.search` — by `web/src/lib/tenant.ts`.
 
 One consequence worth stating: the token appears in the URL, so it also appears in
 nginx's access log (default `combined` format logs the query string). Use TLS in
@@ -585,7 +688,6 @@ acceptance checklist, and the evidence log.
 cd server
 USERS=alice,bob \
 MCP_SERVER_URL=http://172.17.0.1:4173/mcp \
-MCP_DEFAULT_STACK_ID=<stack uuid> \
 DATABASE_URL=postgres://... \
 node scripts/provision-mcp.mjs            # add --dry-run to preview
 ```
@@ -596,12 +698,55 @@ the same as running it once, and a corrected `MCP_SERVER_URL` replaces the old
 address instead of adding a second server. It grants tools; it does not create
 users, because with `AUTH_MODE=open` a user is just a name.
 
+`MCP_DEFAULT_STACK_ID` no longer appears in that command. It is **deprecated and
+ignored**: still tolerated, still warned about once per run, never read. A stored
+`tenant_mcp.default_stack_id` from an earlier run is left exactly as it is and is
+never consulted, so nothing needs cleaning up — and re-running this script neither
+resurrects nor destroys it.
+
 It exposes three tools — `list_stacks`, `ingest_jobs_list`, `ingest_job_status`.
 The other twelve the service offers are filesystem-scoped, and exposing them would
 allow operations this project never decided to permit.
 
-Without this step the agent sees no stack tools, the stack picker stays empty, and
-nothing below can be exercised.
+Without this step the agent sees no Stack tools, and it cannot answer questions
+about Stacks.
+
+### Which Stack the agent reads
+
+The Stack an agent tool call reads is the `stackId` from the page's link: the page
+forwards it as `x-stack-id` on the turn request, and the MCP proxy reads it per call.
+It is a SELECTION of which Stack to read, never an authorisation — no entitlement is
+derived from it, nothing is stored with the conversation, and under `AUTH_MODE=open`
+any caller could set it, just as any caller can already claim any `x-user-id`.
+
+A link without `stackId` therefore cannot use the wiki tools BY FALLBACK: a
+Stack-scoped call that names no Stack fails closed with a visible error naming the
+link form, because the alternative — calling with no Stack — reads whatever tenant
+the remote endpoint happens to be bound to. That is why the provisioning variable
+above is gone rather than defaulted.
+
+The order the proxy applies is: an explicit `stackId` in the tool's arguments WINS,
+the link's Stack is the FALLBACK when that argument is absent or blank, and with
+neither the call is refused and nothing reaches the upstream. A call that overrides
+the turn's Stack is a choice, not a contradiction, so it is forwarded rather than
+refused — and it is not silent, in either of the two places a divergent call can be
+noticed. The person whose turn it was reads it in that turn's own output, under the
+answer:
+
+| The call ran on | What the chat window says |
+|---|---|
+| a Stack other than the link's | `<tool> ran on Stack <argument's Stack>, not the session's Stack <link's Stack>.` |
+| a Stack the argument named, with no Stack in the link | `<tool> ran on Stack <argument's Stack>; the session had no Stack.` |
+
+Each divergent call gets its own line, and the line names the tool: two calls that left
+the link's Stack for the same foreign one are two facts, not one, and a sentence naming
+no call would leave a reader unable to tell which call it describes.
+
+and an operator reading the log gets one structured record per overridden call,
+naming the tool, the turn's Stack and the argument's Stack. Nothing is shown when the
+argument names the link's Stack or when the argument is absent: neither is a
+divergence. This supersedes the earlier rule that refused any argument disagreeing
+with the link; nothing is refused for disagreeing now.
 
 ## Reaching an MCP server over HTTP
 

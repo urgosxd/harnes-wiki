@@ -1,0 +1,32 @@
+# The gate for this repository.
+#
+# It is a thin wrapper on purpose: every command lives in `scripts/ci.sh`, so a failure
+# here can be reproduced on a laptop with `bash scripts/ci.sh`, and nothing can be true
+# in CI and false locally. Do not add `run:` steps here — add them to the script.
+#
+# No `continue-on-error` anywhere: a step that cannot fail is not a step.
+name: CI
+
+on:
+  # Pushes to main plus every pull request: listing all branches on `push` as well would
+  # run each branch twice.
+  push:
+    branches: [main]
+  pull_request:
+
+# One run per branch: a second push cancels the first instead of queueing behind it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    # The script bounds its own database wait; this bounds everything else, so a hung
+    # step cannot occupy a runner for hours.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run scripts/ci.sh
+        run: bash scripts/ci.sh

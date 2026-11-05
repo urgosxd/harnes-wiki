@@ -316,6 +316,11 @@ export class ConversationStore implements EntryStore {
    * `command` is null for an http server and `url` is null for a stdio one: the
    * database constraint guarantees exactly one of them is present, so a caller that
    * trusts `transport` cannot end up with a row it cannot connect.
+   *
+   * The Stacks these servers read are NOT here. A Stack is a per-request selection
+   * carried by the link, not tenant configuration, so `tenant_mcp.default_stack_id`
+   * is deliberately left in the table unread: the column stays for provisioning
+   * compatibility, and nothing in a turn consults it.
    */
   async listMcpServers(userId: string): Promise<
     Array<{
@@ -327,8 +332,6 @@ export class ConversationStore implements EntryStore {
       url: string | null;
       headers: Record<string, string>;
       exposedTools: string[];
-      /** Stack to name on every MCP call; null means "inherit the host default". */
-      defaultStackId: string | null;
     }>
   > {
     const rows = await this.db.query<{
@@ -340,10 +343,8 @@ export class ConversationStore implements EntryStore {
       url: string | null;
       headers: Record<string, string>;
       exposed_tools: string[];
-      default_stack_id: string | null;
     }>(
-      `SELECT server_name, transport, command, args, env, url, headers, exposed_tools,
-              default_stack_id
+      `SELECT server_name, transport, command, args, env, url, headers, exposed_tools
          FROM tenant_mcp WHERE user_id = $1 AND enabled = true
         ORDER BY server_name`,
       [userId],
@@ -357,7 +358,6 @@ export class ConversationStore implements EntryStore {
       url: row.url,
       headers: row.headers,
       exposedTools: row.exposed_tools,
-      defaultStackId: row.default_stack_id,
     }));
   }
 

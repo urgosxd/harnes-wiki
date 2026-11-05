@@ -46,8 +46,14 @@ export interface TurnHooks {
   onThinkingDelta?(delta: string): void;
   /** Called when the agent starts executing a tool. */
   onToolStart?(toolName: string): void;
-  /** Called when a tool finishes. */
-  onToolEnd?(toolName: string, isError: boolean): void;
+  /**
+   * Called when a tool finishes.
+   *
+   * `notice` is set only when the call ran on a Stack the turn's own Stack did not name
+   * (`resolveStackArgument` in `tenant-runtime.ts`), and it is already a sentence: the
+   * caller's job is to carry it to the person, not to word it again.
+   */
+  onToolEnd?(toolName: string, isError: boolean, notice?: string): void;
   /**
    * Called with the tool's own output, for tools whose result the caller needs.
    *
@@ -166,7 +172,7 @@ export async function runTurn(options: {
           hooks?.onToolStart?.(event.toolName);
           break;
         case "tool_execution_end": {
-          hooks?.onToolEnd?.(event.toolName, event.isError);
+          hooks?.onToolEnd?.(event.toolName, event.isError, stackNoticeFromResult(event.result));
           // Only the tools whose output the caller needs, and never as a general
           // channel: a tool result can contain anything the model was allowed to
           // read, and forwarding all of them would leak that to the browser.
@@ -229,6 +235,28 @@ export async function runTurn(options: {
       durationMs: Date.now() - startedAt,
     };
   }
+}
+
+/**
+ * The Stack notice a finished tool call carries, if any.
+ *
+ * `resolveStackArgument` attaches it to the tool result's `details` when — and only
+ * when — the call ran on a Stack the turn's own Stack did not name. Reading it here
+ * rather than re-deriving it keeps one author of the sentence: the proxy knows which
+ * two Stacks were involved, and this function only decides whether a value is a
+ * notice at all.
+ *
+ * Never throws and never guesses: a missing result, missing details, a non-string or a
+ * blank value is no notice. The result carries a tool's own payload, so nothing about
+ * its shape can be assumed.
+ */
+export function stackNoticeFromResult(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const details = (result as { details?: unknown }).details;
+  if (!details || typeof details !== "object") return undefined;
+  const notice = (details as { stackNotice?: unknown }).stackNotice;
+  if (typeof notice !== "string") return undefined;
+  return notice.trim().length > 0 ? notice : undefined;
 }
 
 function toOutcome(message: unknown): RunOutcome {

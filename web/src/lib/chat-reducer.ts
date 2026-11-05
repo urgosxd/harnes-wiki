@@ -31,7 +31,44 @@ export interface ChatState {
   error: string | null;
   /** True when the last failure is worth retrying. */
   canRetry: boolean;
+  /**
+   * Which Stack a tool call actually ran on, when it was not the Stack the session was
+   * opened with.
+   *
+   * The server words the sentence and this only carries it: it names both Stacks, so a
+   * person can see that a foreign Stack was read in this turn. It outlives the reload
+   * that ends the turn — `loaded` keeps it — because a remark that vanished when the
+   * answer arrived would be no more visible than the log record it replaces. It belongs
+   * to one turn: the next `send`, or another conversation, clears it.
+   */
+  stackNotices: StackNotice[];
   runId: string | null;
+}
+
+/**
+ * One divergent Stack, in the words the server chose, stamped with the conversation
+ * whose turn produced it.
+ *
+ * The stamp is what keeps a late frame out of the wrong thread. `openConversation`
+ * aborts the previous run and resets the state, but a read that was already in flight
+ * can still deliver frames afterwards; `loaded` now keeps notices, so an unstamped
+ * sentence about a call made in conversation A could appear in conversation B — a claim
+ * about a turn that never happened there. The conversation id therefore travels with
+ * the sentence, and the window paints only the notices of the thread it is showing
+ * (`stackNoticesFor`).
+ *
+ * The tool travels with it too: the dedupe is keyed on (conversation, tool, sentence),
+ * so two calls that left the session's Stack are two facts even when they went to the
+ * same foreign Stack. The server's sentence names the tool as well; the key is kept
+ * separate so the rule does not depend on the wording staying that way.
+ */
+export interface StackNotice {
+  /** The conversation the turn ran in. Only that thread may show the sentence. */
+  conversationId: string;
+  /** The tool whose call diverged: part of the identity of the fact. */
+  tool: string;
+  /** The server's sentence, shown verbatim. */
+  text: string;
 }
 
 export const initialChatState: ChatState = {
@@ -42,6 +79,7 @@ export const initialChatState: ChatState = {
   pendingUserText: null,
   error: null,
   canRetry: false,
+  stackNotices: [],
   runId: null,
 };
 
@@ -54,6 +92,7 @@ export type ChatAction =
   | { type: "skill"; name: string }
   | { type: "tool_started"; tool: string; label: string }
   | { type: "tool_finished"; tool: string; label: string; isError: boolean }
+  | { type: "stack_notice"; conversationId: string; tool: string; text: string }
   | { type: "finished"; outcome: string }
   | { type: "failed"; message: string; retryable: boolean }
   | { type: "reset" };
@@ -67,7 +106,9 @@ export type ChatAction =
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
     case "loaded":
-      return { ...initialChatState, messages: action.messages };
+      // The Stack notice is kept: this reload happens the instant a turn ends, and the
+      // sentence has to survive it to be seen at all.
+      return { ...initialChatState, messages: action.messages, stackNotices: state.stackNotices };
 
     case "send":
       // The user bubble appears before the server answers, so the UI never looks
@@ -79,6 +120,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         canRetry: false,
         streamingText: "",
         activity: [],
+        // A notice describes the turn it arrived in, so the next turn starts clean.
+        stackNotices: [],
         pendingUserText: action.text,
         runId: null,
       };
@@ -162,6 +205,27 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       };
     }
 
+    case "stack_notice": {
+      // One sentence per fact: the same call reported twice must not stack up on screen.
+      // The conversation and the tool are part of the fact — the same words in two
+      // threads are two different turns, and two tools that each left the session's
+      // Stack for the same foreign one are two different calls.
+      const duplicate = state.stackNotices.some(
+        (notice) =>
+          notice.conversationId === action.conversationId &&
+          notice.tool === action.tool &&
+          notice.text === action.text,
+      );
+      if (duplicate) return state;
+      return {
+        ...state,
+        stackNotices: [
+          ...state.stackNotices,
+          { conversationId: action.conversationId, tool: action.tool, text: action.text },
+        ],
+      };
+    }
+
     case "finished": {
       const assistantText = state.streamingText;
       const messages = [...state.messages];
@@ -217,4 +281,20 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     default:
       return state;
   }
+}
+
+/**
+ * The notices to paint for the conversation on screen.
+ *
+ * It takes the id the window is actually displaying — `useChat`'s `activeId`, the same
+ * value the thread was loaded with — because that is the only authority on which
+ * conversation the person is looking at. A notice stamped with any other conversation
+ * belongs to a turn that is no longer displayed and is not shown; with no conversation
+ * on screen there is nothing to attribute and nothing is shown either.
+ */
+export function stackNoticesFor(state: ChatState, conversationId: string | null): string[] {
+  if (conversationId === null) return [];
+  return state.stackNotices
+    .filter((notice) => notice.conversationId === conversationId)
+    .map((notice) => notice.text);
 }

@@ -193,13 +193,19 @@ export class ApiClient {
     source: string,
     options: { compile?: boolean; stackId?: string | undefined } = {},
   ): Promise<IngestJobAccepted> {
-    return this.json<IngestJobAccepted>("POST", "/ingest/jobs", {
-      source,
-      compile: options.compile !== false,
-      // The Stack the job belongs to. Omitted means the endpoint's own, which this
-      // product no longer trusts as a default - see the picker guard in stacks.ts.
-      ...(options.stackId ? { stackId: options.stackId } : {}),
-    });
+    return this.json<IngestJobAccepted>(
+      "POST",
+      "/ingest/jobs",
+      {
+        source,
+        compile: options.compile !== false,
+        // The Stack the job belongs to, always the one the link named. Omitted only
+        // when a caller has none, which the routes still tolerate for other clients.
+        ...(options.stackId ? { stackId: options.stackId } : {}),
+      },
+      undefined,
+      (response) => this.ingestErrorFrom(response),
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -231,6 +237,32 @@ export class ApiClient {
     return body.documents ?? [];
   }
 
+  // -------------------------------------------------------------------------
+  // Stacks
+  // -------------------------------------------------------------------------
+
+  /**
+   * The Stack ids this host knows about.
+   *
+   * Read-only and deliberately unscoped: it exists so the ingest surface can OFFER a
+   * choice, which means it cannot itself depend on already knowing one. It goes
+   * through `json` like every other read, so base URL, headers and a rejected
+   * credential behave identically.
+   *
+   * A body without a `stackIds` array answers `[]` instead of throwing. An optional
+   * field is a shape the server is allowed to omit, and "no choices" is a fact the
+   * select can render; failing here would take down the whole panel over a 200 it did
+   * not expect.
+   *
+   * It keeps the shared error copy rather than `ingestErrorFrom`: this is one of our
+   * own listing routes, like `/documents`, not a call whose answer is forwarded from
+   * the ingest service's envelope.
+   */
+  async listStackIds(): Promise<string[]> {
+    const body = await this.json<{ stackIds?: unknown }>("GET", "/stacks");
+    return Array.isArray(body?.stackIds) ? (body.stackIds as string[]) : [];
+  }
+
   async deleteDocument(id: string): Promise<void> {
     await this.request("DELETE", `/documents/${encodeURIComponent(id)}`);
   }
@@ -240,15 +272,27 @@ export class ApiClient {
     documentId: string,
     options: { compile?: boolean; stackId?: string | undefined } = {},
   ): Promise<IngestJobAccepted> {
-    return this.json<IngestJobAccepted>("POST", "/ingest/jobs", {
-      documentId,
-      compile: options.compile !== false,
-      ...(options.stackId ? { stackId: options.stackId } : {}),
-    });
+    return this.json<IngestJobAccepted>(
+      "POST",
+      "/ingest/jobs",
+      {
+        documentId,
+        compile: options.compile !== false,
+        ...(options.stackId ? { stackId: options.stackId } : {}),
+      },
+      undefined,
+      (response) => this.ingestErrorFrom(response),
+    );
   }
 
   async listIngestJobs(stackId?: string): Promise<IngestJob[]> {
-    const body = await this.json<{ jobs?: IngestJob[] }>("GET", `/ingest/jobs${stackQuery(stackId)}`);
+    const body = await this.json<{ jobs?: IngestJob[] }>(
+      "GET",
+      `/ingest/jobs${stackQuery(stackId)}`,
+      undefined,
+      undefined,
+      (response) => this.ingestErrorFrom(response),
+    );
     return body.jobs ?? [];
   }
 
@@ -256,6 +300,9 @@ export class ApiClient {
     return this.json<IngestJob>(
       "GET",
       `/ingest/jobs/${encodeURIComponent(id)}${stackQuery(stackId)}`,
+      undefined,
+      undefined,
+      (response) => this.ingestErrorFrom(response),
     );
   }
 
@@ -304,7 +351,16 @@ export class ApiClient {
     method: string,
     path: string,
     body?: unknown,
-    options: { rawBody?: BodyInit; headers?: Record<string, string> } = {},
+    options: {
+      rawBody?: BodyInit;
+      headers?: Record<string, string>;
+      /**
+       * Who turns a failed response into an error. Defaults to `errorFrom`; the
+       * ingest calls pass their own so the service's message survives, without
+       * touching the copy every other route reports.
+       */
+      errorMapper?: (response: Response) => Promise<ApiError>;
+    } = {},
   ): Promise<Response> {
     const hasRaw = options.rawBody !== undefined;
     const response = await this.doFetch(`${this.baseUrl}${path}`, {
@@ -320,7 +376,9 @@ export class ApiClient {
           ? {}
           : { body: JSON.stringify(body) }),
     });
-    if (!response.ok) throw await this.errorFrom(response);
+    if (!response.ok) {
+      throw await (options.errorMapper ? options.errorMapper(response) : this.errorFrom(response));
+    }
     return response;
   }
 
@@ -329,6 +387,8 @@ export class ApiClient {
     path: string,
     body?: unknown,
     headers?: Record<string, string>,
+    /** Only the ingest calls pass this; everything else keeps `errorFrom`'s copy. */
+    errorMapper?: (response: Response) => Promise<ApiError>,
   ): Promise<T> {
     // A File (or any BodyInit that is not plain JSON) is sent as bytes.
     const isRaw = typeof Blob !== "undefined" && body instanceof Blob;
@@ -336,10 +396,54 @@ export class ApiClient {
       method,
       path,
       isRaw ? undefined : body,
-      isRaw ? { rawBody: body as BodyInit, ...(headers ? { headers } : {}) } : headers ? { headers } : {},
+      {
+        ...(isRaw ? { rawBody: body as BodyInit } : {}),
+        ...(headers ? { headers } : {}),
+        ...(errorMapper ? { errorMapper } : {}),
+      },
     );
     if (response.status === 204) return undefined as T;
     return (await response.json()) as T;
+  }
+
+  /**
+   * An error from the ingest service, told in the service's own words.
+   *
+   * Our server forwards the upstream envelope `{error: {code, message}}` unchanged, so
+   * the sentence a person needs — "'not-a-stack' is not a Stack id." — is already on
+   * the wire. Reporting `request failed with 400` would throw it away and leave the
+   * user with a status code and nothing to act on.
+   *
+   * Two things keep this from spreading. It is used ONLY by the ingest calls, and its
+   * fallback IS `errorFrom` — the response is cloned so the body survives for the
+   * shared formatter. That means every other shape keeps its copy byte-identical by
+   * construction: a chat-style `{error: "code"}` body, a body with no message, and a
+   * non-JSON body all take the same path they always took.
+   */
+  private async ingestErrorFrom(response: Response): Promise<ApiError> {
+    let envelope: { code: string | undefined; message: string } | undefined;
+    try {
+      const body = (await response.clone().json()) as { error?: unknown };
+      const error = body?.error;
+      if (error && typeof error === "object") {
+        const candidate = error as { code?: unknown; message?: unknown };
+        // A blank message is not a better message than the status: "@" would read as
+        // success-adjacent noise, so it falls through to the shared formatter.
+        if (typeof candidate.message === "string" && candidate.message.trim() !== "") {
+          envelope = {
+            code: typeof candidate.code === "string" ? candidate.code : undefined,
+            message: candidate.message,
+          };
+        }
+      }
+    } catch {
+      // Not JSON, or not our envelope: `errorFrom` owns the rest.
+    }
+    if (!envelope) return this.errorFrom(response);
+    // A 401 still has to report identity rejection, and that is `errorFrom`'s job; the
+    // envelope only spares us its generic message.
+    if (response.status === 401) this.reportUnauthorized();
+    return new ApiError(response.status, envelope.code, envelope.message);
   }
 
   private async errorFrom(response: Response): Promise<ApiError> {

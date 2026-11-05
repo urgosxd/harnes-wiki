@@ -127,8 +127,8 @@ export class TurnService {
           onSkillUsed: (name) => queue.push({ type: "skill_used", name }),
           onToolStart: (tool) =>
             queue.push({ type: "tool_started", tool, label: toolLabel(tool) }),
-          onToolEnd: (tool, isError) =>
-            queue.push({ type: "tool_finished", tool, label: toolLabel(tool), isError }),
+          onToolEnd: (tool, isError, notice) =>
+            queue.push(toolFinishedFrame(tool, isError, notice)),
           onToolResult: (tool, text, isError) =>
             queue.push({ type: "tool_result", tool, text, isError }),
         },
@@ -160,6 +160,24 @@ export class TurnService {
       queue.close();
     }
   }
+}
+
+/**
+ * The frame that closes one tool call.
+ *
+ * `label` is exactly what `tool_started` sent, because the client closes the running row
+ * by matching labels: appending a remark to the finished label would leave a divergent
+ * call spinning forever. The Stack notice is therefore its own field, absent when there
+ * is nothing to say.
+ */
+export function toolFinishedFrame(tool: string, isError: boolean, notice?: string): ChatFrame {
+  return {
+    type: "tool_finished",
+    tool,
+    label: toolLabel(tool),
+    isError,
+    ...(notice ? { notice } : {}),
+  };
 }
 
 function toRunStatus(outcome: RunOutcomeName): RunRecord["status"] {

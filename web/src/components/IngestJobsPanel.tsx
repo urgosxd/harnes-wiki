@@ -1,6 +1,6 @@
 import { useState, type ChangeEvent, type FormEvent } from "react";
 import { describeJob, isJobSettled } from "../lib/ingest.ts";
-import type { UseIngestResult } from "../lib/use-ingest.ts";
+import { UNRESOLVED_STACK_ID_NOTICE, type UseIngestResult } from "../lib/use-ingest.ts";
 import { IngestJobView } from "./IngestJobView.tsx";
 
 /** Byte counts a person can read at a glance. */
@@ -31,6 +31,10 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
   const [source, setSource] = useState("");
   const [compile, setCompile] = useState(true);
 
+  // The Stack every write from this panel belongs to. Never derived here: the hook owns
+  // the order (choice first, link as fallback) so there is exactly one precedence rule.
+  const stackId = ingest.resolvedStackId;
+
   const pick = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     // Clear the input so picking the SAME file twice still fires a change: a user
@@ -44,18 +48,115 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
     event.preventDefault();
     const trimmed = source.trim();
     if (!trimmed) return;
-    void ingest.start(trimmed, { compile });
+    // The chosen Stack travels with the write; `undefined` only when nothing resolved,
+    // and then the panel is not offering this form at all.
+    void ingest.start(trimmed, { compile, stackId: stackId ?? undefined });
     setSource("");
   };
 
+  /*
+    The Stack control. Options come from the host (`GET /stacks` through the hook) and
+    always include the link's own value, so the page is usable before the list answers
+    or when the host cannot list. The empty option exists ONLY while nothing is
+    resolved: with a Stack chosen there is no "none" to go back to, and an empty value
+    would name a Stack called "".
+  */
+  const stackField = (
+    <label className="jobs-panel__field">
+      <span className="jobs-panel__label">Stack</span>
+      <select
+        className="jobs-panel__input"
+        value={stackId ?? ""}
+        onChange={(event) => ingest.chooseStackId(event.target.value)}
+        aria-label="Stack"
+      >
+        {stackId === null && <option value="">Choose a Stack…</option>}
+        {ingest.stackIds.map((id) => (
+          <option key={id} value={id}>
+            {id}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+
+  const form = (
+    <form className="jobs-panel__form" onSubmit={submit}>
+      <label className="jobs-panel__field">
+        <span className="jobs-panel__label">Source</span>
+        <input
+          className="jobs-panel__input"
+          value={source}
+          onChange={(event) => setSource(event.target.value)}
+          placeholder="https://example.com/article  or  a path on the source host"
+          aria-label="Source"
+        />
+      </label>
+      {stackField}
+      <label className="jobs-panel__checkbox">
+        <input
+          type="checkbox"
+          checked={compile}
+          onChange={(event) => setCompile(event.target.checked)}
+        />
+        <span>Compile after ingesting</span>
+      </label>
+      <button
+        type="submit"
+        className="button button--primary"
+        disabled={ingest.starting || source.trim().length === 0}
+      >
+        {ingest.starting ? "Starting…" : "Start ingest"}
+      </button>
+    </form>
+  );
+
+  const header = (
+    <header className="jobs-panel__header">
+      <h2 className="jobs-panel__title">Ingest jobs</h2>
+      <button type="button" className="button button--small" onClick={onClose}>
+        Back to chat
+      </button>
+    </header>
+  );
+
+  // No tenant in the link means no ingest READS: no upload, no document list and no job
+  // list, because every one of those would either read another Stack or fail in a way
+  // the user cannot act on. What stays is the choice S4 names — a Stack picked here
+  // scopes the ingest this panel starts — so the surface is not a dead end. Without a
+  // resolved Stack there is no form at all: nothing to submit into, and nothing that
+  // would send a request nobody named. The chat itself stays available; the block is
+  // scoped to ingest, not to the session.
+  if (ingest.blockedProblem) {
+    return (
+      <main className="jobs-panel">
+        {header}
+        <section aria-label="Stack required">
+          <h3 className="jobs-panel__subtitle">This link has no Stack</h3>
+          {/* The one ANNOUNCED notice: the read block, which names the link. */}
+          <p className="jobs-panel__notice jobs-panel__notice--warn" role="alert">
+            {ingest.blockedProblem}
+          </p>
+          {stackField}
+          {/*
+            The write block, stated but not announced: it describes the state the control
+            above is in, not an event that just happened. Same S4 copy the hook reports,
+            reused here rather than rewritten.
+          */}
+          {stackId === null && (
+            <p className="jobs-panel__notice jobs-panel__notice--warn">
+              {UNRESOLVED_STACK_ID_NOTICE}
+            </p>
+          )}
+          {stackId !== null && form}
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="jobs-panel">
-      <header className="jobs-panel__header">
-        <h2 className="jobs-panel__title">Ingest jobs</h2>
-        <button type="button" className="button button--small" onClick={onClose}>
-          Back to chat
-        </button>
-      </header>
+      {header}
 
       {/*
         Upload and ingest are separate steps on purpose. A document is a resource
@@ -63,53 +164,6 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
         without being uploaded twice, and a file can be stored before anyone decides
         whether it belongs in the wiki.
       */}
-      {/*
-        The stack list arrives from the AGENT, so this picker can be empty until a
-        turn asked for it. That is stated rather than hidden: an empty dropdown with
-        no explanation reads as a bug.
-      */}
-      <section className="jobs-panel__stacks" aria-label="Stack selection">
-        <label className="jobs-panel__stackfield" htmlFor="stack-select">
-          <span className="jobs-panel__label">Stack</span>
-          <select
-            id="stack-select"
-            className="jobs-panel__select"
-            value={ingest.selectedStackId ?? ""}
-            onChange={(event) => ingest.selectStack(event.target.value || null)}
-            disabled={ingest.stacks.length === 0}
-          >
-            {ingest.stacks.length === 0 && <option value="">No stacks known yet</option>}
-            {ingest.stacks.map((stack) => (
-              <option key={stack.id} value={stack.id}>
-                {stack.name}
-                {stack.isCurrent ? " (bound)" : ""}
-              </option>
-            ))}
-          </select>
-        </label>
-        {ingest.stacksProblem && (
-          <p className="jobs-panel__notice jobs-panel__notice--warn" role="alert">
-            {ingest.stacksProblem}
-          </p>
-        )}
-        {ingest.stacks.length === 0 && !ingest.stacksProblem && (
-          <p className="jobs-panel__hint">
-            Ask the assistant to list the stacks and they will appear here.
-          </p>
-        )}
-        {/*
-          The service scopes READS by Stack but binds WRITES to the one it started
-          with. So a foreign selection filters the list correctly and still sends a
-          new job to the bound Stack. Saying that here, next to the picker, is the
-          difference between a limitation and a lie.
-        */}
-        {!ingest.createTarget.ok && (
-          <p className="jobs-panel__notice jobs-panel__notice--warn" role="alert">
-            {ingest.createTarget.reason}
-          </p>
-        )}
-      </section>
-
       <section className="jobs-panel__upload" aria-label="Upload a document">
         <label className="jobs-panel__filebutton">
           <input
@@ -147,9 +201,12 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
                 <button
                   type="button"
                   className="button button--small"
-                  disabled={!ingest.createTarget.ok}
-                  title={ingest.createTarget.ok ? undefined : ingest.createTarget.reason}
-                  onClick={() => void ingest.ingestDocument(document.id, { compile })}
+                  onClick={() =>
+                    void ingest.ingestDocument(document.id, {
+                      compile,
+                      stackId: stackId ?? undefined,
+                    })
+                  }
                 >
                   Ingest
                 </button>
@@ -167,36 +224,7 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
         )}
       </section>
 
-      <form className="jobs-panel__form" onSubmit={submit}>
-        <label className="jobs-panel__field">
-          <span className="jobs-panel__label">Source</span>
-          <input
-            className="jobs-panel__input"
-            value={source}
-            onChange={(event) => setSource(event.target.value)}
-            placeholder="https://example.com/article  or  a path on the source host"
-            aria-label="Source"
-          />
-        </label>
-        <label className="jobs-panel__checkbox">
-          <input
-            type="checkbox"
-            checked={compile}
-            onChange={(event) => setCompile(event.target.checked)}
-          />
-          <span>Compile after ingesting</span>
-        </label>
-        <button
-          type="submit"
-          className="button button--primary"
-          disabled={
-            ingest.starting || source.trim().length === 0 || !ingest.createTarget.ok
-          }
-          title={ingest.createTarget.ok ? undefined : ingest.createTarget.reason}
-        >
-          {ingest.starting ? "Starting…" : "Start ingest"}
-        </button>
-      </form>
+      {form}
 
       {/*
         A path is resolved on the machine running the ingest service, not in this
