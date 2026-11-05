@@ -25,7 +25,7 @@ S4. When the stackId is resolvable from neither source, the surface says so inst
 | T2 | Read-only `GET /stacks` exposing the known stack ids | S3 | worker | 0b05b18 |
 | T3 | `listStackIds` client method and useIngest effective stackId (selection wins, URL is fallback, notice when neither) | S2, S3, S4 | worker | a2211a4 (with T4) |
 | T4 | Ingest stackId selector preselected from the URL, submitting the chosen value | S3, S4 | worker | a2211a4 (with T3) |
-| T5 | Docs and help copy for the new order and the selection | S1-S4 | worker | pending |
+| T5 | Docs and help copy for the new order and the selection | S1-S4 | worker | 20f2a88 |
 
 ## Log
 
