@@ -49,7 +49,7 @@ function recorder(): Client {
 }
 
 /** A tool that reads one Stack: the published `stackId` property is the tell. */
-const SCOPED = {
+const SCOPED: ToolDescriptor = {
   name: "ingest_jobs_list",
   description: "List this Stack's ingest jobs.",
   inputSchema: {
@@ -68,11 +68,32 @@ type ToolLike = {
   execute: (id: string, params: Record<string, unknown>) => Promise<ToolResult>;
 };
 
-function mount(log?: Logger): ToolLike {
+/** A second Stack-scoped tool: two calls to the SAME foreign Stack are two facts. */
+const SCOPED_OTHER: ToolDescriptor = {
+  name: "ingest_job_get",
+  description: "One ingest job.",
+  inputSchema: {
+    type: "object",
+    properties: { id: { type: "string" }, stackId: { type: "string" } },
+  },
+};
+
+/** The name/schema shape the proxy takes; the two tools differ only in their own fields. */
+interface ToolDescriptor {
+  name: string;
+  description: string;
+  inputSchema: { type: string; properties: Record<string, unknown> };
+}
+
+function mountTool(descriptor: ToolDescriptor, log?: Logger): ToolLike {
   const client = recorder();
-  const [tool] = proxyMcpTools("alice", client as never, [SCOPED], log);
+  const [tool] = proxyMcpTools("alice", client as never, [descriptor], log);
   assert.ok(tool, "the proxy must return the tool");
   return tool as unknown as ToolLike;
+}
+
+function mount(log?: Logger): ToolLike {
+  return mountTool(SCOPED, log);
 }
 
 function textOf(result: ToolResult): string {
@@ -84,16 +105,37 @@ function capturedLog(): { logger: Logger; lines: string[] } {
   return { logger: new Logger({ level: "debug", sink: (line) => lines.push(line) }), lines };
 }
 
-test("a call that runs on another Stack shows it, naming both Stacks", async () => {
+test("a call that runs on another Stack shows it, naming the tool and both Stacks", async () => {
   const tool = mount();
   const result = await withStackContext("stack-a", () => tool.execute("c1", { stackId: "stack-b" }));
 
   assert.notEqual(result.isError, true);
   assert.equal(
     result.details.stackNotice,
-    "Ran on Stack stack-b, not the session's Stack stack-a.",
-    "the person must be able to read which Stack was used, and which one was expected",
+    "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.",
+    "the person must be able to read WHICH CALL ran on which Stack, and which one was expected",
   );
+});
+
+test("two tools diverging to the same foreign Stack stay two attributed sentences", async () => {
+  // Without the tool in the sentence, both calls would be worded identically and collapse
+  // into one line that names no call at all: the reader could not tell whether one call
+  // or five had left the session's Stack.
+  const first = mountTool(SCOPED);
+  const second = mountTool(SCOPED_OTHER);
+
+  const onList = await withStackContext("stack-a", () => first.execute("c1", { stackId: "stack-b" }));
+  const onGet = await withStackContext("stack-a", () => second.execute("c2", { stackId: "stack-b" }));
+
+  assert.equal(
+    onList.details.stackNotice,
+    "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.",
+  );
+  assert.equal(
+    onGet.details.stackNotice,
+    "ingest_job_get ran on Stack stack-b, not the session's Stack stack-a.",
+  );
+  assert.notEqual(onList.details.stackNotice, onGet.details.stackNotice, "two calls, two sentences");
 });
 
 test("with no session Stack, the notice says so instead of claiming one", async () => {
@@ -104,7 +146,10 @@ test("with no session Stack, the notice says so instead of claiming one", async 
   const result = await tool.execute("c1", { stackId: "stack-b" });
 
   assert.notEqual(result.isError, true);
-  assert.equal(result.details.stackNotice, "Ran on Stack stack-b; the session had no Stack.");
+  assert.equal(
+    result.details.stackNotice,
+    "ingest_jobs_list ran on Stack stack-b; the session had no Stack.",
+  );
 });
 
 test("a call on the session's own Stack carries no notice", async () => {
@@ -138,7 +183,7 @@ test("the notice rides the finished-call frame without touching its label", () =
   // The client closes the running activity row by MATCHING the label it got from
   // `tool_started`, so a remark appended to the label would leave the row spinning and
   // the notice still unread. One field of its own, same label.
-  const notice = "Ran on Stack stack-b, not the session's Stack stack-a.";
+  const notice = "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.";
   assert.deepEqual(toolFinishedFrame("ingest_jobs_list", false, notice), {
     type: "tool_finished",
     tool: "ingest_jobs_list",

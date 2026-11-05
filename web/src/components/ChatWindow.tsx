@@ -86,10 +86,11 @@ export function ChatWindow({
           tool's result text never reaches this window. Rendered outside the thread/hint
           choice above so it stays visible after the turn ends and the thread reloads,
           and filtered to the conversation on screen so a late frame from another thread
-          cannot paint here.
+          cannot paint here. Position is the only stable key a line can have: the same
+          sentence can be two different facts (two tools, one foreign Stack).
         */}
-        {stackNoticesFor(state, conversationId).map((notice) => (
-          <p key={notice} className="chat__stack-notice" role="status">
+        {stackNoticesFor(state, conversationId).map((notice, position) => (
+          <p key={`${position}-${notice}`} className="chat__stack-notice" role="status">
             {notice}
           </p>
         ))}

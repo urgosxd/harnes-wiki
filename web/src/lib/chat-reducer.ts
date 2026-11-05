@@ -56,10 +56,17 @@ export interface ChatState {
  * about a turn that never happened there. The conversation id therefore travels with
  * the sentence, and the window paints only the notices of the thread it is showing
  * (`stackNoticesFor`).
+ *
+ * The tool travels with it too: the dedupe is keyed on (conversation, tool, sentence),
+ * so two calls that left the session's Stack are two facts even when they went to the
+ * same foreign Stack. The server's sentence names the tool as well; the key is kept
+ * separate so the rule does not depend on the wording staying that way.
  */
 export interface StackNotice {
   /** The conversation the turn ran in. Only that thread may show the sentence. */
   conversationId: string;
+  /** The tool whose call diverged: part of the identity of the fact. */
+  tool: string;
   /** The server's sentence, shown verbatim. */
   text: string;
 }
@@ -85,7 +92,7 @@ export type ChatAction =
   | { type: "skill"; name: string }
   | { type: "tool_started"; tool: string; label: string }
   | { type: "tool_finished"; tool: string; label: string; isError: boolean }
-  | { type: "stack_notice"; conversationId: string; text: string }
+  | { type: "stack_notice"; conversationId: string; tool: string; text: string }
   | { type: "finished"; outcome: string }
   | { type: "failed"; message: string; retryable: boolean }
   | { type: "reset" };
@@ -200,17 +207,21 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 
     case "stack_notice": {
       // One sentence per fact: the same call reported twice must not stack up on screen.
-      // The conversation is part of the fact — the same words in two threads are two
-      // different turns, and only the one that ran may show them.
+      // The conversation and the tool are part of the fact — the same words in two
+      // threads are two different turns, and two tools that each left the session's
+      // Stack for the same foreign one are two different calls.
       const duplicate = state.stackNotices.some(
-        (notice) => notice.conversationId === action.conversationId && notice.text === action.text,
+        (notice) =>
+          notice.conversationId === action.conversationId &&
+          notice.tool === action.tool &&
+          notice.text === action.text,
       );
       if (duplicate) return state;
       return {
         ...state,
         stackNotices: [
           ...state.stackNotices,
-          { conversationId: action.conversationId, text: action.text },
+          { conversationId: action.conversationId, tool: action.tool, text: action.text },
         ],
       };
     }

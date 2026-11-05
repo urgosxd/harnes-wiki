@@ -27,7 +27,9 @@ function run(actions: Parameters<typeof chatReducer>[1][], from: ChatState = ini
   return actions.reduce(chatReducer, from);
 }
 
-const NOTICE = "Ran on Stack stack-b, not the session's Stack stack-a.";
+const NOTICE = "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.";
+/** The same foreign Stack, reached by a different tool: a second, distinct fact. */
+const NOTICE_OTHER = "ingest_job_get ran on Stack stack-b, not the session's Stack stack-a.";
 /** Two conversations, so a notice can be attributed to the turn that produced it. */
 const A = "conv-a";
 const B = "conv-b";
@@ -59,7 +61,7 @@ describe("the notice outlives the turn", () => {
     // reload is what used to leave a mid-turn remark on a screen nobody was watching.
     const state = run([
       { type: "send", text: "list the jobs" },
-      { type: "stack_notice", conversationId: A, text: NOTICE },
+      { type: "stack_notice", conversationId: A, tool: "ingest_jobs_list", text: NOTICE },
       { type: "finished", outcome: "ok" },
       { type: "loaded", messages: [{ id: "m0", role: "assistant", text: "done" }] },
     ]);
@@ -69,7 +71,7 @@ describe("the notice outlives the turn", () => {
   it("belongs to one turn only", () => {
     const after = run([
       { type: "send", text: "first" },
-      { type: "stack_notice", conversationId: A, text: NOTICE },
+      { type: "stack_notice", conversationId: A, tool: "ingest_jobs_list", text: NOTICE },
       { type: "finished", outcome: "ok" },
       { type: "send", text: "second" },
     ]);
@@ -78,7 +80,7 @@ describe("the notice outlives the turn", () => {
 
   it("is dropped when another conversation is opened", () => {
     const after = run([
-      { type: "stack_notice", conversationId: A, text: NOTICE },
+      { type: "stack_notice", conversationId: A, tool: "ingest_jobs_list", text: NOTICE },
       { type: "reset" },
     ]);
     expect(stackNoticesFor(after, A)).toEqual([]);
@@ -86,10 +88,32 @@ describe("the notice outlives the turn", () => {
 
   it("says it once however many times the same call is reported", () => {
     const after = run([
-      { type: "stack_notice", conversationId: A, text: NOTICE },
-      { type: "stack_notice", conversationId: A, text: NOTICE },
+      { type: "stack_notice", conversationId: A, tool: "ingest_jobs_list", text: NOTICE },
+      { type: "stack_notice", conversationId: A, tool: "ingest_jobs_list", text: NOTICE },
     ]);
     expect(stackNoticesFor(after, A)).toEqual([NOTICE]);
+  });
+
+  it("keeps two divergent calls on the same foreign Stack apart", () => {
+    // Two calls, one foreign Stack: with a sentence that named no tool these would be one
+    // line naming no call, and a reader could not tell whether one call or five had left
+    // the session's Stack.
+    const after = run([
+      { type: "stack_notice", conversationId: A, tool: "ingest_jobs_list", text: NOTICE },
+      { type: "stack_notice", conversationId: A, tool: "ingest_job_get", text: NOTICE_OTHER },
+    ]);
+    expect(stackNoticesFor(after, A)).toEqual([NOTICE, NOTICE_OTHER]);
+  });
+
+  it("keys the dedupe on the tool, not on the sentence alone", () => {
+    // The sentence names the tool today, so these two cannot come off the wire in the
+    // current wording. What is under test is the KEY: a rewording that dropped the tool
+    // from the sentence must not silently merge two different calls into one line again.
+    const after = run([
+      { type: "stack_notice", conversationId: A, tool: "ingest_jobs_list", text: NOTICE },
+      { type: "stack_notice", conversationId: A, tool: "ingest_job_get", text: NOTICE },
+    ]);
+    expect(stackNoticesFor(after, A)).toEqual([NOTICE, NOTICE]);
   });
 });
 
@@ -107,19 +131,19 @@ describe("a notice is only shown in the conversation that produced it", () => {
   it("is not shown in another conversation's thread", () => {
     const state = run([
       { type: "send", text: "list the jobs" },
-      { type: "stack_notice", conversationId: A, text: NOTICE },
+      { type: "stack_notice", conversationId: A, tool: "ingest_jobs_list", text: NOTICE },
       // The user opens B: abort, reset, then the reload of B's thread.
       { type: "reset" },
       { type: "loaded", messages: [{ id: "m0", role: "assistant", text: "older answer" }] },
       // A frame from A's still-draining run lands here.
-      { type: "stack_notice", conversationId: A, text: NOTICE },
+      { type: "stack_notice", conversationId: A, tool: "ingest_jobs_list", text: NOTICE },
     ]);
     expect(stackNoticesFor(state, B)).toEqual([]);
   });
 
   it("is shown in the conversation it arrived in", () => {
     const state = run([
-      { type: "stack_notice", conversationId: A, text: NOTICE },
+      { type: "stack_notice", conversationId: A, tool: "ingest_jobs_list", text: NOTICE },
       { type: "loaded", messages: [] },
     ]);
     expect(stackNoticesFor(state, A)).toEqual([NOTICE]);
@@ -250,14 +274,14 @@ function mountWindow(state: ChatState, conversationId: string | null) {
 
 describe("the window paints only the notice of the thread it is showing", () => {
   it("paints the notice of the displayed conversation", () => {
-    const state = run([{ type: "stack_notice", conversationId: A, text: NOTICE }]);
+    const state = run([{ type: "stack_notice", conversationId: A, tool: "ingest_jobs_list", text: NOTICE }]);
     const { container } = mountWindow(state, A);
     expect(container.querySelectorAll(".chat__stack-notice")).toHaveLength(1);
     expect(screen.getByText(NOTICE)).toBeDefined();
   });
 
   it("paints nothing for a notice stamped with another conversation", () => {
-    const state = run([{ type: "stack_notice", conversationId: A, text: NOTICE }]);
+    const state = run([{ type: "stack_notice", conversationId: A, tool: "ingest_jobs_list", text: NOTICE }]);
     const { container } = mountWindow(state, B);
     expect(container.querySelectorAll(".chat__stack-notice")).toHaveLength(0);
     expect(screen.queryByText(NOTICE)).toBeNull();

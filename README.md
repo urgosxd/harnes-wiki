@@ -735,8 +735,12 @@ answer:
 
 | The call ran on | What the chat window says |
 |---|---|
-| a Stack other than the link's | `Ran on Stack <argument's Stack>, not the session's Stack <link's Stack>.` |
-| a Stack the argument named, with no Stack in the link | `Ran on Stack <argument's Stack>; the session had no Stack.` |
+| a Stack other than the link's | `<tool> ran on Stack <argument's Stack>, not the session's Stack <link's Stack>.` |
+| a Stack the argument named, with no Stack in the link | `<tool> ran on Stack <argument's Stack>; the session had no Stack.` |
+
+Each divergent call gets its own line, and the line names the tool: two calls that left
+the link's Stack for the same foreign one are two facts, not one, and a sentence naming
+no call would leave a reader unable to tell which call it describes.
 
 and an operator reading the log gets one structured record per overridden call,
 naming the tool, the turn's Stack and the argument's Stack. Nothing is shown when the

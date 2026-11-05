@@ -377,7 +377,7 @@ function resolveStackArgument(
       args: { ...args, stackId: explicitStackId },
       // The same fact the record carries, in words the turn's output can show. Built
       // here so the sentence and the record cannot end up describing different calls.
-      ...(diverges ? { notice: stackNotice(explicitStackId, turnStackId) } : {}),
+      ...(diverges ? { notice: stackNotice(toolName, explicitStackId, turnStackId) } : {}),
     };
   }
 
@@ -414,11 +414,21 @@ function resolveStackArgument(
  * is what the old refusal told a human, and it is still the thing a person needs to know.
  * With no session Stack there is none to name, and claiming one would describe a request
  * that never happened — the argument was the only source, so only it is named.
+ *
+ * The TOOL is named as well, because the sentence is one line in a turn that can make
+ * several calls: without it, two divergent calls to the same foreign Stack are worded
+ * identically, and the reader cannot tell which call left the session's Stack — or how
+ * many did. That is also why the client keys its dedupe on (tool, sentence) instead of
+ * the sentence alone.
  */
-function stackNotice(effectiveStackId: string, turnStackId: string | undefined): string {
+function stackNotice(
+  toolName: string,
+  effectiveStackId: string,
+  turnStackId: string | undefined,
+): string {
   return turnStackId === undefined
-    ? `Ran on Stack ${effectiveStackId}; the session had no Stack.`
-    : `Ran on Stack ${effectiveStackId}, not the session's Stack ${turnStackId}.`;
+    ? `${toolName} ran on Stack ${effectiveStackId}; the session had no Stack.`
+    : `${toolName} ran on Stack ${effectiveStackId}, not the session's Stack ${turnStackId}.`;
 }
 
 let processLogger: Logger | undefined;
