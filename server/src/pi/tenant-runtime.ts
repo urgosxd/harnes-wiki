@@ -320,7 +320,13 @@ export function proxyMcpTools(
 
         const resolved = resolveStackArgument(tool.name, args, log);
         if ("error" in resolved) return toolError(resolved.error);
-        return await callAndShape(client, tool.name, resolved.args);
+        const result = await callAndShape(client, tool.name, resolved.args);
+        // A divergence travels as DETAILS, not as content: the sentence is for the person
+        // watching the turn, while the model's own tool result must stay exactly what the
+        // upstream said. `details` is the part of a tool result Pi keeps for the UI.
+        return resolved.notice
+          ? { ...result, details: { ...result.details, stackNotice: resolved.notice } }
+          : result;
       },
     }) as unknown as ToolDefinition,
   );
@@ -339,13 +345,16 @@ export function proxyMcpTools(
  *
  * A differing argument is a choice, not the contradiction the previous rule read it as
  * (S10 of `multitenant-stackId.md`, superseded). It is still a divergence from the
- * Stack the page was showing, so it is recorded once instead of happening silently.
+ * Stack the page was showing, so it is never silent: it is recorded once in the log AND
+ * returned as a `notice` the turn's own output can show. The log line alone was not
+ * enough — the refusal this replaced at least told a human that a foreign Stack had been
+ * used, and a record nobody reads does not. The notice is what a person sees.
  */
 function resolveStackArgument(
   toolName: string,
   args: Record<string, unknown>,
   log: Logger,
-): { args: Record<string, unknown> } | { error: string } {
+): { args: Record<string, unknown>; notice?: string } | { error: string } {
   const turnStackId = currentStackId();
   const named = args.stackId;
   const absent = named === undefined || named === null;
@@ -356,14 +365,20 @@ function resolveStackArgument(
   // An explicit choice wins, with or without a Stack of the turn's own. The record is
   // written only for a real divergence: no context means nothing was overridden.
   if (explicitStackId !== "") {
-    if (turnStackId !== undefined && explicitStackId !== turnStackId) {
+    const diverges = turnStackId !== explicitStackId;
+    if (diverges && turnStackId !== undefined) {
       log.info("tool call overrides the turn's Stack", {
         tool: toolName,
         turnStackId,
         argumentStackId: explicitStackId,
       });
     }
-    return { args: { ...args, stackId: explicitStackId } };
+    return {
+      args: { ...args, stackId: explicitStackId },
+      // The same fact the record carries, in words the turn's output can show. Built
+      // here so the sentence and the record cannot end up describing different calls.
+      ...(diverges ? { notice: stackNotice(explicitStackId, turnStackId) } : {}),
+    };
   }
 
   // Nothing explicit and no link Stack: the one case with no source at all.
@@ -390,6 +405,20 @@ function resolveStackArgument(
   // supplies it. Blank counts here for the same reason the link does — `stackId: ""`
   // names no Stack, it just looks like it does.
   return { args: { ...args, stackId: turnStackId } };
+}
+
+/**
+ * What a divergent call says out loud, in one factual sentence.
+ *
+ * Both Stacks are named because the fact is the DIFFERENCE: "a foreign Stack was used"
+ * is what the old refusal told a human, and it is still the thing a person needs to know.
+ * With no session Stack there is none to name, and claiming one would describe a request
+ * that never happened — the argument was the only source, so only it is named.
+ */
+function stackNotice(effectiveStackId: string, turnStackId: string | undefined): string {
+  return turnStackId === undefined
+    ? `Ran on Stack ${effectiveStackId}; the session had no Stack.`
+    : `Ran on Stack ${effectiveStackId}, not the session's Stack ${turnStackId}.`;
 }
 
 let processLogger: Logger | undefined;
