@@ -729,9 +729,20 @@ The order the proxy applies is: an explicit `stackId` in the tool's arguments WI
 the link's Stack is the FALLBACK when that argument is absent or blank, and with
 neither the call is refused and nothing reaches the upstream. A call that overrides
 the turn's Stack is a choice, not a contradiction, so it is forwarded rather than
-refused — and it is not silent: one structured log record names the tool, the turn's
-Stack and the argument's Stack. This supersedes the earlier rule that refused any
-argument disagreeing with the link; nothing is refused for disagreeing now.
+refused — and it is not silent, in either of the two places a divergent call can be
+noticed. The person whose turn it was reads it in that turn's own output, under the
+answer:
+
+| The call ran on | What the chat window says |
+|---|---|
+| a Stack other than the link's | `Ran on Stack <argument's Stack>, not the session's Stack <link's Stack>.` |
+| a Stack the argument named, with no Stack in the link | `Ran on Stack <argument's Stack>; the session had no Stack.` |
+
+and an operator reading the log gets one structured record per overridden call,
+naming the tool, the turn's Stack and the argument's Stack. Nothing is shown when the
+argument names the link's Stack or when the argument is absent: neither is a
+divergence. This supersedes the earlier rule that refused any argument disagreeing
+with the link; nothing is refused for disagreeing now.
 
 ## Reaching an MCP server over HTTP
 
