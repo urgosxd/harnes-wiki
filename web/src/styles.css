@@ -195,6 +195,18 @@ body {
   margin-top: 18vh;
 }
 
+/* A factual line about the Stack a call used: quiet, not a warning. */
+.chat__stack-notice {
+  margin: 14px auto 0;
+  max-width: 760px;
+  padding: 8px 12px;
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
 .chat__error {
   display: flex;
   align-items: center;

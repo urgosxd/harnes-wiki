@@ -31,6 +31,17 @@ export interface ChatState {
   error: string | null;
   /** True when the last failure is worth retrying. */
   canRetry: boolean;
+  /**
+   * Which Stack a tool call actually ran on, when it was not the Stack the session was
+   * opened with.
+   *
+   * The server words the sentence and this only carries it: it names both Stacks, so a
+   * person can see that a foreign Stack was read in this turn. It outlives the reload
+   * that ends the turn — `loaded` keeps it — because a remark that vanished when the
+   * answer arrived would be no more visible than the log record it replaces. It belongs
+   * to one turn: the next `send`, or another conversation, clears it.
+   */
+  stackNotices: string[];
   runId: string | null;
 }
 
@@ -42,6 +53,7 @@ export const initialChatState: ChatState = {
   pendingUserText: null,
   error: null,
   canRetry: false,
+  stackNotices: [],
   runId: null,
 };
 
@@ -54,6 +66,7 @@ export type ChatAction =
   | { type: "skill"; name: string }
   | { type: "tool_started"; tool: string; label: string }
   | { type: "tool_finished"; tool: string; label: string; isError: boolean }
+  | { type: "stack_notice"; text: string }
   | { type: "finished"; outcome: string }
   | { type: "failed"; message: string; retryable: boolean }
   | { type: "reset" };
@@ -67,7 +80,9 @@ export type ChatAction =
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
     case "loaded":
-      return { ...initialChatState, messages: action.messages };
+      // The Stack notice is kept: this reload happens the instant a turn ends, and the
+      // sentence has to survive it to be seen at all.
+      return { ...initialChatState, messages: action.messages, stackNotices: state.stackNotices };
 
     case "send":
       // The user bubble appears before the server answers, so the UI never looks
@@ -79,6 +94,8 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         canRetry: false,
         streamingText: "",
         activity: [],
+        // A notice describes the turn it arrived in, so the next turn starts clean.
+        stackNotices: [],
         pendingUserText: action.text,
         runId: null,
       };
@@ -160,6 +177,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
           position === index ? { ...item, done: true, failed: action.isError } : item,
         ),
       };
+    }
+
+    case "stack_notice": {
+      // One sentence per fact: the same call reported twice must not stack up on screen.
+      if (state.stackNotices.includes(action.text)) return state;
+      return { ...state, stackNotices: [...state.stackNotices, action.text] };
     }
 
     case "finished": {

@@ -141,6 +141,9 @@ export function useChat({ client, onToolResult }: UseChatOptions) {
                 label: frame.label,
                 isError: frame.isError,
               });
+              // A call that ran on another Stack says so in the turn's own output. The
+              // server already worded it, naming both Stacks; the client only shows it.
+              if (frame.notice) dispatch({ type: "stack_notice", text: frame.notice });
               break;
             case "tool_result":
               // The payload is handed out, not rendered: this hook owns the

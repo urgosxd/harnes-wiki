@@ -69,6 +69,20 @@ export function ChatWindow({
           <MessageList state={state} />
         )}
 
+        {/*
+          Which Stack a tool call actually ran on, when it was not the session's.
+
+          Here, in the turn's own output, because the point of the sentence is that a
+          person reads it: the server's log record is for an operator weeks later, and a
+          tool's result text never reaches this window. Rendered outside the thread/hint
+          choice above so it stays visible after the turn ends and the thread reloads.
+        */}
+        {state.stackNotices.map((notice) => (
+          <p key={notice} className="chat__stack-notice" role="status">
+            {notice}
+          </p>
+        ))}
+
         {state.error && (
           <div className="chat__error" role="alert">
             <span>{state.error}</span>
