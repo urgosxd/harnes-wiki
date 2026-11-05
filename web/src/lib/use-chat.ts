@@ -143,7 +143,11 @@ export function useChat({ client, onToolResult }: UseChatOptions) {
               });
               // A call that ran on another Stack says so in the turn's own output. The
               // server already worded it, naming both Stacks; the client only shows it.
-              if (frame.notice) dispatch({ type: "stack_notice", text: frame.notice });
+              // The conversation the run belongs to travels with it: this loop keeps
+              // draining after the user opens another thread, and the notice is only
+              // meaningful in the thread whose turn produced it.
+              if (frame.notice)
+                dispatch({ type: "stack_notice", conversationId, text: frame.notice });
               break;
             case "tool_result":
               // The payload is handed out, not rendered: this hook owns the

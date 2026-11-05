@@ -1,7 +1,13 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { App } from "./App.tsx";
-import { chatReducer, initialChatState, type ChatState } from "./lib/chat-reducer.ts";
+import { ChatWindow } from "./components/ChatWindow.tsx";
+import {
+  chatReducer,
+  initialChatState,
+  stackNoticesFor,
+  type ChatState,
+} from "./lib/chat-reducer.ts";
 import { parseChatFrame } from "./lib/sse.ts";
 
 /**
@@ -22,6 +28,9 @@ function run(actions: Parameters<typeof chatReducer>[1][], from: ChatState = ini
 }
 
 const NOTICE = "Ran on Stack stack-b, not the session's Stack stack-a.";
+/** Two conversations, so a notice can be attributed to the turn that produced it. */
+const A = "conv-a";
+const B = "conv-b";
 
 describe("the notice survives transport", () => {
   it("parses a finished-call frame that carries a notice, notice intact", () => {
@@ -50,37 +59,72 @@ describe("the notice outlives the turn", () => {
     // reload is what used to leave a mid-turn remark on a screen nobody was watching.
     const state = run([
       { type: "send", text: "list the jobs" },
-      { type: "stack_notice", text: NOTICE },
+      { type: "stack_notice", conversationId: A, text: NOTICE },
       { type: "finished", outcome: "ok" },
       { type: "loaded", messages: [{ id: "m0", role: "assistant", text: "done" }] },
     ]);
-    expect(state.stackNotices).toEqual([NOTICE]);
+    expect(stackNoticesFor(state, A)).toEqual([NOTICE]);
   });
 
   it("belongs to one turn only", () => {
     const after = run([
       { type: "send", text: "first" },
-      { type: "stack_notice", text: NOTICE },
+      { type: "stack_notice", conversationId: A, text: NOTICE },
       { type: "finished", outcome: "ok" },
       { type: "send", text: "second" },
     ]);
-    expect(after.stackNotices).toEqual([]);
+    expect(stackNoticesFor(after, A)).toEqual([]);
   });
 
   it("is dropped when another conversation is opened", () => {
     const after = run([
-      { type: "stack_notice", text: NOTICE },
+      { type: "stack_notice", conversationId: A, text: NOTICE },
       { type: "reset" },
     ]);
-    expect(after.stackNotices).toEqual([]);
+    expect(stackNoticesFor(after, A)).toEqual([]);
   });
 
   it("says it once however many times the same call is reported", () => {
     const after = run([
-      { type: "stack_notice", text: NOTICE },
-      { type: "stack_notice", text: NOTICE },
+      { type: "stack_notice", conversationId: A, text: NOTICE },
+      { type: "stack_notice", conversationId: A, text: NOTICE },
     ]);
-    expect(after.stackNotices).toEqual([NOTICE]);
+    expect(stackNoticesFor(after, A)).toEqual([NOTICE]);
+  });
+});
+
+/**
+ * A notice is about ONE turn in ONE conversation, and the thread on screen is the only
+ * thing a person can be reading.
+ *
+ * `openConversation` aborts the previous stream and resets the state, but the frame loop
+ * of the run it aborted keeps draining into whatever state exists when its next frame
+ * arrives, and `loaded` now keeps notices. Without a stamp, a sentence about a tool call
+ * made in conversation A could therefore be painted in conversation B — a claim about a
+ * turn that never happened there.
+ */
+describe("a notice is only shown in the conversation that produced it", () => {
+  it("is not shown in another conversation's thread", () => {
+    const state = run([
+      { type: "send", text: "list the jobs" },
+      { type: "stack_notice", conversationId: A, text: NOTICE },
+      // The user opens B: abort, reset, then the reload of B's thread.
+      { type: "reset" },
+      { type: "loaded", messages: [{ id: "m0", role: "assistant", text: "older answer" }] },
+      // A frame from A's still-draining run lands here.
+      { type: "stack_notice", conversationId: A, text: NOTICE },
+    ]);
+    expect(stackNoticesFor(state, B)).toEqual([]);
+  });
+
+  it("is shown in the conversation it arrived in", () => {
+    const state = run([
+      { type: "stack_notice", conversationId: A, text: NOTICE },
+      { type: "loaded", messages: [] },
+    ]);
+    expect(stackNoticesFor(state, A)).toEqual([NOTICE]);
+    // With no conversation on screen there is nothing to attribute, so nothing is shown.
+    expect(stackNoticesFor(state, null)).toEqual([]);
   });
 });
 
@@ -115,6 +159,70 @@ function stubApi(turnFrames: string[]) {
   );
 }
 
+/**
+ * A turn whose frames the TEST pushes.
+ *
+ * `openConversation` aborts the previous stream, but a read that was already in flight
+ * can still deliver frames afterwards — that is the race this file's attribution test
+ * reproduces. A stub that answers every frame at once cannot express it.
+ */
+function stubStreamingTurn(): { readonly opened: boolean; push(frame: string): void } {
+  const encoder = new TextEncoder();
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+  const stream$ = { opened: false };
+
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: unknown, init: RequestInit = {}) => {
+      const url = String(input);
+      const method = (init.method ?? "GET").toUpperCase();
+      if (url.endsWith("/me")) {
+        return new Response(JSON.stringify({ id: "alice", displayName: "alice" }));
+      }
+      if (method === "POST" && url.endsWith("/conversations")) {
+        return new Response(JSON.stringify({ id: A, title: "hola", createdAt: "", updatedAt: "" }), {
+          status: 201,
+        });
+      }
+      if (url.endsWith(`/conversations/${A}/turns`)) {
+        stream$.opened = true;
+        const body = new ReadableStream<Uint8Array>({
+          start: (c) => {
+            controller = c;
+          },
+        });
+        return new Response(body, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      if (url.endsWith(`/conversations/${B}`)) {
+        return new Response(
+          JSON.stringify({
+            id: B,
+            title: "older",
+            createdAt: "",
+            updatedAt: "",
+            messages: [{ id: "m0", role: "assistant", text: "older answer" }],
+          }),
+        );
+      }
+      return new Response(
+        JSON.stringify({ conversations: [{ id: B, title: "older", createdAt: "", updatedAt: "" }] }),
+      );
+    }),
+  );
+
+  return {
+    get opened() {
+      return stream$.opened;
+    },
+    push(frame: string) {
+      controller?.enqueue(encoder.encode(`data: ${frame}\n\n`));
+    },
+  };
+}
+
 /** Open the chat, send one message and wait for the turn to finish. */
 async function sendOneMessage(turnFrames: string[]): Promise<void> {
   window.history.replaceState(null, "", "/?user=alice&stackId=stack-a");
@@ -125,6 +233,36 @@ async function sendOneMessage(turnFrames: string[]): Promise<void> {
   fireEvent.click(screen.getByText("Send"));
   await waitFor(() => expect(screen.queryByText("Stop")).toBeNull());
 }
+
+function mountWindow(state: ChatState, conversationId: string | null) {
+  return render(
+    <ChatWindow
+      state={state}
+      conversationId={conversationId}
+      loadingThread={false}
+      onSend={() => {}}
+      onRetry={() => {}}
+      onStop={() => {}}
+      onOpenSidebar={() => {}}
+    />,
+  );
+}
+
+describe("the window paints only the notice of the thread it is showing", () => {
+  it("paints the notice of the displayed conversation", () => {
+    const state = run([{ type: "stack_notice", conversationId: A, text: NOTICE }]);
+    const { container } = mountWindow(state, A);
+    expect(container.querySelectorAll(".chat__stack-notice")).toHaveLength(1);
+    expect(screen.getByText(NOTICE)).toBeDefined();
+  });
+
+  it("paints nothing for a notice stamped with another conversation", () => {
+    const state = run([{ type: "stack_notice", conversationId: A, text: NOTICE }]);
+    const { container } = mountWindow(state, B);
+    expect(container.querySelectorAll(".chat__stack-notice")).toHaveLength(0);
+    expect(screen.queryByText(NOTICE)).toBeNull();
+  });
+});
 
 function finished(extra: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -152,6 +290,30 @@ describe("App shows the divergent Stack in the turn's output", () => {
   it("shows the sentence the server sent", async () => {
     await sendOneMessage([STARTED, finished({ notice: NOTICE }), DONE]);
     await waitFor(() => expect(screen.getByText(NOTICE)).toBeDefined());
+  });
+
+  it("never paints a late frame from conversation A in conversation B", async () => {
+    window.history.replaceState(null, "", "/?user=alice&stackId=stack-a");
+    const stream = stubStreamingTurn();
+    render(<App />);
+    await screen.findByText("New chat");
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "list the jobs" } });
+    fireEvent.click(screen.getByText("Send"));
+    await waitFor(() => expect(stream.opened).toBe(true));
+
+    // The user opens the other conversation while A's run is still on the wire.
+    fireEvent.click(await screen.findByText("older"));
+    await screen.findByText("older answer");
+
+    // A's next frames arrive anyway. The activity row is the landing proof: it is reduced
+    // into the very same state (its own attribution is a pre-existing gap, out of scope
+    // here), so if the notice were painted this is the state it would be painted from.
+    stream.push(STARTED);
+    stream.push(finished({ notice: NOTICE }));
+    await screen.findByText("ingest jobs list");
+
+    expect(screen.queryByText(NOTICE)).toBeNull();
+    expect(document.querySelectorAll(".chat__stack-notice")).toHaveLength(0);
   });
 
   it("shows nothing when the call was not a divergence", async () => {

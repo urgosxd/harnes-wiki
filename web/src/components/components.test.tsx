@@ -125,6 +125,7 @@ describe("MessageList", () => {
 describe("ChatWindow", () => {
   const base = {
     state: state(),
+    conversationId: "c1",
     loadingThread: false,
     onSend: () => {},
     onRetry: () => {},

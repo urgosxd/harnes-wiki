@@ -41,8 +41,27 @@ export interface ChatState {
    * answer arrived would be no more visible than the log record it replaces. It belongs
    * to one turn: the next `send`, or another conversation, clears it.
    */
-  stackNotices: string[];
+  stackNotices: StackNotice[];
   runId: string | null;
+}
+
+/**
+ * One divergent Stack, in the words the server chose, stamped with the conversation
+ * whose turn produced it.
+ *
+ * The stamp is what keeps a late frame out of the wrong thread. `openConversation`
+ * aborts the previous run and resets the state, but a read that was already in flight
+ * can still deliver frames afterwards; `loaded` now keeps notices, so an unstamped
+ * sentence about a call made in conversation A could appear in conversation B — a claim
+ * about a turn that never happened there. The conversation id therefore travels with
+ * the sentence, and the window paints only the notices of the thread it is showing
+ * (`stackNoticesFor`).
+ */
+export interface StackNotice {
+  /** The conversation the turn ran in. Only that thread may show the sentence. */
+  conversationId: string;
+  /** The server's sentence, shown verbatim. */
+  text: string;
 }
 
 export const initialChatState: ChatState = {
@@ -66,7 +85,7 @@ export type ChatAction =
   | { type: "skill"; name: string }
   | { type: "tool_started"; tool: string; label: string }
   | { type: "tool_finished"; tool: string; label: string; isError: boolean }
-  | { type: "stack_notice"; text: string }
+  | { type: "stack_notice"; conversationId: string; text: string }
   | { type: "finished"; outcome: string }
   | { type: "failed"; message: string; retryable: boolean }
   | { type: "reset" };
@@ -181,8 +200,19 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 
     case "stack_notice": {
       // One sentence per fact: the same call reported twice must not stack up on screen.
-      if (state.stackNotices.includes(action.text)) return state;
-      return { ...state, stackNotices: [...state.stackNotices, action.text] };
+      // The conversation is part of the fact — the same words in two threads are two
+      // different turns, and only the one that ran may show them.
+      const duplicate = state.stackNotices.some(
+        (notice) => notice.conversationId === action.conversationId && notice.text === action.text,
+      );
+      if (duplicate) return state;
+      return {
+        ...state,
+        stackNotices: [
+          ...state.stackNotices,
+          { conversationId: action.conversationId, text: action.text },
+        ],
+      };
     }
 
     case "finished": {
@@ -240,4 +270,20 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     default:
       return state;
   }
+}
+
+/**
+ * The notices to paint for the conversation on screen.
+ *
+ * It takes the id the window is actually displaying — `useChat`'s `activeId`, the same
+ * value the thread was loaded with — because that is the only authority on which
+ * conversation the person is looking at. A notice stamped with any other conversation
+ * belongs to a turn that is no longer displayed and is not shown; with no conversation
+ * on screen there is nothing to attribute and nothing is shown either.
+ */
+export function stackNoticesFor(state: ChatState, conversationId: string | null): string[] {
+  if (conversationId === null) return [];
+  return state.stackNotices
+    .filter((notice) => notice.conversationId === conversationId)
+    .map((notice) => notice.text);
 }

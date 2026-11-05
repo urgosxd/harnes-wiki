@@ -184,6 +184,7 @@ function Chat({
 
       <ChatWindow
         state={chat.state}
+        conversationId={chat.activeId}
         loadingThread={chat.loadingThread}
         onSend={(text) => void chat.send(text)}
         onRetry={chat.retry}
