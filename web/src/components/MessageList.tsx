@@ -1,9 +1,15 @@
-import { useEffect, useRef } from "react";
+import { useRef, type RefObject } from "react";
 import type { ChatState } from "../lib/chat-reducer.ts";
+import { useStickToBottom } from "../lib/stick-to-bottom.ts";
 import { ActivityList } from "./ActivityList.tsx";
 
 export interface MessageListProps {
   state: ChatState;
+  /**
+   * The scrolling container that holds this transcript. The list needs it to
+   * tell a reader who is following the answer from one who scrolled up to read.
+   */
+  scrollRef: RefObject<HTMLElement | null>;
 }
 
 /**
@@ -12,18 +18,20 @@ export interface MessageListProps {
  * Text is rendered as text, never as HTML: model output is untrusted input and
  * interpreting it as markup is how a chat window becomes an injection vector.
  */
-export function MessageList({ state }: MessageListProps) {
+export function MessageList({ state, scrollRef }: MessageListProps) {
   const endRef = useRef<HTMLDivElement | null>(null);
   const streaming = state.status === "streaming";
 
-  // Follow the answer as it grows, but only while streaming: scrolling on every
-  // render would fight a user who scrolled up to read.
-  useEffect(() => {
-    if (!streaming) return;
-    // Optional call: a document without layout (tests, some embedded webviews)
-    // has no scrollIntoView, and a missing scroller must not break the answer.
-    endRef.current?.scrollIntoView?.({ block: "end" });
-  }, [state.streamingText, streaming]);
+  // Follow the answer as it grows, but only while the reader is at the bottom:
+  // scrolling on every streamed token would fight a user who scrolled up to
+  // read, and a newly sent message pulls the view back so it is never off-screen.
+  useStickToBottom(scrollRef, endRef, {
+    streaming,
+    contentKey: state.streamingText,
+    // The pending bubble is a message the reader just sent: count it, or their
+    // own turn could appear off-screen.
+    messageCount: state.messages.length + (state.pendingUserText !== null ? 1 : 0),
+  });
 
   return (
     <div className="messages">

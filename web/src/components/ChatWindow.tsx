@@ -21,6 +21,9 @@ export function ChatWindow({
 }: ChatWindowProps) {
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  // The transcript's scroll container: owning it here lets the message list tell
+  // a reader following the answer from one who scrolled up to read.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
   const streaming = state.status === "streaming";
   const empty = state.messages.length === 0 && state.pendingUserText === null && !loadingThread;
 
@@ -60,13 +63,13 @@ export function ChatWindow({
         <span className="chat__title">Chat</span>
       </header>
 
-      <div className="chat__scroll">
+      <div className="chat__scroll" ref={scrollRef}>
         {loadingThread ? (
           <p className="chat__hint">Loading conversation…</p>
         ) : empty ? (
           <p className="chat__hint">Ask anything to start.</p>
         ) : (
-          <MessageList state={state} />
+          <MessageList state={state} scrollRef={scrollRef} />
         )}
 
         {state.error && (
