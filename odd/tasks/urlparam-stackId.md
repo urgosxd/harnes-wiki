@@ -1,4 +1,6 @@
-# feat/urlparam-stackId — the URL's stackId as default, an explicit choice as override
+# Feature: urlparam-stackId
+
+The URL's stackId as default, an explicit choice as override.
 
 Scope: the stackId resolution order for tool calls, and the ingest form's stackId prefill plus selection.
 Branch: feat/urlparam-stackId.
