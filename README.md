@@ -51,6 +51,7 @@ Under `AUTH_MODE=roster`, `x-dev-token` is what identifies the caller and a clai
 | `POST` | `/ingest/jobs` | Start an async ingest job; `202` with a job id |
 | `GET` | `/ingest/jobs` | Retained jobs, newest first |
 | `GET` | `/ingest/jobs/:id` | One job snapshot; the poller's only read |
+| `GET` | `/stacks` | The Stack ids the service lists, so a client can offer a choice. Read-only |
 
 `POST /conversations/:id/turns` **requires** an `Idempotency-Key` header. Responses:
 
@@ -224,8 +225,9 @@ list. A name that never appears there still opens the product; it simply has no
 tools.
 
 `MCP_DEFAULT_STACK_ID` is **deprecated and ignored**. The Stack comes from the
-request link, not from provisioning: setting the variable still works, prints one
-deprecation warning, and changes nothing (see **Which Stack the agent reads**).
+request link (or an explicit tool argument), not from provisioning: setting the
+variable still works, prints one deprecation warning, and changes nothing (see
+**Which Stack the agent reads**).
 
 ## Ingest jobs (external service)
 
@@ -266,18 +268,33 @@ The ingest surface is tenant-scoped, and the tenant is the `stackId` in the URL:
 http://localhost:8088/?user=alice&stackId=<stack-id>
 ```
 
-That parameter is the **only** source. There is no Stack environment variable,
-nothing is injected at build time, there is no picker in the ingest view, and no
-default is assumed when it is absent — each of those would let one tenant's jobs be
-read under another tenant's name. It is read once, at mount, from
+Every READ — the document list, the job list, an upload — takes that parameter and
+nothing else. There is no Stack environment variable, nothing is injected at build
+time, and no default is assumed when it is absent; each of those would let one
+tenant's jobs be read under another tenant's name. It is read once, at mount, from
 `location.search`, right next to `?user=`; it is not stored in `localStorage`, not
 remembered between visits, and not accepted from a header or a cookie, so a reload
 without it is blocked exactly like a first visit.
 
+A WRITE resolves its Stack in one place, in the same order the agent's tools use: the
+Stack chosen in the panel wins, and the link's is the fallback. The panel's **Stack**
+control is filled from `GET /stacks` — `200 {"stackIds": string[]}`, ids only, and
+`{"stackIds": []}` when the service lists none; the same auth as the routes beside
+it, additive and read-only, publishing the listing the create path already validates
+against — and it is preselected with the link's value, so a user who does not choose
+keeps exactly the old behavior. A chosen Stack also scopes the poll of the job that
+choice started, because a job created in one Stack cannot be followed in another.
+
 | Link | Ingest surface |
 |---|---|
-| `?user=alice&stackId=<stack-id>` | The job list, the poll and every create carry that Stack |
-| No `stackId`, or empty / whitespace-only | States the missing parameter and issues no request at all — no list, no poll, no create |
+| `?user=alice&stackId=<stack-id>` | The reads and the prefill carry that Stack, and so does every write while the control is left alone |
+| No `stackId`, or empty / whitespace-only | States the missing parameter and issues no READ at all — no list, no upload, no poll. A Stack chosen in the control can still start an ingest |
+| Neither the link nor the control names one | No request at all, and the notice below is on screen |
+
+That last state is named, never guessed: with nothing resolved the panel says "This
+ingest names no Stack: no Stack was chosen for it and the link names none. Choose a
+Stack, or open a link that ends in ?stackId=<stack-id>." and sends nothing — a
+request into a tenant nobody named is worse than no request.
 
 The shape is checked before anything is sent: a value that is empty after trimming
 is refused without a request. Whether the Stack EXISTS is the service's answer, and
@@ -285,6 +302,12 @@ it is shown as it arrives — `400 invalid_stack_id` for a malformed id, `404
 stack_not_found` (or the agent's `unknown_stack`) for an id the service does not
 know. A rejected Stack is a visible failure with no retry loop, because retrying the
 same rejected value can only produce the same answer.
+
+Two consequences of that split are worth knowing in advance. The **Recent** list stays
+scoped to the link's Stack, so a job started in a Stack the link does not name shows
+its own progress in the detail pane and is not listed there. And a failed `GET
+/stacks` degrades silently to the link's value instead of blocking: the control then
+offers only that Stack, and the write path is unaffected.
 
 Chat is unaffected: a link without `stackId` still opens the product. Only the
 ingest surface is closed, and that is the point — an unscoped read would show one
@@ -696,12 +719,19 @@ It is a SELECTION of which Stack to read, never an authorisation — no entitlem
 derived from it, nothing is stored with the conversation, and under `AUTH_MODE=open`
 any caller could set it, just as any caller can already claim any `x-user-id`.
 
-A link without `stackId` therefore cannot use the wiki tools at all: Stack-scoped
-tools fail closed with a visible error naming the link form, because the alternative
-— calling with no Stack — reads whatever tenant the remote endpoint happens to be
-bound to. That is why the provisioning variable above is gone rather than defaulted.
-Anything the model explicitly asks for that disagrees with the link's Stack is
-refused the same way, naming both Stacks instead of silently rewriting one.
+A link without `stackId` therefore cannot use the wiki tools BY FALLBACK: a
+Stack-scoped call that names no Stack fails closed with a visible error naming the
+link form, because the alternative — calling with no Stack — reads whatever tenant
+the remote endpoint happens to be bound to. That is why the provisioning variable
+above is gone rather than defaulted.
+
+The order the proxy applies is: an explicit `stackId` in the tool's arguments WINS,
+the link's Stack is the FALLBACK when that argument is absent or blank, and with
+neither the call is refused and nothing reaches the upstream. A call that overrides
+the turn's Stack is a choice, not a contradiction, so it is forwarded rather than
+refused — and it is not silent: one structured log record names the tool, the turn's
+Stack and the argument's Stack. This supersedes the earlier rule that refused any
+argument disagreeing with the link; nothing is refused for disagreeing now.
 
 ## Reaching an MCP server over HTTP
 
