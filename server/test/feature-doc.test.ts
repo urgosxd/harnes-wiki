@@ -124,9 +124,10 @@ if (inCheckout) {
 
   test("every task-shaped table is evaluated, so a new shape cannot slip in unread", () => {
     // The rules above only ever read five-column tables. Measured on this corpus, exactly
-    // one document has one (multitenant-stackId.md, 29 rows) and the other four contribute
-    // nothing — which is fine while it is TRUE and dangerous the moment a table that does
-    // record commits appears in a shape the parser skips silently.
+    // two documents have one (multitenant-stackId.md, 33 rows, and urlparam-stackId.md, 5
+    // rows) and the rest contribute nothing — which is fine while it is TRUE and dangerous
+    // the moment a table that does record commits appears in a shape the parser skips
+    // silently.
     //
     // So: any table whose header names both a task id in front and a commit at the end is
     // a task table, and must be evaluated. The legacy logs escape on the substance — their
@@ -153,9 +154,9 @@ if (inCheckout) {
 
     assert.deepEqual(
       evaluatedDocuments,
-      ["multitenant-stackId.md"],
-      "one document carries task rows today; a second one means the rules reach further " +
-        "than the spec says and the spec must be restated",
+      ["multitenant-stackId.md", "urlparam-stackId.md"],
+      "two documents carry task rows today; a third one means the rules reach further " +
+        "than this list says and the spec must be restated",
     );
   });
 } else {
