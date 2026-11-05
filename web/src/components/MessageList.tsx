@@ -59,7 +59,7 @@ export function MessageList({ state, scrollRef }: MessageListProps) {
       {streaming && (
         <article className="message message--assistant">
           {state.streamingText ? (
-            <div className="message__text">
+            <div className="message__text message__text--streaming">
               <Markdown text={state.streamingText} />
               <span className="caret" aria-hidden="true" />
             </div>

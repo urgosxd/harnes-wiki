@@ -15,8 +15,8 @@ export interface MarkdownProps {
  *
  * Untrusted input: this composes React elements from the markdown tree and
  * nothing else. There is no `rehype-raw`, no `allowDangerousHtml` and no
- * `dangerouslySetInnerHTML`, so raw HTML in a model answer is dropped instead
- * of being interpreted as markup.
+ * `dangerouslySetInnerHTML`, so raw HTML in a model answer is shown as inert
+ * text instead of being interpreted as markup.
  *
  * Memoised because the answer is re-rendered on every streamed token: with the
  * same text this returns the previous tree and never re-parses the markdown.

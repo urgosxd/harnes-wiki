@@ -368,6 +368,19 @@ body {
   color: var(--text-dim);
 }
 
+/* While an answer is still streaming, the caret span that marks it has to trail
+   the last character. A markdown answer is a sequence of block elements, so a
+   block-level last paragraph puts the caret on a line of its own; flagging the
+   streaming body lets the last paragraph ride inline while the tokens arrive,
+   and the caret then sits right after the text. The caret is that body's last
+   child, so the paragraph is selected as the element before it: `:last-child`
+   would never match a paragraph here. A `pre` or `table` as the last block
+   keeps the old placement on purpose, because a caret inside a code block or a
+   table would be worse. */
+.message__text--streaming > p:nth-last-child(2) {
+  display: inline;
+}
+
 .message__thinking {
   display: flex;
   gap: 5px;

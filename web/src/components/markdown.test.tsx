@@ -189,6 +189,39 @@ describe("streaming: half-written markdown still renders", () => {
     expect(container.querySelector("pre code")?.textContent).toContain("const x = 1;");
     // The blinking caret that marks a live answer is still there.
     expect(container.querySelector(".caret")).not.toBeNull();
+
+    // The live body is flagged as streaming, and the caret is its last child.
+    // jsdom has no layout, so nothing here can assert which rendered line the
+    // caret lands on: these assertions pin the class and the sibling structure
+    // that the stylesheet rule in styles.css targets, not a visual outcome.
+    const body = container.querySelector(".message--assistant .message__text--streaming");
+    expect(body).not.toBeNull();
+    const children = body === null ? [] : [...body.children];
+    const caret = children[children.length - 1];
+    expect(caret?.classList.contains("caret")).toBe(true);
+    expect(caret?.getAttribute("aria-hidden")).toBe("true");
+    // The element before the caret is the last markdown block, the unterminated
+    // fence this case streams; a `pre` keeps its old placement on purpose.
+    expect(caret?.previousElementSibling?.tagName).toBe("PRE");
+  });
+
+  it("keeps the caret trailing the last paragraph of a streaming answer", () => {
+    const { container } = renderStreaming("First point.\n\nSecond point.");
+
+    const body = container.querySelector(".message--assistant .message__text--streaming");
+    expect(body).not.toBeNull();
+    const children = body === null ? [] : [...body.children];
+    const caret = children[children.length - 1];
+    expect(caret?.classList.contains("caret")).toBe(true);
+    // The trailing paragraph is the block the stylesheet makes inline, so it has
+    // to be the element immediately before the caret. The caret span is the
+    // body's last child, which is why the rule cannot use `p:last-child`.
+    const trailing = children[children.length - 2];
+    expect(trailing?.tagName).toBe("P");
+    expect(trailing?.textContent).toBe("Second point.");
+    expect(caret?.previousElementSibling).toBe(trailing);
+    // A `p` that is the body's last child does not exist: the caret is.
+    expect(container.querySelector(".message__text--streaming > p:last-child")).toBeNull();
   });
 
   it("renders a half-written table without throwing or losing text", () => {
