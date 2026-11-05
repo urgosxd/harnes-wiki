@@ -1,17 +1,20 @@
 /**
- * Where the tenant comes from, and what a link is allowed to say about it.
+ * Where the Stack comes from, and what a link is allowed to say about it.
  *
  * ## The decision this file encodes
  *
  * The Stack an ingest belongs to is the `stackId` in the link. Full stop. There is
  * no env var, no build-time config, no localStorage, no header, no cookie and no
- * remembered previous value: opening `?user=alice&stackId=<id>` is what scopes a
- * session to a tenant, and a reload without the parameter is blocked exactly like a
+ * remembered previous value: opening `?user=alice&stackId=<id>` is what puts a
+ * session on a Stack, and a reload without the parameter is blocked exactly like a
  * first visit would be.
  *
- * That is deliberate rather than convenient. A remembered or defaulted Stack would
- * silently attach one tenant's reads to another's, and a cross-tenant read is not a
- * bug you notice — it looks like an empty list, or worse, a full one.
+ * That is deliberate rather than convenient. A Stack is a selection, not a boundary:
+ * the link says which one this session works against, and a caller may enumerate the
+ * available Stacks (`list_stacks`) and pick another. Which is why a remembered or
+ * defaulted Stack is the worse failure: it would silently attach one Stack's reads
+ * to another's, and a misrouted read is not a bug you notice — it looks like an
+ * empty list, or worse, a full one.
  *
  * ## Why this is a shape check and nothing more
  *
@@ -38,11 +41,11 @@ export type StackIdResolution =
   | { ok: false; problem: "missing" };
 
 /**
- * Read the tenant Stack from a query string like `location.search`.
+ * Read the link's `stackId` from a query string like `location.search`.
  *
- * Absent, empty and whitespace-only are the same fact — no tenant — and all three
- * are reported as `missing`, because a value of spaces would otherwise travel to the
- * service as a Stack id that is not one.
+ * Absent, empty and whitespace-only are the same fact — no Stack in the link — and
+ * all three are reported as `missing`, because a value of spaces would otherwise
+ * travel to the service as a Stack id that is not one.
  *
  * Values are trimmed: an id copied out of a chat window arrives with whitespace
  * often enough that `?stackId=<id>%0A` would otherwise be a different Stack.

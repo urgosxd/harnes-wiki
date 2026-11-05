@@ -55,7 +55,7 @@ S13 (scope guard). No hard gate on the chat surface in this unit: without a `sta
 
 S15 (B1, the scope gate — binding, and the reason it is not a heuristic). A tool is Stack-scoped **iff** its published schema is unreadable or of unknown shape, OR it is a readable flat object whose `properties` include `stackId`. It is NOT Stack-scoped **only** when the schema is a readable flat object with `properties` present that does not include `stackId`. Absent `properties`, `additionalProperties: true`, `allOf`/`anyOf`/`oneOf`/`$ref`, and anything nested or composed are all UNKNOWN ⇒ scoped. A `stackId` declared under `properties` at ANY depth counts as declaring it — a filter object is the obvious shape — and the scan is bounded by a depth cap with a visited guard, where "the cap stopped me" is UNKNOWN, never "there is none". The argument for unknown-is-scoped is PARITY: the baseline injected a Stack into every call without reading the schema, so this rule can only narrow the read scope relative to that baseline, never widen it.
 
-S16 (A1, the name rule — binding). A tool is Stack-scoped **iff** (a) its schema is unreadable or of unknown shape, OR (b) its schema declares `stackId`, OR (c) its name is in `STACK_TOOLS`, the constant this repository already maintains at `server/scripts/provision-mcp.mjs:127`. Clause (c) is not new knowledge about another service: that constant is the thing that already GRANTS those tools at provisioning time. `list_stacks` is the case that needs it — it reads a Stack but publishes no `stackId`, so the schema rules alone called it unscoped, and an unscoped listing exposes other tenants' Stack inventory. With a context it now receives a `stackId` its schema does not declare; the baseline did exactly that in production, and if the upstream ever rejects it the tool fails visibly instead of reading unscoped.
+S16 (A1, the name rule — binding). A tool is Stack-scoped **iff** (a) its schema is unreadable or of unknown shape, OR (b) its schema declares `stackId`, OR (c) its name is in `STACK_TOOLS`, the constant this repository already maintains at `server/scripts/provision-mcp.mjs:127`. Clause (c) is not new knowledge about another service: that constant is the thing that already GRANTS those tools at provisioning time. At host build `6b83fbad88169caf5a6b4e8c173c193465c849c8` (llmwiki `1.4.0-dev.20260919`, `127.0.0.1:4577/mcp`) all 14 tools declare a `stackId` property, `list_stacks` included, and `list_stacks` is the one that declares no `required` array — so rule (b) covers it today, and clause (c) is retained as defence in depth for a host build that stops declaring `stackId`. That is a measurement of that build, not a contract. A Stack is a selection, never an authorisation (S11), so an unscoped listing is not a disclosure to reason about: the listing enumerates the Stacks the endpoint can reach, which is intended at the endpoint/API-key boundary and is how a client offers a choice. With a context the tool now receives a `stackId` its schema does not require; the baseline did exactly that in production, and if upstream ever rejects it the tool fails visibly instead of reading unscoped.
 
 S17 (F2, ambiguous header — binding). A duplicated or joined `x-stack-id` means NO context, never the first value: Node joins two header lines into `"a, b"`, and slicing that string would let a malformed request choose a Stack. The array branch is kept and also yields no context. Guessing costs a cross-tenant read; refusing costs one visible tool error. The same pre-existing shape at `server/src/api/routes.ts:145` (idempotency key) and `server/src/http/auth.ts:82-85` is out of scope and reported, not fixed.
 
@@ -425,3 +425,26 @@ instances, every one of them green.
 - **DEAD-ASSERT**: one pending test could not fail while the bi-directional one passed, so
   it was deleted rather than kept as decoration; both mutations remain caught.
 
+L23 (requester's behaviour definition, binding). Verbatim: "el comportamieno es que tu
+como cliente, con la tool list_stacks tengas la lista de stacks, pero por default tu
+tendras un StackId via urlParameter"
+- (a) `list_stacks` enumeration is intended: it is how a client discovers the available
+  Stacks, not a disclosure defect. Measured ordinary calls return a multi-entry page with
+  exactly one entry flagged `isCurrent`.
+- (b) The default selection comes from the URL parameter — the `stackId` in the link. A
+  Stack is a selection, never an authorisation (S11).
+- (c) Surfaces must not be conflated, and on THIS branch the split is: the MCP tool
+  `list_stacks` is MCP-surface, consumed by an MCP client. `listStackIds()` in
+  `server/src/ingest/client.ts` issues a REST `GET /stacks` against `INGEST_API_BASE_URL`
+  and is called server-side only, from the pre-create existence check in
+  `server/src/api/ingest-routes.ts`. There is NO browser picker and no `/stacks` read in
+  `web/src` at this HEAD: `T15` superseded the picker, and `web/src/lib/stacks.ts` was
+  last touched by the commit that removed it (`490bef0`). Any selector fed by a Stack
+  listing lives on `feat/urlparam-stackId`, not here.
+- (d) These host facts describe `127.0.0.1:4577/mcp` at build
+  `6b83fbad88169caf5a6b4e8c173c193465c849c8`, `llmwiki 1.4.0-dev.20260919`, and nothing
+  else: multi-entry page, `count` 50 equals page size, 200 at `limit: 200`, no
+  `total`/`cursor`/`offset`/`hasMore`, exactly one `isCurrent`, other Stacks present in
+  ordinary calls; all 14 tools declare `stackId`, 13 list it in `inputSchema.required`,
+  `list_stacks` has no `required` array and its `stackId` description states it does not
+  narrow the listing.
