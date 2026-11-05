@@ -3,8 +3,10 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { App } from "./App.tsx";
 
 /**
- * The ingest surface makes NO request when the link names no Stack, and every request
- * when it does — measured at the App boundary rather than inside the hook.
+ * The ingest surface makes NO tenant-scoped request when the link names no Stack, and
+ * every request when it does — measured at the App boundary rather than inside the hook.
+ * The one exception in the blocked state is the unscoped `GET /stacks`, which exists to
+ * offer the choice (S3/S4) and therefore cannot require one.
  *
  * The hook-level tests prove the early returns; this proves what actually leaves the
  * browser, including the one failure mode a hook test cannot see: a request issued by
@@ -48,6 +50,14 @@ afterEach(() => {
 
 const ingestCalls = (seen: readonly Seen[]) => seen.filter((call) => call.url.includes("/ingest"));
 
+/**
+ * Every request a Stack scopes: the job list read, a poll, a create, and the document
+ * routes. `/stacks` is deliberately NOT in here — it is the unscoped list of choices,
+ * which is why it may be requested while nothing else can be.
+ */
+const tenantScopedCalls = (seen: readonly Seen[]) =>
+  seen.filter((call) => call.url.includes("/ingest") || call.url.includes("/documents"));
+
 describe("ingest scoping at the App boundary", () => {
   for (const [label, search] of [
     ["absent", "?user=alice"],
@@ -77,8 +87,14 @@ describe("ingest scoping at the App boundary", () => {
         fireEvent.click(screen.getByText("Back to chat"));
         expect(screen.queryAllByRole("textbox").length).toBeGreaterThan(0);
         expect(ingestCalls(seen)).toHaveLength(0);
-        // No picker, no implicit default.
-        expect(document.querySelectorAll("select")).toHaveLength(0);
+        // Nothing tenant-scoped was requested in this state, before or after the switch:
+        // no job list read, no poll, no create, no document route. A read with no Stack
+        // is not an empty list, it is a read of whichever tenant the endpoint is bound
+        // to, so zero is the only acceptable count. The unscoped `GET /stacks` is allowed
+        // and expected: it is the list of choices S4 tells the user to pick from, so it
+        // cannot itself depend on already knowing a Stack.
+        expect(tenantScopedCalls(seen)).toHaveLength(0);
+        expect(seen.some((call) => call.url.endsWith("/stacks"))).toBe(true);
       }
       // And no Stack header invented for a link that named none.
       expect(seen.every((call) => call.headers["x-stack-id"] === undefined)).toBe(true);
@@ -95,7 +111,10 @@ describe("ingest scoping at the App boundary", () => {
     await waitFor(() => expect(ingestCalls(seen).length).toBeGreaterThan(0));
 
     expect(ingestCalls(seen)[0]?.url).toContain("stackId=s-1");
-    expect(document.querySelectorAll("select")).toHaveLength(0);
+    // The link's Stack is what this surface uses, and the control shows it as the
+    // selected value: S3 adds the ability to ingest into another one, so the picker
+    // exists and its preselected Stack is still the link's.
+    expect((screen.getByLabelText("Stack") as HTMLSelectElement).value).toBe("s-1");
     // Every request carries the tenant, including the chat endpoints: the server needs it
     // on the turn, and this product does not vary the header per route.
     expect(seen.every((call) => call.headers["x-stack-id"] === "s-1")).toBe(true);

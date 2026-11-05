@@ -3,7 +3,13 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { IngestJobView } from "./IngestJobView.tsx";
 import { IngestJobsPanel } from "./IngestJobsPanel.tsx";
 import { ApiClient, ApiError } from "../lib/api.ts";
-import { noticeFor, noticeForOutcome, useIngest, type UseIngestResult } from "../lib/use-ingest.ts";
+import {
+  noticeFor,
+  noticeForOutcome,
+  UNRESOLVED_STACK_ID_NOTICE,
+  useIngest,
+  type UseIngestResult,
+} from "../lib/use-ingest.ts";
 import type { IngestJob } from "../lib/ingest.ts";
 
 /**
@@ -546,6 +552,9 @@ describe("noticeFor: 503 and 404 are different facts", () => {
 function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
   return {
     stackId: "0f8b1e42-1111-2222-3333-444455556666",
+    resolvedStackId: "0f8b1e42-1111-2222-3333-444455556666",
+    stackIds: ["0f8b1e42-1111-2222-3333-444455556666"],
+    chooseStackId: vi.fn(),
     blockedProblem: null,
     documents: [],
     uploading: false,
@@ -611,18 +620,25 @@ describe("IngestJobsPanel", () => {
     expect(screen.getByText("contrato.pdf")).toBeDefined();
     expect(screen.getByText("2 KB")).toBeDefined();
     fireEvent.click(screen.getByText("Ingest"));
-    expect(ingestDocument).toHaveBeenCalledWith("d1", { compile: true });
+    // Document ingestion has its own entry point here, so it uses the same chosen
+    // Stack as the source form instead of falling back to a second rule.
+    expect(ingestDocument).toHaveBeenCalledWith("d1", {
+      compile: true,
+      stackId: "0f8b1e42-1111-2222-3333-444455556666",
+    });
   });
 
-  it("renders only the blocked state when the link names no stack", () => {
-    // The link is the only source of the tenant, so a link without one has nothing
-    // to read and nothing to write. What must appear is the reason and a way back —
-    // NOT an upload box, a document list or a job list attached to an unknown Stack.
+  it("keeps the read surface off, and offers the Stack choice, when the link names no stack", () => {
+    // The link is the source of the tenant's READS, so a link without one has nothing
+    // to list: no upload box, no document list, no job list. What stays is the choice
+    // S3 asks for (a Stack picked here scopes the ingest started here) and a way back.
     const onClose = vi.fn();
     render(
       <IngestJobsPanel
         ingest={fakeIngest({
           stackId: null,
+          resolvedStackId: null,
+          stackIds: [],
           blockedProblem:
             "This page needs a stackId in the link. Open the link you were given, " +
             "which ends in ?user=<name>&stackId=<stack-id>.",
@@ -631,12 +647,17 @@ describe("IngestJobsPanel", () => {
       />,
     );
 
-    // The message names the parameter AND the shape the link must have: a user can
-    // only fix what is named.
-    const alert = screen.getByRole("alert");
-    expect(alert.textContent).toContain("stackId");
-    expect(alert.textContent).toContain("?user=<name>&stackId=<stack-id>");
+    // The read block names the parameter AND the shape the link must have: a user can
+    // only fix what is named. It is the one ANNOUNCED notice; the write block is the
+    // exact S4 copy, stated as the state of the control rather than announced twice.
+    const alerts = screen.getAllByRole("alert").map((node) => node.textContent);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toContain("?user=<name>&stackId=<stack-id>");
+    expect(screen.getByText(UNRESOLVED_STACK_ID_NOTICE)).toBeDefined();
 
+    // No Stack resolved means no form: there is nothing to submit into, so the panel
+    // offers nothing that would send a request nobody named.
+    expect(screen.getByLabelText("Stack")).toBeDefined();
     expect(screen.queryByLabelText("Choose a document")).toBeNull();
     expect(screen.queryByLabelText("Source")).toBeNull();
     expect(screen.queryByText("Start ingest")).toBeNull();
@@ -648,11 +669,12 @@ describe("IngestJobsPanel", () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it("shows the whole panel, and no picker, once the link names a stack", () => {
+  it("shows the whole panel, with the link's Stack preselected", () => {
     render(<IngestJobsPanel ingest={fakeIngest()} onClose={() => {}} />);
 
     expect(screen.queryByRole("alert")).toBeNull();
-    expect(screen.queryByLabelText("Stack")).toBeNull();
+    const select = screen.getByLabelText("Stack") as HTMLSelectElement;
+    expect(select.value).toBe("0f8b1e42-1111-2222-3333-444455556666");
     expect(screen.getByLabelText("Source")).toBeDefined();
     expect(screen.getByText("Start ingest")).toBeDefined();
     expect(screen.getByText("No documents uploaded yet.")).toBeDefined();
@@ -673,7 +695,10 @@ describe("IngestJobsPanel", () => {
     fireEvent.click(screen.getByLabelText(/Compile after ingesting/)); // turn it off
     fireEvent.click(screen.getByText("Start ingest"));
 
-    expect(start).toHaveBeenCalledWith("https://example.com/x", { compile: false });
+    expect(start).toHaveBeenCalledWith("https://example.com/x", {
+      compile: false,
+      stackId: "0f8b1e42-1111-2222-3333-444455556666",
+    });
   });
 
   it("will not start a blank source", () => {
@@ -811,7 +836,12 @@ describe("useIngest wiring", () => {
     render(<Probe client={client} stackId={null} onRender={(r) => (latest = r)} />);
 
     await waitFor(() => expect(latest).toBeDefined());
-    expect(seen).toEqual([]);
+    // The ONE request this state may make is `GET /stacks`, and it is not a read of a
+    // tenant: it is the list of choices the S4 copy tells the user to pick from, so it
+    // cannot itself require already knowing a Stack. Everything tenant-scoped stays at
+    // zero — a jobs or documents read with no Stack is somebody else's data.
+    const tenantRequests = () => seen.filter((url) => !url.endsWith("/stacks"));
+    expect(tenantRequests()).toEqual([]);
     expect(latest!.loadingList).toBe(false);
     expect(latest!.stackId).toBeNull();
     expect(latest!.blockedProblem).toContain("stackId");
@@ -824,7 +854,7 @@ describe("useIngest wiring", () => {
     await latest!.ingestDocument("d1");
     await latest!.refreshList();
     await latest!.listDocuments();
-    expect(seen).toEqual([]);
+    expect(tenantRequests()).toEqual([]);
   });
 
   it("reports a 404 as unknown", async () => {
@@ -853,5 +883,230 @@ describe("useIngest wiring", () => {
       () => expect(screen.getByTestId("notice").textContent).toBe("unknown"),
       { timeout: 5_000 },
     );
+  });
+});
+
+/**
+ * The Stack the ingest uses, driven end to end: the panel over the REAL hook and the
+ * REAL client, with only the transport stubbed.
+ *
+ * Nothing here asserts hook or component internals, because the two facts S3/S4 are
+ * about are both public: which Stack the control shows as selected (the rendered
+ * select) and which Stack the request carries (what the client serialized). A mocked
+ * `start()` would prove neither, and it is exactly the seam where the old bug — the
+ * link's value overwriting the choice — used to be invisible.
+ */
+
+const SETTLED_JOB: IngestJob = {
+  id: "job_1",
+  source: "https://example.com/a",
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z",
+  ingest: { status: "succeeded", stage: "committing", attempts: [] },
+  compile: { status: "succeeded", stage: "finalize", progress: null },
+};
+
+interface Wire {
+  method: string;
+  url: string;
+  body: Record<string, unknown> | undefined;
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+/**
+ * A real client over a recording transport. `answer` gets first refusal on each
+ * request, which is how one test makes `GET /stacks` list two Stacks and another
+ * makes it fail; everything else answers the settled-job shape so the poll loop
+ * ends on its first read instead of scheduling timers.
+ */
+function stackingClient(answer: (wire: Wire) => Response | undefined) {
+  const seen: Wire[] = [];
+  const fetchImpl = (async (url: string, init?: RequestInit) => {
+    const href = String(url);
+    const method = init?.method ?? "GET";
+    const wire: Wire = {
+      method,
+      url: href,
+      body:
+        typeof init?.body === "string"
+          ? (JSON.parse(init.body) as Record<string, unknown>)
+          : undefined,
+    };
+    seen.push(wire);
+
+    const custom = answer(wire);
+    if (custom) return custom;
+
+    if (method === "POST" && href.endsWith("/ingest/jobs")) {
+      return jsonResponse(
+        {
+          jobId: SETTLED_JOB.id,
+          status: "queued",
+          stage: "queued",
+          ingest: { status: "queued", attempts: [] },
+          compile: { status: "queued", progress: null },
+        },
+        202,
+      );
+    }
+    if (href.includes("/ingest/jobs/")) return jsonResponse(SETTLED_JOB);
+    if (href.endsWith("/documents")) return jsonResponse({ documents: [] });
+    return jsonResponse({ jobs: [] });
+  }) as unknown as typeof fetch;
+
+  const client = new ApiClient({
+    baseUrl: "/api",
+    headers: () => ({ "x-user-id": "alice" }),
+    fetchImpl,
+  });
+
+  return {
+    client,
+    seen,
+    posts: () => seen.filter((wire) => wire.method === "POST"),
+    polls: () => seen.filter((wire) => wire.method === "GET" && wire.url.includes("/ingest/jobs/")),
+  };
+}
+
+function StackPanel({ client, stackId }: { client: ApiClient; stackId: string | null }) {
+  const ingest = useIngest({ client, stackId });
+  return <IngestJobsPanel ingest={ingest} onClose={() => {}} />;
+}
+
+describe("IngestJobsPanel: the Stack the ingest uses", () => {
+  it("offers the known Stacks, preselects the link's, and submits the chosen one (S3)", async () => {
+    const { client, posts } = stackingClient(({ method, url }) =>
+      method === "GET" && url.endsWith("/stacks")
+        ? jsonResponse({ stackIds: ["A", "C"] })
+        : undefined,
+    );
+
+    render(<StackPanel client={client} stackId="A" />);
+
+    // Preselected from the link, before the list even answers: the panel is usable
+    // with what the link already says.
+    const select = screen.getByLabelText("Stack") as HTMLSelectElement;
+    expect(select.value).toBe("A");
+
+    await waitFor(() => expect(screen.getByRole("option", { name: "C" })).toBeDefined());
+
+    fireEvent.change(select, { target: { value: "C" } });
+    expect(select.value).toBe("C");
+
+    fireEvent.change(screen.getByLabelText("Source"), {
+      target: { value: "https://example.com/a" },
+    });
+    fireEvent.click(screen.getByText("Start ingest"));
+
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0]!.body).toEqual({
+      source: "https://example.com/a",
+      compile: true,
+      stackId: "C",
+    });
+  });
+
+  it("watches the job it started in the chosen Stack when the link names none (S3)", async () => {
+    // The known gap this pins: with no Stack in the link, the POST went out but the
+    // poll was still gated on the link, so the job never showed progress. A POST
+    // alone is not the behavior; the follow has to read the same tenant.
+    const { client, posts, polls } = stackingClient(({ method, url }) =>
+      method === "GET" && url.endsWith("/stacks")
+        ? jsonResponse({ stackIds: ["C"] })
+        : undefined,
+    );
+
+    render(<StackPanel client={client} stackId={null} />);
+
+    const select = screen.getByLabelText("Stack") as HTMLSelectElement;
+    expect(select.value).toBe("");
+    await waitFor(() => expect(screen.getByRole("option", { name: "C" })).toBeDefined());
+    fireEvent.change(select, { target: { value: "C" } });
+
+    // Choosing a Stack is what makes the write surface available: the panel stays
+    // visible and explains itself, it does not stay inert.
+    fireEvent.change(screen.getByLabelText("Source"), {
+      target: { value: "https://example.com/a" },
+    });
+    fireEvent.click(screen.getByText("Start ingest"));
+
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0]!.body).toEqual({
+      source: "https://example.com/a",
+      compile: true,
+      stackId: "C",
+    });
+
+    await waitFor(() => expect(polls().length).toBeGreaterThan(0));
+    expect(polls()[0]!.url).toContain("stackId=C");
+  });
+
+  it("still submits the link's Stack when the control is never touched (S2)", async () => {
+    const { client, posts } = stackingClient(({ method, url }) =>
+      method === "GET" && url.endsWith("/stacks")
+        ? jsonResponse({ stackIds: ["A", "C"] })
+        : undefined,
+    );
+
+    render(<StackPanel client={client} stackId="A" />);
+    await waitFor(() => expect(screen.getByRole("option", { name: "C" })).toBeDefined());
+
+    fireEvent.change(screen.getByLabelText("Source"), {
+      target: { value: "https://example.com/a" },
+    });
+    fireEvent.click(screen.getByText("Start ingest"));
+
+    await waitFor(() => expect(posts()).toHaveLength(1));
+    expect(posts()[0]!.body).toEqual({
+      source: "https://example.com/a",
+      compile: true,
+      stackId: "A",
+    });
+  });
+
+  it("states that no Stack is named, and starts nothing, when no Stack can be resolved (S4)", async () => {
+    const { client, posts } = stackingClient(({ method, url }) =>
+      method === "GET" && url.endsWith("/stacks")
+        ? jsonResponse({ stackIds: [] })
+        : undefined,
+    );
+
+    render(<StackPanel client={client} stackId={null} />);
+
+    await waitFor(() => expect(screen.getByLabelText("Stack")).toBeDefined());
+
+    // The exact copy, not a second sentence invented here: no Stack chosen and none
+    // in the link is the S4 case, and the panel says it rather than pretending.
+    expect(screen.getByText(UNRESOLVED_STACK_ID_NOTICE)).toBeDefined();
+
+    // Nothing to submit into, so nothing was submitted: the surface is not a dead
+    // end, it is honest about the missing tenant.
+    expect(screen.queryByText("Start ingest")).toBeNull();
+    expect(posts()).toEqual([]);
+  });
+
+  it("keeps the panel usable, with the link's Stack selectable, when GET /stacks fails (S3)", async () => {
+    const { client } = stackingClient(({ method, url }) =>
+      method === "GET" && url.endsWith("/stacks")
+        ? jsonResponse({ error: { code: "internal_error" } }, 500)
+        : undefined,
+    );
+
+    render(<StackPanel client={client} stackId="A" />);
+
+    // A list of choices that could not be read is not an ingest that cannot run: the
+    // link's Stack still names the right tenant, so it must remain the selected and
+    // available value instead of the control going blank.
+    const select = screen.getByLabelText("Stack") as HTMLSelectElement;
+    expect(select.value).toBe("A");
+    expect(screen.getByRole("option", { name: "A" })).toBeDefined();
+    expect(screen.getByLabelText("Source")).toBeDefined();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
