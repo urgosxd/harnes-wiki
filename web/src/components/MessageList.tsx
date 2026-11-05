@@ -2,6 +2,7 @@ import { useRef, type RefObject } from "react";
 import type { ChatState } from "../lib/chat-reducer.ts";
 import { useStickToBottom } from "../lib/stick-to-bottom.ts";
 import { ActivityList } from "./ActivityList.tsx";
+import { Markdown } from "./Markdown.tsx";
 
 export interface MessageListProps {
   state: ChatState;
@@ -15,8 +16,10 @@ export interface MessageListProps {
 /**
  * The transcript as the user sees it.
  *
- * Text is rendered as text, never as HTML: model output is untrusted input and
- * interpreting it as markup is how a chat window becomes an injection vector.
+ * An assistant answer is formatted content: it goes through `Markdown`, which
+ * composes React elements and never injects HTML, because model output is
+ * untrusted input and interpreting it as markup is how a chat window becomes an
+ * injection vector. A user bubble is what the reader typed, so it stays text.
  */
 export function MessageList({ state, scrollRef }: MessageListProps) {
   const endRef = useRef<HTMLDivElement | null>(null);
@@ -37,7 +40,9 @@ export function MessageList({ state, scrollRef }: MessageListProps) {
     <div className="messages">
       {state.messages.map((message) => (
         <article key={message.id} className={`message message--${message.role}`}>
-          <div className="message__text">{message.text}</div>
+          <div className="message__text">
+            {message.role === "assistant" ? <Markdown text={message.text} /> : message.text}
+          </div>
         </article>
       ))}
 
@@ -55,7 +60,7 @@ export function MessageList({ state, scrollRef }: MessageListProps) {
         <article className="message message--assistant">
           {state.streamingText ? (
             <div className="message__text">
-              {state.streamingText}
+              <Markdown text={state.streamingText} />
               <span className="caret" aria-hidden="true" />
             </div>
           ) : (
