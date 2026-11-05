@@ -56,6 +56,12 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 # Skills are product content: shipped in the image so the agent scope is immutable and versioned with the tag. Ownership is set here because the entrypoint only chowns /data.
 COPY skills/ /home/node/.agents/skills/
 RUN chown -R node:node /home/node/.agents/skills
+# Agent definitions are product content for the same reason: baked here so the agent
+# scope is immutable and versioned with the tag. Production keeps this copy instead of
+# mounting a repository path, because a bind mount would let an edit on the host change
+# what a running deployment does, and the tag would then no longer describe it.
+COPY agents/ /home/node/.agents/agents/
+RUN chown -R node:node /home/node/.agents/agents
 
 # su-exec lets the entrypoint drop from root to `node` after taking ownership of
 # the data volume. Without it the process would have to run as root.

@@ -79,6 +79,8 @@ Never commit provider credentials.
 | `CHAT_API_KEY` | Provider key. The container generates its own `models.json` from it and never carries it in the image. |
 | `POSTGRES_PASSWORD` | Database password. Applied on the volume's first `initdb` only; see the note below. |
 | `PI_WORKSPACE_DIR` | Neutral workspace handed to the session as `cwd`. Never a real project path. |
+| `PI_AGENTS_DIR` | Directory holding agent definitions (`*.md`). Defaults to `$HOME/.agents/agents`; a missing directory is allowed. |
+| `AGENT_DEFINITION` | Name of the agent definition to apply, e.g. `documentor`. Empty (the default) uses the plain system prompt. |
 | `CHAT_PROVIDER` | Provider id for the chat model, e.g. `synthetic`. |
 | `CHAT_MODEL` | Model id inside that provider. |
 | `CHAT_THINKING_LEVEL` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
@@ -91,6 +93,36 @@ Never commit provider credentials.
 inline in `models.json` and `auth.json` is empty, so mounting only `auth.json`
 starts the server with zero credentials and every turn fails with
 `No API key found for the selected model.`
+
+### Agent definitions
+
+An agent definition is a role for the agent: a `name`, a `description` and a body of
+text. `server/agents/documentor.md` is the example this repository ships, and in
+development that directory is bind-mounted read-only to `/home/node/.agents/agents`,
+so editing a file takes effect on the next restart instead of a rebuild. Production
+bakes the same files into the image.
+
+Frontmatter is delimited by `---` and read as `key: value` lines; only `name` and
+`description` are used. Host pi-herdsman definitions also carry `tools`, `model` and
+`thinking`, and this runtime honors none of them: those keys are ignored with a startup
+warning naming the file, so a directory copied from an existing pi-herdsman setup still
+loads. The strictness is on the selection instead — `AGENT_DEFINITION=<name>` fails the
+boot when the chosen definition carries them, because a definition that is half-honored
+is worse than one that is refused, and that is the only one the prompt would apply.
+
+Selecting a definition with `AGENT_DEFINITION=<name>` appends it to the system prompt
+as `# Role: <name>`, followed by the description and the body. The base prompt stays
+first and unmodified, so a role adds to the product's behavior instead of replacing
+it. With `AGENT_DEFINITION` unset nothing changes in the prompt: the plain one is used,
+and definitions are still read so their problems are visible at startup.
+
+**Why this loader is ours.** Pi 1.4.0 core has no agent-definition discovery: its
+`DefaultResourceLoader` is built with `noExtensions: true` and there is no
+delegate/subagent tool, so no runtime path would ever read these files. The server
+therefore loads and validates them itself at startup. Every file is read then,
+including when no definition is selected, and the boot fails with the file name when a
+definition cannot be parsed at all rather than serving a deployment that asked for a
+role and did not get it.
 
 ### `.env` for a deployment
 

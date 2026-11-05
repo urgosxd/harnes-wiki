@@ -86,12 +86,26 @@ services:
       AGENT_SKILLS: ${AGENT_SKILLS:-true}
       AGENT_BASH: ${AGENT_BASH:-false}
       AGENT_WRITES: ${AGENT_WRITES:-false}
+      # Where the agent definitions below are read from, and which one is applied.
+      # Interpolated like the rest, so a value in `.env` is honored instead of being
+      # silently replaced by this default. An empty AGENT_DEFINITION is the disabled
+      # state: the plain system prompt is used. A definition carrying pi-herdsman keys
+      # is only an error when it is the one selected.
+      PI_AGENTS_DIR: ${PI_AGENTS_DIR:-/home/node/.agents/agents}
+      AGENT_DEFINITION: ${AGENT_DEFINITION:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       PORT: "8080"
       NODE_ENV: production
     volumes:
-      # Only the service's own data volume: generated config, session workspace.
+      # The service's own data volume: generated config, session workspace. Nothing the
+      # host owns is writable from inside the container.
       - agentdoc-workspace:/data/workspace
+      # Skills and agent definitions are read from the checkout, read-only on purpose:
+      # the agent scope is product content the model can consult, never something a
+      # turn may rewrite. Mounting them overrides the copy baked into the image, which
+      # is what makes local iteration possible without a rebuild.
+      - ./server/skills:/home/node/.agents/skills:ro
+      - ./server/agents:/home/node/.agents/agents:ro
     healthcheck:
       # /health needs no credentials, so container health does not depend on a secret.
       test:

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { prepareWritableAgentDir } from "./pi/agent-dir.ts";
@@ -17,6 +18,12 @@ import { createRouter } from "./http/router.ts";
 import { createAuthenticator, parseAuthMode, resolveAuthMode } from "./http/auth.ts";
 import { registerRoutes } from "./api/routes.ts";
 import { SYSTEM_PROMPT } from "./pi/system-prompt.ts";
+import {
+  composeSystemPrompt,
+  loadAgentDefinitions,
+  unsupportedKeysFor,
+  type AgentDefinition,
+} from "./pi/agents.ts";
 import { registerIngestRoutes } from "./api/ingest-routes.ts";
 import { registerDocumentRoutes, capabilityPath } from "./api/document-routes.ts";
 import { DocumentStore } from "./db/document-store.ts";
@@ -32,6 +39,62 @@ async function main(): Promise<void> {
   if (!config.databaseUrl) {
     throw new Error("DATABASE_URL is required");
   }
+
+  // Agent definitions are the product's own: pi core has no discovery for them, so
+  // nothing else would ever read this directory. A missing directory is normal, since
+  // the mount is optional. An unparseable file still fails the boot here — a role
+  // nobody could read is not a role — but a KEY this runtime cannot honor does not:
+  // a directory mounted from an existing pi-herdsman setup carries `tools`, `model`
+  // and `thinking` on every file, and refusing them would make the whole feature
+  // unusable for the definitions it exists to consume. Those keys are reported per
+  // file and the strictness applies only to the definition actually selected.
+  if (!existsSync(config.agentsDir)) {
+    log.warn("agent definitions directory not found", { dir: config.agentsDir });
+  }
+  const loaded = loadAgentDefinitions(config.agentsDir);
+  const agentDefinitions = loaded.definitions;
+  for (const entry of loaded.unsupported) {
+    log.warn(
+      `agent definition ${entry.file} carries ${entry.keys.join(", ")}: ignored by this runtime, ` +
+        "which cannot honor pi-herdsman tools, model or thinking. Selecting this definition " +
+        "fails the boot until those keys are removed.",
+      { file: entry.file, keys: entry.keys },
+    );
+  }
+  let agentDefinition: AgentDefinition | undefined;
+  if (config.agentDefinition) {
+    agentDefinition = agentDefinitions.get(config.agentDefinition);
+    if (!agentDefinition) {
+      // Falling back to the plain prompt would run a deployment that asked for a role
+      // and did not get it, which is the one failure nobody would notice.
+      const available = [...agentDefinitions.keys()].join(", ") || "(none found)";
+      throw new Error(
+        `AGENT_DEFINITION "${config.agentDefinition}" was not found in ${config.agentsDir}; ` +
+          `available: ${available}`,
+      );
+    }
+    // Strictness moved from the directory to the selection. Every other definition
+    // keeps loading; the one that will actually shape the prompt must be honest about
+    // what it asked for, because a half-honored role is worse than a refused one.
+    const ignoredKeys = unsupportedKeysFor(loaded, agentDefinition.name);
+    if (ignoredKeys.length > 0) {
+      throw new Error(
+        `AGENT_DEFINITION "${agentDefinition.name}" carries unsupported frontmatter key(s) ` +
+          `${ignoredKeys.join(", ")}, which this runtime cannot honor. Remove them from ` +
+          `the definition or select another one; available: ` +
+          `${[...agentDefinitions.keys()].join(", ")}`,
+      );
+    }
+  }
+  log.info("agent definitions loaded", {
+    dir: config.agentsDir,
+    count: agentDefinitions.size,
+    ...(agentDefinition ? { selected: agentDefinition.name } : {}),
+  });
+
+  const systemPrompt = agentDefinition
+    ? composeSystemPrompt(SYSTEM_PROMPT, agentDefinition)
+    : SYSTEM_PROMPT;
 
   await mkdir(config.workspaceDir, { recursive: true });
 
@@ -119,7 +182,7 @@ async function main(): Promise<void> {
         tenant,
         agentDir: effectiveAgentDir,
         workspaceDir: config.workspaceDir,
-        systemPrompt: SYSTEM_PROMPT,
+        systemPrompt,
         capabilities: config.tools,
       });
     })();

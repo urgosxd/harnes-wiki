@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 /** Configuration is read once at startup and validated. Nothing here has a
  *  silent default that could point the agent at a real project directory. */
 /** Which capabilities the model gets. Invisible in the UI either way. */
@@ -48,6 +50,15 @@ export interface Config {
    * over.
    */
   publicBaseUrl: string | undefined;
+  /**
+   * Directory holding agent definition files (`*.md`).
+   *
+   * A missing directory is allowed: the agent definitions mount is optional, and a
+   * deployment that ships none runs with the plain system prompt.
+   */
+  agentsDir: string;
+  /** Name of the definition to apply. Empty means the plain system prompt. */
+  agentDefinition: string;
 }
 
 export type ThinkingLevelName = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -198,5 +209,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       timeoutVar: "INGEST_API_TIMEOUT_MS",
     }),
     publicBaseUrl: parsePublicBaseUrl(env.PUBLIC_BASE_URL),
+    // Pi resolves user-scope resources from $HOME/.agents, so the agents directory
+    // sits beside the skills one the image ships. An explicit path wins, which is
+    // what a bind mount and a local run both need.
+    agentsDir: env.PI_AGENTS_DIR?.trim() || join(env.HOME ?? "", ".agents", "agents"),
+    agentDefinition: env.AGENT_DEFINITION?.trim() ?? "",
   };
 }

@@ -90,6 +90,14 @@ services:
       AGENT_SKILLS: ${AGENT_SKILLS:-true}
       AGENT_BASH: ${AGENT_BASH:-false}
       AGENT_WRITES: ${AGENT_WRITES:-false}
+      # Skills and agent definitions are read from the image here, never from a repo
+      # path: the deployment consumes an immutable artefact, and mounting a source
+      # directory would break the versioned-by-tag guarantee. Only the two settings
+      # that name the directory and the definition are deployment-specific; the
+      # directory is interpolated so an `.env` value is honored, with the baked path
+      # as the default.
+      PI_AGENTS_DIR: ${PI_AGENTS_DIR:-/home/node/.agents/agents}
+      AGENT_DEFINITION: ${AGENT_DEFINITION:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       PORT: "8080"
       NODE_ENV: production
