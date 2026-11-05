@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
+import { Logger, type LogLevel } from "../log.ts";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "typebox";
 import { agentToolNames, createAgentTools, type AgentToolOptions } from "./agent-tools.ts";
@@ -285,13 +286,15 @@ function toolName(tool: ToolDefinition): string {
  * resources are not exposed. A business chat wants plain callable tools, and this
  * keeps one process per server instead of one per session.
  *
- * The Stack of every call is resolved HERE, per call, from the request's context —
- * never from the tenant's row. See `resolveStackArgument`.
+ * The Stack of every call is resolved HERE, per call: from the `stackId` the caller
+ * stated explicitly, else from the request's context — never from the tenant's row.
+ * See `resolveStackArgument`.
  */
 export function proxyMcpTools(
   tenantId: string,
   client: McpClient,
   tools: readonly { name: string; description?: string; inputSchema?: Record<string, unknown> }[],
+  log: Logger = processLog(),
 ): ToolDefinition[] {
   return tools.map((tool) =>
     defineTool({
@@ -315,7 +318,7 @@ export function proxyMcpTools(
         // Stack into it would send a field it never declared.
         if (!isStackScoped(tool.inputSchema, tool.name)) return await callAndShape(client, tool.name, args);
 
-        const resolved = resolveStackArgument(tool.name, args);
+        const resolved = resolveStackArgument(tool.name, args, log);
         if ("error" in resolved) return toolError(resolved.error);
         return await callAndShape(client, tool.name, resolved.args);
       },
@@ -324,19 +327,47 @@ export function proxyMcpTools(
 }
 
 /**
- * Resolve the `stackId` a Stack-scoped call must carry.
+ * Resolve the `stackId` a Stack-scoped call must carry, and say so out loud when it
+ * differs from what the turn's link names.
  *
- * The link's Stack is the only source, so this either fills it in or refuses. It
- * never falls back to a default and never silently replaces what the model asked
- * for: a call naming a different Stack is a contradiction between the request and
- * the argument, and the honest answer to a contradiction is an error naming both.
+ * The order is the user's, verbatim: "si el usuario indica que se use otro se usará,
+ * pero como fallback siempre el de la URL". An explicit argument therefore WINS, the
+ * link's Stack is the FALLBACK, and neither is ever read from a stored default. When
+ * neither source names a Stack the call is refused rather than sent with an empty one:
+ * an empty `stackId` inherits whatever Stack the upstream happens to sit on, which is
+ * the 2026-10-28 incident this feature exists to remove.
+ *
+ * A differing argument is a choice, not the contradiction the previous rule read it as
+ * (S10 of `multitenant-stackId.md`, superseded). It is still a divergence from the
+ * Stack the page was showing, so it is recorded once instead of happening silently.
  */
 function resolveStackArgument(
   toolName: string,
   args: Record<string, unknown>,
+  log: Logger,
 ): { args: Record<string, unknown> } | { error: string } {
-  const stackId = currentStackId();
-  if (!stackId) {
+  const turnStackId = currentStackId();
+  const named = args.stackId;
+  const absent = named === undefined || named === null;
+  // Trimmed, because the link is trimmed too (`withStackContext`): `" B "` and `"B"`
+  // name the same Stack, and one Stack must not travel under two spellings.
+  const explicitStackId = typeof named === "string" ? named.trim() : "";
+
+  // An explicit choice wins, with or without a Stack of the turn's own. The record is
+  // written only for a real divergence: no context means nothing was overridden.
+  if (explicitStackId !== "") {
+    if (turnStackId !== undefined && explicitStackId !== turnStackId) {
+      log.info("tool call overrides the turn's Stack", {
+        tool: toolName,
+        turnStackId,
+        argumentStackId: explicitStackId,
+      });
+    }
+    return { args: { ...args, stackId: explicitStackId } };
+  }
+
+  // Nothing explicit and no link Stack: the one case with no source at all.
+  if (!turnStackId) {
     return {
       error:
         `${toolName} works on one Stack, and this turn has no Stack. ` +
@@ -344,31 +375,39 @@ function resolveStackArgument(
     };
   }
 
-  const named = args.stackId;
-  // Absent or blank is not a choice: the model left the field out and the request
-  // supplies it. Blank counts here for the same reason the link does — `stackId: ""`
-  // names no Stack, it just looks like it does.
-  if (named === undefined || named === null || (typeof named === "string" && named.trim() === "")) {
-    return { args: { ...args, stackId } };
-  }
-  // Anything that is not a string is a TYPE problem, and saying "you named Stack 42"
-  // would describe a Stack that cannot exist. Different mistake, different sentence.
-  if (typeof named !== "string") {
+  // Anything that is neither absent nor a string is a TYPE problem, and saying "you
+  // named Stack 42" would describe a Stack that cannot exist. Different mistake,
+  // different sentence. `null` counts as absent, exactly as it always has.
+  if (!absent && typeof named !== "string") {
     return {
       error:
         `${toolName} takes stackId as a string, and the call sent a ${Array.isArray(named) ? "array" : typeof named}. ` +
         "Call it again without stackId to use this turn's Stack.",
     };
   }
-  if (named.trim() === stackId) {
-    return { args: { ...args, stackId } };
-  }
-  return {
-    error:
-      `${toolName} runs on Stack '${stackId}' in this turn, but the call named Stack ` +
-      `'${named}'. Call it again without stackId to use this turn's Stack, or open ` +
-      `the app with a link naming Stack '${named}'.`,
-  };
+
+  // Absent or blank is not a choice: the model left the field out and the request
+  // supplies it. Blank counts here for the same reason the link does — `stackId: ""`
+  // names no Stack, it just looks like it does.
+  return { args: { ...args, stackId: turnStackId } };
+}
+
+let processLogger: Logger | undefined;
+
+/**
+ * The logger an override record goes to when the caller supplies none.
+ *
+ * `main.ts` builds the process `Logger` from `LOG_LEVEL`, and `TenantRuntime.create`
+ * does not carry one down to the proxy, so the same shape is built here: one JSON
+ * object per line, same threshold, the existing `log.ts` class rather than a second
+ * logging mechanism. Tests inject their own through `proxyMcpTools` instead of
+ * scraping the process output.
+ */
+function processLog(): Logger {
+  processLogger ??= new Logger({
+    level: (process.env.LOG_LEVEL as LogLevel | undefined) ?? "info",
+  });
+  return processLogger;
 }
 
 /**

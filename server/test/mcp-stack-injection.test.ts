@@ -16,9 +16,11 @@ import { withStackContext } from "../src/pi/stack-context.ts";
  * server row no longer carries one and `tenant_mcp.default_stack_id` is not read, so
  * with no context the call FAILS instead of going out unscoped.
  *
- * And the link's Stack wins over one the model names: the same value is accepted, a
- * different one is refused rather than silently rewritten — rewriting it would be the
- * same lie in the other direction.
+ * And an explicit argument wins over the link's Stack, which is the FALLBACK — the user's
+ * requirement, verbatim: "si el usuario indica que se use otro se usará, pero como
+ * fallback siempre el de la URL". So a different value is honoured, not refused and not
+ * silently rewritten back to the link's, and the divergence is logged once instead of
+ * being invisible (Manager decision D1).
  */
 
 interface RecordingClient {
@@ -87,15 +89,14 @@ test("accepts a Stack the model named when it is the request's own", async () =>
   assert.equal(args?.stackId, "stack-a");
 });
 
-test("blocks a model argument naming a different Stack instead of rewriting it", async () => {
-  // A caller (or the model) saying one thing while the request carries another is
-  // the defect class this whole file exists for. Naming both is what makes the
-  // refusal actionable; rewriting either would hide it.
-  const { result, calls } = await run("stack-a", { stackId: "stack-b" });
-  assert.equal(result.isError, true);
-  assert.match(textOf(result), /stack-a/);
-  assert.match(textOf(result), /stack-b/);
-  assert.equal(calls, 0, "a refused call must not reach the upstream");
+test("an argument naming a different Stack wins over the request's", async () => {
+  // The requirement, verbatim: "si el usuario indica que se use otro se usará, pero como
+  // fallback siempre el de la URL". The argument is the choice; the request's Stack is
+  // only the fallback, so honouring it is the requested behaviour.
+  const { args, result, calls } = await run("stack-a", { stackId: "stack-b" });
+  assert.notEqual(result.isError, true);
+  assert.equal(args?.stackId, "stack-b");
+  assert.equal(calls, 1, "an honoured argument reaches the upstream exactly once");
 });
 
 test("with no Stack context the call is blocked and the stored default is never consulted", async () => {
