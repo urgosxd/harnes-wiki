@@ -43,6 +43,35 @@ describe("ActivityList", () => {
     expect(screen.getByText("Checking the workspace")).toBeDefined();
   });
 
+  it("names the tool that is running next to the readable label", () => {
+    render(
+      <ActivityList
+        items={[item({ id: "t1", kind: "tool", label: "Running a command", tool: "bash", done: false })]}
+        streaming
+      />,
+    );
+
+    expect(screen.getByText("Running a command")).toBeDefined();
+    expect(screen.getByText("bash")).toBeDefined();
+  });
+
+  it("keeps the generic working indicator when nothing is reported", () => {
+    const { container } = render(<ActivityList items={[]} streaming />);
+
+    expect(screen.getByText("Working…")).toBeDefined();
+    // No tool was reported, so no tool identifier is invented.
+    expect(container.querySelector(".activity__tool")).toBeNull();
+  });
+
+  it("shows no tool element for a thinking step", () => {
+    const { container } = render(
+      <ActivityList items={[item({ kind: "thinking", label: "Thinking…" })]} streaming />,
+    );
+
+    expect(screen.getByText("Thinking…")).toBeDefined();
+    expect(container.querySelector(".activity__tool")).toBeNull();
+  });
+
   it("is announced to assistive technology", () => {
     render(<ActivityList items={[item()]} streaming />);
     expect(screen.getByLabelText("Assistant activity").getAttribute("aria-live")).toBe("polite");

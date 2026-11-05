@@ -9,6 +9,13 @@ export interface ActivityItem {
   kind: "thinking" | "tool" | "skill";
   /** Readable label, already user-facing. */
   label: string;
+  /**
+   * The tool identifier exactly as the server reported it, set only for
+   * `kind: "tool"` items. It is shown verbatim beside the readable label so the
+   * row names the tool that is running instead of a generic phrase. Never
+   * fabricated: `tool` items created without one simply render no identifier.
+   */
+  tool?: string;
   /** Running tools stay visible with a spinner until they finish. */
   done: boolean;
   failed?: boolean;
@@ -139,10 +146,12 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         activity: [
           ...state.activity,
           {
-            // The tool id is used only as a local key; the label is what is shown.
             id: `tool-${action.tool}-${state.activity.length}`,
             kind: "tool",
             label: action.label,
+            // The label is what the server humanised; the identifier is what the
+            // row shows beside it, so an unknown tool is still named.
+            tool: action.tool,
             done: false,
           },
         ],

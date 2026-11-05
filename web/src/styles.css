@@ -515,6 +515,14 @@ body {
   overflow-wrap: anywhere;
 }
 
+.activity__tool {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.8;
+  overflow-wrap: anywhere;
+}
+
 .spinner {
   display: inline-block;
   width: 12px;
