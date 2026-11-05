@@ -163,10 +163,19 @@ test("a call on the session's own Stack carries no notice", async () => {
 
 test("the notice is details, not content: what the model reads is unchanged", async () => {
   // The model asked for a Stack and got it. Rewriting its tool result would put this
-  // product's bookkeeping in front of the model's own answer.
+  // product's bookkeeping in front of the model's own answer. Both directions are
+  // asserted: the content is exactly the upstream's text AND the notice really is on the
+  // details. Checking only the content passes with the notice never attached at all.
   const tool = mount();
   const result = await withStackContext("stack-a", () => tool.execute("c1", { stackId: "stack-b" }));
-  assert.equal(textOf(result), "ok");
+
+  assert.equal(textOf(result), "ok", "the model's tool result is exactly what the upstream said");
+  assert.equal(
+    result.details.stackNotice,
+    "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.",
+    "the sentence the person sees is on details, which is where it can be read",
+  );
+  assert.doesNotMatch(textOf(result), /Stack/, "the bookkeeping never enters the model's context");
 });
 
 test("the structured log record is kept alongside the visible notice", async () => {
@@ -174,7 +183,13 @@ test("the structured log record is kept alongside the visible notice", async () 
   const tool = mount(log.logger);
   const result = await withStackContext("stack-a", () => tool.execute("c1", { stackId: "stack-b" }));
 
-  assert.equal(String(result.details.stackNotice).length > 0, true);
+  // The exact sentence, not "some string": `String(undefined).length > 0` is true, so a
+  // length check here stayed green with the notice dropped altogether.
+  assert.equal(
+    result.details.stackNotice,
+    "ingest_jobs_list ran on Stack stack-b, not the session's Stack stack-a.",
+    "the log record complements the visible notice, it does not replace it",
+  );
   assert.equal(log.lines.length, 1, "one record per overridden call, as before");
   assert.equal(JSON.parse(log.lines[0] ?? "{}").message, "tool call overrides the turn's Stack");
 });
