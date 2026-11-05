@@ -27,13 +27,29 @@ export function MessageList({ state, scrollRef }: MessageListProps) {
 
   // Follow the answer as it grows, but only while the reader is at the bottom:
   // scrolling on every streamed token would fight a user who scrolled up to
-  // read, and a newly sent message pulls the view back so it is never off-screen.
+  // read, and a message they sent pulls the view back so it is never off-screen.
+  //
+  // `sentCount` counts turns the READER sent: one per user message plus the draft
+  // bubble while it waits for its reply. It must not be the transcript length,
+  // which also grows when a finished turn is committed (the draft turns into a
+  // user message and the answer is appended) and would therefore move a reader
+  // who had scrolled up at the exact moment the answer ends. The arithmetic, per
+  // step of a real turn:
+  //   send        pending appears                      1 -> 2  (re-pins)
+  //   token       nothing relevant changes             2 -> 2  (follows only if pinned)
+  //   finished    pending -1, one user message +1      2 -> 2  (cannot move the reader)
+  //   second turn pending appears again                2 -> 3  (re-pins)
+  // The reducer only ever appends a user message together with clearing the
+  // draft, so those two always cancel out. Loading a stored conversation does
+  // grow this count, which is wanted: the transcript lands at its end.
   useStickToBottom(scrollRef, endRef, {
     streaming,
     contentKey: state.streamingText,
-    // The pending bubble is a message the reader just sent: count it, or their
-    // own turn could appear off-screen.
-    messageCount: state.messages.length + (state.pendingUserText !== null ? 1 : 0),
+    // `Message.role` is only ever "user" or "assistant" (see `api.ts`), so one
+    // comparison covers every role the transcript can hold.
+    sentCount:
+      state.messages.filter((message) => message.role === "user").length +
+      (state.pendingUserText !== null ? 1 : 0),
   });
 
   return (

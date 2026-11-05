@@ -90,13 +90,49 @@ describe("MessageList scroll holding", () => {
     expect(container.metrics.scrollTop).toBe(200);
   });
 
+  it("holds a scrolled-up reader when the answer finishes", () => {
+    const user = { id: "u1", role: "user" as const, text: "question" };
+    const container = scrollContainer({ scrollTop: 500, scrollHeight: 1000, clientHeight: 500 });
+    const { rerender } = render(
+      <MessageList
+        state={state({ messages: [user], pendingUserText: null, streamingText: "the answer" })}
+        scrollRef={container.ref}
+      />,
+    );
+    container.metrics.scrollTop = 200;
+    fireEvent.scroll(container.element);
+    scrollIntoView.mockClear();
+    rerender(
+      <MessageList
+        state={state({
+          messages: [user, { id: "a1", role: "assistant", text: "the answer" }],
+          pendingUserText: null,
+          streamingText: "",
+          status: "idle",
+        })}
+        scrollRef={container.ref}
+      />,
+    );
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(container.metrics.scrollTop).toBe(200);
+  });
+
   it("re-pins to the end when a new message arrives", () => {
+    // The transcript of an earlier turn: the reader's question and its answer,
+    // and no draft left over, which is the state the reducer settles on after a
+    // turn finishes.
+    const earlierQuestion = { id: "m0", role: "user" as const, text: "earlier question" };
     const firstMessage = { id: "m1", role: "assistant" as const, text: "earlier answer" };
+    const transcript = [earlierQuestion, firstMessage];
     const container = scrollContainer({ scrollTop: 500, scrollHeight: 1000, clientHeight: 500 });
 
     const { rerender } = render(
       <MessageList
-        state={state({ messages: [firstMessage], streamingText: "streaming from the top" })}
+        state={state({
+          messages: transcript,
+          pendingUserText: null,
+          streamingText: "streaming from the top",
+        })}
         scrollRef={container.ref}
       />,
     );
@@ -106,11 +142,13 @@ describe("MessageList scroll holding", () => {
     fireEvent.scroll(container.element);
     scrollIntoView.mockClear();
 
-    // A message is committed: it must never end up off-screen.
+    // The reader sends a new message: its draft bubble appears, which is the
+    // only thing `send` does to the transcript. It must never end up off-screen.
     rerender(
       <MessageList
         state={state({
-          messages: [firstMessage, { id: "m2", role: "user", text: "a new question" }],
+          messages: transcript,
+          pendingUserText: "a new question",
           streamingText: "streaming from the top",
         })}
         scrollRef={container.ref}
@@ -123,7 +161,8 @@ describe("MessageList scroll holding", () => {
     rerender(
       <MessageList
         state={state({
-          messages: [firstMessage, { id: "m2", role: "user", text: "a new question" }],
+          messages: transcript,
+          pendingUserText: "a new question",
           streamingText: "streaming from the top, one token later",
         })}
         scrollRef={container.ref}

@@ -35,8 +35,17 @@ export interface StickToBottomOptions {
   streaming: boolean;
   /** Identifies the growing content; streaming follows it when it changes. */
   contentKey: unknown;
-  /** How many messages the transcript holds, pending one included. */
-  messageCount: number;
+  /**
+   * How many turns the READER has sent, counting the one still waiting for its
+   * reply. It grows only when the reader sends, and never when a turn is
+   * committed: ending an answer is not the reader asking to be moved.
+   *
+   * It deliberately is NOT the transcript length. Appending a finished turn
+   * adds a user message and the answer, while the draft that carried the turn
+   * disappears, so a length-based trigger fires at the exact moment an answer
+   * completes and yanks a reader who had scrolled up to re-read something.
+   */
+  sentCount: number;
 }
 
 function scrollToEnd(element: HTMLElement | null): void {
@@ -50,19 +59,20 @@ function scrollToEnd(element: HTMLElement | null): void {
  *
  * The viewport belongs to the reader: while an answer streams, the transcript
  * scrolls along only if the reader is already at the bottom. Scrolling up is a
- * deliberate act, so it is respected and never undone by an arriving token. A
- * new message is the exception: it must never arrive off-screen, so it scrolls
- * to the end and re-pins, even for a reader who was reading further up.
+ * deliberate act, so it is respected and never undone by an arriving token, and
+ * never undone by the answer ending either. The one exception is a message the
+ * reader sends: it must not land off-screen, so sending scrolls to the end and
+ * re-pins, even for a reader who was reading further up.
  */
 export function useStickToBottom(
   container: RefObject<HTMLElement | null>,
   end: RefObject<HTMLElement | null>,
   opts: StickToBottomOptions,
 ): void {
-  const { streaming, contentKey, messageCount } = opts;
+  const { streaming, contentKey, sentCount } = opts;
   // Starts pinned: an open stream begins at the end, as it always did.
   const pinned = useRef(true);
-  const previousCount = useRef(messageCount);
+  const previousSent = useRef(sentCount);
 
   // The reader's own scrolling is the only thing that changes the decision, so
   // it is read from the container's scroll event and from nothing else.
@@ -82,11 +92,14 @@ export function useStickToBottom(
     scrollToEnd(end.current);
   }, [contentKey, streaming, end]);
 
-  // A message the reader has not seen yet must not land off-screen.
+  // A message the reader sent must not land off-screen. Keyed on the reader
+  // sending, not on the transcript growing: a finished turn grows the transcript
+  // on its own, and moving a reader who scrolled up to read is the bug this
+  // guards against.
   useEffect(() => {
-    if (messageCount === previousCount.current) return;
-    previousCount.current = messageCount;
+    if (sentCount === previousSent.current) return;
+    previousSent.current = sentCount;
     pinned.current = true;
     scrollToEnd(end.current);
-  }, [messageCount, end]);
+  }, [sentCount, end]);
 }
