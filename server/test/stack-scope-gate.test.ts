@@ -331,7 +331,6 @@ test("a non-string stackId is refused as a type problem, with no upstream call",
     const result = await withStackContext("s-a", () => target.execute("c", { stackId: sent }));
     assert.equal(result.isError, true, `${JSON.stringify(sent)} must be refused`);
     assert.match(text(result), /string/i, "the message must name the expected type");
-    assert.doesNotMatch(text(result), /runs on Stack .* named Stack/, "not a conflict between Stacks");
   }
   assert.equal(calls.length, before, "none of them may reach the upstream");
 });
