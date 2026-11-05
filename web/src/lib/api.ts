@@ -237,6 +237,32 @@ export class ApiClient {
     return body.documents ?? [];
   }
 
+  // -------------------------------------------------------------------------
+  // Stacks
+  // -------------------------------------------------------------------------
+
+  /**
+   * The Stack ids this host knows about.
+   *
+   * Read-only and deliberately unscoped: it exists so the ingest surface can OFFER a
+   * choice, which means it cannot itself depend on already knowing one. It goes
+   * through `json` like every other read, so base URL, headers and a rejected
+   * credential behave identically.
+   *
+   * A body without a `stackIds` array answers `[]` instead of throwing. An optional
+   * field is a shape the server is allowed to omit, and "no choices" is a fact the
+   * select can render; failing here would take down the whole panel over a 200 it did
+   * not expect.
+   *
+   * It keeps the shared error copy rather than `ingestErrorFrom`: this is one of our
+   * own listing routes, like `/documents`, not a call whose answer is forwarded from
+   * the ingest service's envelope.
+   */
+  async listStackIds(): Promise<string[]> {
+    const body = await this.json<{ stackIds?: unknown }>("GET", "/stacks");
+    return Array.isArray(body?.stackIds) ? (body.stackIds as string[]) : [];
+  }
+
   async deleteDocument(id: string): Promise<void> {
     await this.request("DELETE", `/documents/${encodeURIComponent(id)}`);
   }

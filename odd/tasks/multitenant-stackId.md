@@ -425,7 +425,20 @@ instances, every one of them green.
 - **DEAD-ASSERT**: one pending test could not fail while the bi-directional one passed, so
   it was deleted rather than kept as decoration; both mutations remain caught.
 
-L23 (requester's behaviour definition, binding). Verbatim: "el comportamieno es que tu
+L23 (S10's third case superseded, Manager decision D1). New user request, verbatim:
+"Procjet 2: feat/urlparam-stackId / cuando se llamen la tools se debera usar por default o fallback el parameter URL ahi esta el stackId, si el usuario inidaca que se use otro se usara, pero como fallback simpero el de la url, Ademas de tambien llenar por default en ingest ,como fallback , el mismo caso y que tambien se pueda elegir el stackId para hacer ingest"
+The third case of S10 — a differing explicit `stackId` is blocked with an error — is
+superseded by S1 of `odd/tasks/urlparam-stackId.md`, per the Manager's decision D1: an
+explicit tool argument now WINS and the link's Stack is the fallback. S10's first two cases
+(omitted ⇒ inject the link's Stack; identical ⇒ inject it, no error) are unchanged, and
+S10's original text above is intentionally left untouched so the rule it recorded stays
+legible beside the decision that replaced it. The divergence is not silent: one structured
+log record per overridden call names the tool, the turn's URL-derived Stack and the
+argument's Stack. Failure modes are otherwise unchanged — an unknown Stack is still refused
+upstream with `400 unknown_stack`, and with no Stack from either source the call still fails
+visibly instead of sending an empty value.
+
+L24 (requester's behaviour definition, binding). Verbatim: "el comportamieno es que tu
 como cliente, con la tool list_stacks tengas la lista de stacks, pero por default tu
 tendras un StackId via urlParameter"
 - (a) `list_stacks` enumeration is intended: it is how a client discovers the available

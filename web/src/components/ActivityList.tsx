@@ -18,7 +18,9 @@ export interface ActivityListProps {
  *    working indicator rather than guessing which step is happening.
  *  - Reasoning is one line, not the model's deliberation: the answer is what the
  *    user asked for.
- *  - Tool names never appear; the server sends a readable label.
+ *  - A tool row shows the identifier the server reported, verbatim, beside the
+ *    readable label: the label alone is generic for a tool the server does not
+ *    know. Nothing is added to it — no argument or target is invented.
  *  - Finished steps stay visible after the turn, so the user can see what was done.
  */
 export function ActivityList({ items, streaming }: ActivityListProps) {
@@ -47,6 +49,7 @@ export function ActivityList({ items, streaming }: ActivityListProps) {
               <span className="spinner" aria-hidden="true" />
             )}
             <span className="activity__label">{item.label}</span>
+            {item.tool ? <code className="activity__tool">{item.tool}</code> : null}
           </div>
         ))
       )}

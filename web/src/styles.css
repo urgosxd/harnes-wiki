@@ -195,6 +195,18 @@ body {
   margin-top: 18vh;
 }
 
+/* A factual line about the Stack a call used: quiet, not a warning. */
+.chat__stack-notice {
+  margin: 14px auto 0;
+  max-width: 760px;
+  padding: 8px 12px;
+  border-left: 2px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
 .chat__error {
   display: flex;
   align-items: center;
@@ -243,6 +255,142 @@ body {
   background: transparent;
   padding-left: 0;
   max-width: 100%;
+}
+
+/* ---------- Formatted answer bodies ---------- */
+
+/* An assistant answer arrives as markdown and is rendered to real elements, so
+   the rhythm that used to be plain whitespace has to be styled. Everything here
+   is scoped to assistant text: a user bubble is what the reader typed. */
+.message--assistant .message__text > :first-child {
+  margin-top: 0;
+}
+
+.message--assistant .message__text > :last-child {
+  margin-bottom: 0;
+}
+
+.message--assistant .message__text p,
+.message--assistant .message__text ul,
+.message--assistant .message__text ol,
+.message--assistant .message__text pre,
+.message--assistant .message__text table,
+.message--assistant .message__text blockquote {
+  margin: 0 0 10px;
+}
+
+.message--assistant .message__text h1,
+.message--assistant .message__text h2,
+.message--assistant .message__text h3,
+.message--assistant .message__text h4,
+.message--assistant .message__text h5,
+.message--assistant .message__text h6 {
+  margin: 18px 0 8px;
+  line-height: 1.3;
+}
+
+.message--assistant .message__text h1 {
+  font-size: 1.45em;
+}
+
+.message--assistant .message__text h2 {
+  font-size: 1.28em;
+}
+
+.message--assistant .message__text h3 {
+  font-size: 1.12em;
+}
+
+.message--assistant .message__text h4,
+.message--assistant .message__text h5,
+.message--assistant .message__text h6 {
+  font-size: 1em;
+}
+
+.message--assistant .message__text ul,
+.message--assistant .message__text ol {
+  padding-left: 1.5em;
+}
+
+.message--assistant .message__text li + li {
+  margin-top: 4px;
+}
+
+.message--assistant .message__text strong {
+  font-weight: 650;
+}
+
+.message--assistant .message__text code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+
+.message--assistant .message__text pre {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.message--assistant .message__text pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 0.9em;
+  /* A block keeps the newlines it was written with and scrolls sideways instead
+     of squeezing or widening the transcript. */
+  white-space: pre;
+}
+
+.message--assistant .message__text table {
+  display: block;
+  border-collapse: collapse;
+  max-width: 100%;
+  overflow-x: auto;
+  font-size: 0.94em;
+}
+
+.message--assistant .message__text th,
+.message--assistant .message__text td {
+  border: 1px solid var(--border);
+  padding: 6px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.message--assistant .message__text th {
+  background: var(--bg-elevated);
+  font-weight: 600;
+}
+
+.message--assistant .message__text a {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.message--assistant .message__text blockquote {
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--text-dim);
+}
+
+/* While an answer is still streaming, the caret span that marks it has to trail
+   the last character. A markdown answer is a sequence of block elements, so a
+   block-level last paragraph puts the caret on a line of its own; flagging the
+   streaming body lets the last paragraph ride inline while the tokens arrive,
+   and the caret then sits right after the text. The caret is that body's last
+   child, so the paragraph is selected as the element before it: `:last-child`
+   would never match a paragraph here. A `pre` or `table` as the last block
+   keeps the old placement on purpose, because a caret inside a code block or a
+   table would be worse. */
+.message__text--streaming > p:nth-last-child(2) {
+  display: inline;
 }
 
 .message__thinking {
@@ -512,6 +660,14 @@ body {
 }
 
 .activity__label {
+  overflow-wrap: anywhere;
+}
+
+.activity__tool {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.8;
   overflow-wrap: anywhere;
 }
 

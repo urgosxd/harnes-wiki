@@ -84,7 +84,10 @@ function tool(name: string): Mounted {
   return mounted;
 }
 
-test("S9 no context: refused, exact copy, zero upstream calls", async () => {
+// What this case covers, precisely: S9's refusal on ONE shape of Stack-scoped tool, the
+// one that publishes a flat `stackId` property. Tools that read a Stack without
+// publishing it are the scope gate's own subject (BLOCKER B1 above), not this case.
+test("S9 no context on a flat-schema Stack tool: refused, exact copy, zero upstream calls", async () => {
   const target = tool("ingest_jobs_list");
   const before = calls.length;
   const result = await target.execute("c", { limit: 5 });
@@ -106,20 +109,33 @@ test("S10 omit: the link's Stack is injected and the rest is untouched", async (
   assert.deepEqual(calls[before]?.args, { limit: 5, stackId: "s-a" });
 });
 
-test("S10 same: no conflict, no error", async () => {
+test("S10 same: the argument is injected as given, with no second call and no error", async () => {
+  // `isError !== true` alone says nothing about what actually happened: a call that went
+  // out with a rewritten Stack, or one that never went out at all, looked identical. This
+  // case names the call count and the exact arguments the upstream received, so a
+  // rewritten Stack or a missing call fails here. (Injection and plain pass-through are
+  // indistinguishable once the two values agree, which is why the discriminator has to be
+  // the call count and the value, not the act of injecting.)
   const target = tool("ingest_jobs_list");
+  const before = calls.length;
   const result = await withStackContext("s-a", () => target.execute("c", { stackId: "s-a" }));
+
   assert.notEqual(result.isError, true);
+  assert.equal(calls.length, before + 1, "an agreeing argument is still one forwarded call");
+  assert.deepEqual(calls[before]?.args, { stackId: "s-a" }, "the argument travels unchanged");
+  assert.equal(calls[before]?.name, "ingest_jobs_list");
 });
 
-test("S10 conflict: refused, both Stacks named, zero upstream calls", async () => {
+test("S10's conflict case is superseded: a differing argument wins and the call goes out on it", async () => {
+  // S1 of `urlparam-stackId.md`, Manager decision D1: "si el usuario indica que se use
+  // otro se usará, pero como fallback siempre el de la URL". The argument is the choice
+  // and the link is the fallback, so this is a call, not the refusal S10 asked for.
   const target = tool("ingest_jobs_list");
   const before = calls.length;
   const result = await withStackContext("s-a", () => target.execute("c", { stackId: "s-b" }));
-  assert.equal(result.isError, true);
-  assert.match(text(result), /'s-a'/);
-  assert.match(text(result), /'s-b'/);
-  assert.equal(calls.length, before);
+  assert.notEqual(result.isError, true);
+  assert.equal(calls.length, before + 1);
+  assert.equal(calls[before]?.args.stackId, "s-b");
 });
 
 test("S12 concurrent turns never share a Stack", async () => {
@@ -329,17 +345,18 @@ test("a non-string stackId is refused as a type problem, with no upstream call",
     const result = await withStackContext("s-a", () => target.execute("c", { stackId: sent }));
     assert.equal(result.isError, true, `${JSON.stringify(sent)} must be refused`);
     assert.match(text(result), /string/i, "the message must name the expected type");
-    assert.doesNotMatch(text(result), /runs on Stack .* named Stack/, "not a conflict between Stacks");
   }
   assert.equal(calls.length, before, "none of them may reach the upstream");
 });
 
-test("two real but different Stacks are still a conflict, not a type problem", async () => {
+test("two real but different Stacks are an override, not a type problem", async () => {
   const target = tool("ingest_jobs_list");
   const before = calls.length;
   const result = await withStackContext("s-a", () => target.execute("c", { stackId: "s-b" }));
-  assert.equal(result.isError, true);
-  assert.match(text(result), /Stack 's-a'/);
-  assert.match(text(result), /Stack 's-b'/);
-  assert.equal(calls.length, before);
+  // F3 drew the line between a TYPE mistake (refused, above) and two real Stacks. The
+  // type half is unchanged; this half now follows S1: both are real Stacks, so the
+  // argument wins and the call proceeds on it.
+  assert.notEqual(result.isError, true);
+  assert.equal(calls.length, before + 1);
+  assert.equal(calls[before]?.args.stackId, "s-b");
 });

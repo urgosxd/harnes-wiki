@@ -245,3 +245,55 @@ describe("ingest errors", () => {
     });
   });
 });
+
+/**
+ * WHY THESE ASSERTIONS
+ *
+ * The Stack list is the only thing that lets the ingest surface offer a choice
+ * instead of accepting whatever the link named. Two properties matter beyond the
+ * happy path: it must be a plain `GET /stacks` through the shared transport (so base
+ * URL, headers and error mapping behave like every other read), and a body without a
+ * `stackIds` array must read as "no choices" rather than throw — an optional field is
+ * a shape the server is allowed to omit, and a panel with an empty select is better
+ * than a view that dies on a 200 it did not expect.
+ */
+describe("listStackIds", () => {
+  const reply = (body: unknown) =>
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+
+  it("reads GET /stacks and returns the ids", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      reply({ stackIds: ["a", "b"] }),
+    );
+    const api = client(fetchMock as unknown as typeof fetch);
+
+    await expect(api.listStackIds()).resolves.toEqual(["a", "b"]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/api/stacks");
+    expect(init.method).toBe("GET");
+    expect(init.body).toBeUndefined();
+    expect((init.headers as Record<string, string>)["x-dev-token"]).toBe("t");
+    expect((init.headers as Record<string, string>)["x-user-id"]).toBe("u");
+  });
+
+  it("returns an empty list for a body without the field", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => reply({}));
+    const api = client(fetchMock as unknown as typeof fetch);
+
+    await expect(api.listStackIds()).resolves.toEqual([]);
+  });
+
+  it("returns an empty list when the field is not an array", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) =>
+      reply({ stackIds: "a" }),
+    );
+    const api = client(fetchMock as unknown as typeof fetch);
+
+    await expect(api.listStackIds()).resolves.toEqual([]);
+  });
+});

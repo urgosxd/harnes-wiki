@@ -209,6 +209,35 @@ describe("chatReducer", () => {
     expect(state.runId).toBe("r-9");
   });
 
+  it("names the tool that is running so the row is not generic", () => {
+    const state = run([
+      { type: "send", text: "hi" },
+      { type: "tool_started", tool: "bash", label: "Using a tool" },
+    ]);
+
+    // The identifier the server reported is kept on the item itself, not only in
+    // the React key, so the row can say which tool is running.
+    expect(state.activity[0]).toEqual({
+      id: "tool-bash-0",
+      kind: "tool",
+      label: "Using a tool",
+      tool: "bash",
+      done: false,
+    });
+  });
+
+  it("does not attach a tool identifier to thinking or skill steps", () => {
+    const state = run([
+      { type: "send", text: "hi" },
+      { type: "thinking", delta: "hmm" },
+      { type: "skill", name: "support-guide" },
+    ]);
+
+    expect(state.activity).toHaveLength(2);
+    expect(state.activity[0]).not.toHaveProperty("tool");
+    expect(state.activity[1]).not.toHaveProperty("tool");
+  });
+
   it("records tool activity without disturbing the text", () => {
     const state = run([
       { type: "send", text: "hi" },
@@ -220,7 +249,14 @@ describe("chatReducer", () => {
 
     expect(state.streamingText).toBe("ab");
     expect(state.activity).toEqual([
-      { id: "tool-get_order-0", kind: "tool", label: "Looking up an order", done: true, failed: false },
+      {
+        id: "tool-get_order-0",
+        kind: "tool",
+        label: "Looking up an order",
+        tool: "get_order",
+        done: true,
+        failed: false,
+      },
     ]);
   });
 });

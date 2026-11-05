@@ -5,17 +5,33 @@ import { type IngestJob, type PollOutcome, type PollStopReason } from "./ingest.
 /**
  * Owns the ingest-jobs view: the list, the polled job, and the stop notice.
  *
- * ## The tenant is an input, not a choice
+ * ## Reads take the link's tenant; writes take the caller's choice, then the link's
  *
- * `stackId` arrives already resolved from the link (see `tenant.ts`) and is used
- * verbatim: the list, the poll and every create carry it, because the service scopes
- * reads by Stack and records writes in the Stack the request names.
+ * `stackId` arrives already resolved from the link (see `tenant.ts`). Every READ — the
+ * list, the poll — and the document resources carry it verbatim, because the service
+ * scopes reads by Stack.
  *
- * When the link named no Stack, this hook is BLOCKED: it performs no request at all,
+ * A write (`start`, `ingestDocument`) resolves its Stack in one place, `effectiveStackId`:
+ * the Stack chosen for that call wins, and the link's value is the fallback. Before that
+ * helper existed the link's value was spread AFTER the caller's options, so a chosen
+ * Stack was discarded with no error and the job went to the other tenant.
+ *
+ * When NEITHER source names a Stack, this hook is BLOCKED: it performs no request at all,
  * not a listing, not a poll, not a create. The honest reason is not performance —
  * a list read with no Stack is not an empty list, it is a read of whatever tenant the
  * endpoint happens to be bound to, which is exactly the coupling this product is
- * removing. `blockedProblem` is what the panel shows instead.
+ * removing. `blockedProblem` is what the panel shows instead, and an ingest attempt in
+ * that state reports `UNRESOLVED_STACK_ID_NOTICE` rather than returning silently.
+ *
+ * ## The panel's choice is a source of its own, and it stops at the job it started
+ *
+ * `chooseStackId` records the Stack the user picked on this surface, and
+ * `resolvedStackId` is that choice with the link as its fallback, so the panel never
+ * derives the order itself. The choice scopes the WRITES it starts plus the poll for
+ * the job they created — a job in Stack C has to be watched in Stack C, or the panel
+ * shows nothing for it — and it deliberately does NOT scope the list, document or
+ * upload reads, which stay the link's tenant. A choice that leaked into those would
+ * relabel one Stack's jobs as another's.
  *
  * ## Three things this hook deliberately does NOT do
  *
@@ -49,6 +65,68 @@ export const MISSING_STACK_ID_PROBLEM =
   "Stack, so without it there is nothing safe to read. Open the link you were " +
   "given, which ends in ?user=<name>&stackId=<stack-id>.";
 
+/**
+ * What an ingest attempt says when neither source names a Stack.
+ *
+ * `MISSING_STACK_ID_PROBLEM` is the copy for a blocked READ, where the link is the only
+ * fix. A write has two sources now, so its copy has to name both of them — a caller that
+ * could have passed a Stack must not be told the link was its only option — and then say
+ * the two things that actually work.
+ */
+export const UNRESOLVED_STACK_ID_NOTICE =
+  "This ingest names no Stack: no Stack was chosen for it and the link names none. " +
+  "Choose a Stack, or open a link that ends in ?stackId=<stack-id>.";
+
+/**
+ * Per-call options for the two ingest paths that write into a Stack.
+ *
+ * `stackId` is the caller's choice for this one call; the hook's link-derived Stack
+ * remains the fallback, so a caller that passes nothing keeps exactly the old behavior.
+ */
+export interface IngestWriteOptions {
+  compile?: boolean;
+  /** The Stack this call belongs to. Wins over the link's. Blank means "not chosen". */
+  stackId?: string | undefined;
+}
+
+/**
+ * Which Stack a write belongs to.
+ *
+ * ONE implementation on purpose. Two call sites each deciding their own argument order
+ * is exactly how the bug this replaces survived: the link's value was spread last and
+ * silently overwrote the choice. The order is the product rule — the Stack chosen for
+ * this call wins, the link is the fallback — and `null` means neither answered.
+ *
+ * Blank counts as "not chosen" on both levels: an empty string would name a Stack
+ * called "", and a request into a tenant nobody named is worse than no request.
+ */
+function effectiveStackId(chosen: string | undefined, fromLink: string | null): string | null {
+  const chosenTrimmed = chosen?.trim();
+  if (chosenTrimmed) return chosenTrimmed;
+  const linkTrimmed = fromLink?.trim();
+  return linkTrimmed ? linkTrimmed : null;
+}
+
+/** The single notice for "neither source named a Stack", on the channel 202s and rejections already use. */
+function unresolvedStackIdNotice(): IngestNotice {
+  return { kind: "error", message: UNRESOLVED_STACK_ID_NOTICE };
+}
+
+/**
+ * The options the Stack control offers.
+ *
+ * The host's list is the source of truth for what EXISTS, but not for what this page may
+ * name: the link already named a Stack, and a list read that omits it — a stale cache, a
+ * host that does not list every Stack — must not turn the current tenant into an
+ * unselected blank. So the resolved id joins the front of the list and nothing a person
+ * is working in gets dropped.
+ */
+function mergeStackIds(known: string[], resolved: string | null): string[] {
+  const ids = known.map((id) => id.trim()).filter((id) => id !== "");
+  if (resolved && !ids.includes(resolved)) ids.unshift(resolved);
+  return ids;
+}
+
 export interface UseIngestResult {
   /**
    * The tenant Stack, read once from the link and never defaulted or remembered.
@@ -56,6 +134,21 @@ export interface UseIngestResult {
    * `null` means the link named none, which blocks every read and write below.
    */
   stackId: string | null;
+  /**
+   * The Stack this surface's writes belong to: the one chosen here, else the link's.
+   *
+   * `null` means neither answered, which is the S4 case. The panel says so and offers
+   * no way to send a request into a tenant nobody named.
+   */
+  resolvedStackId: string | null;
+  /**
+   * The Stack ids the host offered, with the resolved id added when the host did not
+   * list it. Never empty while a Stack is resolved, so the link's own value stays
+   * selectable offline.
+   */
+  stackIds: string[];
+  /** Choose the Stack for this surface's writes. `null` clears back to the link's. */
+  chooseStackId(id: string | null): void;
   /** Why the surface is blocked, or `null` once the link named a Stack. */
   blockedProblem: string | null;
 
@@ -66,7 +159,7 @@ export interface UseIngestResult {
   upload(file: File): Promise<UploadedDocument | null>;
   removeDocument(id: string): Promise<void>;
   /** Start an ingest for an uploaded document, by reference. */
-  ingestDocument(id: string, options?: { compile?: boolean }): Promise<void>;
+  ingestDocument(id: string, options?: IngestWriteOptions): Promise<void>;
   /** Set when an upload or listing failed. Distinct from a poll notice. */
   documentsNotice: IngestNotice;
 
@@ -79,8 +172,13 @@ export interface UseIngestResult {
   starting: boolean;
   /** True while the active job is being polled. */
   following: boolean;
-  start(source: string, options?: { compile?: boolean }): Promise<void>;
-  follow(id: string): void;
+  /** Start an ingest from a source. A chosen `stackId` wins over the link's Stack. */
+  start(source: string, options?: IngestWriteOptions): Promise<void>;
+  /**
+   * Watch a job. `stackId` is the Stack THAT job belongs to; without it the link's
+   * Stack is used, so a row picked from the link's list is read in the link's tenant.
+   */
+  follow(id: string, options?: { stackId?: string | undefined }): void;
   stopFollowing(): void;
   refreshList(): Promise<void>;
   clearPollNotice(): void;
@@ -111,8 +209,45 @@ export function useIngest({
   const [pollNotice, setPollNotice] = useState<IngestNotice>(null);
   const [starting, setStarting] = useState(false);
   const [following, setFollowing] = useState(false);
+  // The user's explicit choice on this surface. `null` until they pick: the link's value
+  // is applied as the fallback by `resolvedStackId` rather than copied into state, so a
+  // link that changes still decides until someone chooses otherwise.
+  const [chosenStackId, setChosenStackId] = useState<string | null>(null);
+  // What the host says exists. Empty is a real answer — "no choices to offer" — and it
+  // does not erase the link's Stack, which `mergeStackIds` keeps.
+  const [knownStackIds, setKnownStackIds] = useState<string[]>([]);
 
   const abortRef = useRef<AbortController | null>(null);
+
+  /**
+   * The choices the control offers.
+   *
+   * A failed read is NOT a failed surface: a host that cannot list its Stacks still
+   * accepts writes into the one the link names, so this degrades to "no choices beyond
+   * the link's" instead of blocking anything. Decided here, once, so no caller has to
+   * invent a fallback list of its own.
+   */
+  const loadStackIds = useCallback(async () => {
+    try {
+      setKnownStackIds(await client.listStackIds());
+    } catch {
+      setKnownStackIds([]);
+    }
+  }, [client]);
+
+  useEffect(() => {
+    void loadStackIds();
+  }, [loadStackIds]);
+
+  // The one place the order lives for this surface: the choice, then the link.
+  const resolvedStackId = effectiveStackId(chosenStackId ?? undefined, stackId);
+
+  const stackIds = mergeStackIds(knownStackIds, resolvedStackId);
+
+  const chooseStackId = useCallback((id: string | null) => {
+    const trimmed = id?.trim();
+    setChosenStackId(trimmed ? trimmed : null);
+  }, []);
 
   const listDocuments = useCallback(async () => {
     if (!stackId) return;
@@ -196,10 +331,14 @@ export function useIngest({
   }, []);
 
   const follow = useCallback(
-    (id: string) => {
-      // Nothing to follow without a tenant: the read would answer for whichever
-      // Stack the endpoint is bound to.
-      if (!stackId) return;
+    (id: string, options: { stackId?: string | undefined } = {}) => {
+      // A job is watched in the Stack it belongs to: the one chosen for its start, else
+      // the link's. Nothing to follow without one — the read would answer for whichever
+      // Stack the endpoint is bound to. Only an explicit per-job Stack is honored here:
+      // the surface's own choice must not leak onto a row picked from the link's list,
+      // which is why this does not fall back to `resolvedStackId`.
+      const targetStackId = effectiveStackId(options.stackId, stackId);
+      if (!targetStackId) return;
       stopFollowing();
       const controller = new AbortController();
       abortRef.current = controller;
@@ -210,7 +349,7 @@ export function useIngest({
       void client
         .pollIngestJob(id, {
           signal: controller.signal,
-          stackId,
+          stackId: targetStackId,
           onUpdate: (job) => setActiveJob(job),
         })
         .then((outcome) => {
@@ -241,30 +380,46 @@ export function useIngest({
    * lie told to silence a linter.
    */
   const ingestDocument = useCallback(
-    async (id: string, options: { compile?: boolean } = {}) => {
-      if (!stackId) return;
+    async (id: string, options: IngestWriteOptions = {}) => {
+      // Same rule and same helper as `start`: choice first, link as fallback, and a
+      // notice instead of a silent no-op when neither names a Stack.
+      const targetStackId = effectiveStackId(options.stackId, resolvedStackId);
+      if (!targetStackId) {
+        setPollNotice(unresolvedStackIdNotice());
+        return;
+      }
       setPollNotice(null);
       try {
-        const accepted = await client.startIngestForDocument(id, { ...options, stackId });
-        follow(accepted.jobId);
+        const accepted = await client.startIngestForDocument(id, {
+          ...options,
+          stackId: targetStackId,
+        });
+        // The job is watched in the Stack it was created in, not the link's.
+        follow(accepted.jobId, { stackId: targetStackId });
       } catch (error) {
         setPollNotice(noticeFor(error));
         return;
       }
       void refreshList();
     },
-    [client, follow, refreshList, stackId],
+    [client, follow, refreshList, resolvedStackId],
   );
 
   const start = useCallback(
-    async (source: string, options: { compile?: boolean } = {}) => {
-      if (!stackId) return;
+    async (source: string, options: IngestWriteOptions = {}) => {
+      // The choice wins, the link is the fallback. Neither answering is a fact the user
+      // must see: the previous silent `return` made the form look like a dead button.
+      const targetStackId = effectiveStackId(options.stackId, resolvedStackId);
+      if (!targetStackId) {
+        setPollNotice(unresolvedStackIdNotice());
+        return;
+      }
       const trimmed = source.trim();
       if (!trimmed || starting) return;
       setStarting(true);
       setPollNotice(null);
       try {
-        const accepted = await client.startIngest(trimmed, { ...options, stackId });
+        const accepted = await client.startIngest(trimmed, { ...options, stackId: targetStackId });
         // Both dimensions arrive with the 202, so the view has something true to
         // render before the first poll returns.
         setActiveJob({
@@ -275,7 +430,9 @@ export function useIngest({
           ingest: accepted.ingest,
           compile: accepted.compile,
         });
-        follow(accepted.jobId);
+        // This job belongs to `targetStackId`, so it is polled there even when the link
+        // named no Stack: the POST alone would leave the panel with nothing to show.
+        follow(accepted.jobId, { stackId: targetStackId });
       } catch (error) {
         // A rejected StackId lands here as the server's answer, shown once. There is
         // no retry loop: the tenant is a fact of the link, not a transient failure.
@@ -285,11 +442,14 @@ export function useIngest({
         void refreshList();
       }
     },
-    [client, follow, refreshList, stackId, starting],
+    [client, follow, refreshList, resolvedStackId, starting],
   );
 
   return {
     stackId,
+    resolvedStackId,
+    stackIds,
+    chooseStackId,
     blockedProblem: blocked ? MISSING_STACK_ID_PROBLEM : null,
     documents,
     uploading,

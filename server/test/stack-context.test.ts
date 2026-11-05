@@ -4,6 +4,7 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { proxyMcpTools, type TenantMcpServer } from "../src/pi/tenant-runtime.ts";
 import { currentStackId, withStackContext } from "../src/pi/stack-context.ts";
+import { Logger } from "../src/log.ts";
 import { createRouter } from "../src/http/router.ts";
 import { createAuthenticator } from "../src/http/auth.ts";
 import { registerRoutes } from "../src/api/routes.ts";
@@ -13,13 +14,20 @@ import type { TurnService } from "../src/api/turn-service.ts";
 /**
  * The rule this file pins
  *
- * The Stack a tool call uses is the one the REQUEST named — the `stackId` the link
- * carried into the turn route — and nothing else. There is no stored default and no
- * host binding to inherit: `tenant_mcp.default_stack_id` is no longer read, and with
- * no Stack context the call is REFUSED instead of leaving unscoped, because an
- * unscoped call silently reads whatever Stack the upstream happens to sit on. That
- * is the 2026-10-28 incident: the agent truthfully reported "0 pages" about a Stack
- * the user had never heard of, while their work sat elsewhere.
+ * The Stack a tool call uses is, in order: a `stackId` the caller stated explicitly
+ * ("si el usuario indica que se use otro se usará"), then the one the REQUEST named —
+ * the `stackId` the link carried into the turn route — which is the fallback and the
+ * only one. There is no stored default and no host binding to inherit:
+ * `tenant_mcp.default_stack_id` is no longer read, and with no Stack from EITHER source
+ * the call is REFUSED instead of leaving unscoped, because an unscoped call silently
+ * reads whatever Stack the upstream happens to sit on. That is the 2026-10-28 incident:
+ * the agent truthfully reported "0 pages" about a Stack the user had never heard of,
+ * while their work sat elsewhere.
+ *
+ * An argument that differs from the turn's Stack used to be a contradiction the server
+ * refused (S10 of `multitenant-stackId.md`). It is now the user's stated choice, so the
+ * call proceeds on the argument — and because that is a divergence from what the link
+ * says, it is made non-silent through one structured log record (Manager decision D1).
  *
  * ## Why the context is not a field on the runtime
  *
@@ -87,10 +95,25 @@ interface McpToolDescriptor {
   inputSchema?: Record<string, unknown>;
 }
 
-function mount(client: RecordingClient, descriptors: McpToolDescriptor[] = [SCOPED]): ToolLike[] {
-  return proxyMcpTools("alice", client as never, descriptors).map(
+function mount(
+  client: RecordingClient,
+  descriptors: McpToolDescriptor[] = [SCOPED],
+  log?: Logger,
+): ToolLike[] {
+  return proxyMcpTools("alice", client as never, descriptors, log).map(
     (tool) => tool as unknown as ToolLike,
   );
+}
+
+/** A `Logger` whose records the test can read, in the shape `log.test.ts` uses. */
+function capturedLog(): { logger: Logger; lines: string[]; parsed: () => Array<Record<string, unknown>> } {
+  const lines: string[] = [];
+  const logger = new Logger({ level: "debug", sink: (line) => lines.push(line) });
+  return {
+    logger,
+    lines,
+    parsed: () => lines.map((line) => JSON.parse(line) as Record<string, unknown>),
+  };
 }
 
 /** Every text block joined, which is what a reader of the result actually sees. */
@@ -139,10 +162,14 @@ test("with no Stack context the call is blocked, visibly, and never reaches the 
   const result = await scoped.execute("c1", { limit: 5 });
 
   assert.equal(result.isError, true, "a call with no Stack must not look like a success");
-  // The failure has to name what is missing AND how to fix it, or the user is left
-  // guessing why the agent cannot read anything.
-  assert.match(textOf(result), /Stack/);
-  assert.match(textOf(result), /\?user=<name>&stackId=<stack-id>/);
+  // S4: no argument and no turn Stack is the one case with no source at all, so the
+  // message is asserted EXACTLY — it has to name what is missing AND how to fix it, and
+  // a silently empty `stackId` must never be sent on its behalf.
+  assert.equal(
+    textOf(result),
+    "ingest_jobs_list works on one Stack, and this turn has no Stack. " +
+      "Open the app with a link that names it — ?user=<name>&stackId=<stack-id> — and ask again.",
+  );
   assert.deepEqual(result.details, {});
   // The fact that matters: nothing went out unscoped. An error result plus an
   // upstream call would mean the data was read anyway and only the report lied.
@@ -150,6 +177,9 @@ test("with no Stack context the call is blocked, visibly, and never reaches the 
 });
 
 test("a model argument equal to the request's Stack is accepted, with no error", async () => {
+  // PRESERVE: the agreeing path is untouched by the override rule — same value, same
+  // injected Stack, no error and no log record.
+
   const client = recorder();
   const [scoped] = mount(client);
   assert.ok(scoped);
@@ -162,7 +192,10 @@ test("a model argument equal to the request's Stack is accepted, with no error",
   assert.equal(client.calls[0]?.args.stackId, "stack-from-the-link");
 });
 
-test("a model argument naming a DIFFERENT Stack blocks the call instead of rewriting it", async () => {
+test("an explicit tool argument wins over the turn's Stack (S1)", async () => {
+  // The requirement, verbatim: "si el usuario indica que se use otro se usará, pero como
+  // fallback siempre el de la URL". A differing argument is therefore a CHOICE, not the
+  // contradiction the previous rule read it as, and the call goes out on it.
   const client = recorder();
   const [scoped] = mount(client);
   assert.ok(scoped);
@@ -171,13 +204,83 @@ test("a model argument naming a DIFFERENT Stack blocks the call instead of rewri
     scoped.execute("c1", { stackId: "some-other-stack" }),
   );
 
+  assert.notEqual(result.isError, true, "a differing argument is a choice, not an error");
+  assert.equal(client.calls.length, 1, "the call must reach the upstream");
+  assert.equal(
+    client.calls[0]?.args.stackId,
+    "some-other-stack",
+    "the argument's Stack travels; the turn's Stack does not overwrite it",
+  );
+});
+
+test("an explicit argument resolves even when the turn names no Stack at all", async () => {
+  // The URL is the FALLBACK, not a precondition: with no link Stack but an explicit
+  // argument, there is still exactly one Stack named, and it is the argument's.
+  const client = recorder();
+  const [scoped] = mount(client);
+  assert.ok(scoped);
+
+  const result = await scoped.execute("c1", { stackId: "some-other-stack" });
+
+  assert.notEqual(result.isError, true);
+  assert.equal(client.calls.length, 1);
+  assert.equal(client.calls[0]?.args.stackId, "some-other-stack");
+});
+
+test("a non-string stackId is still refused as a type problem, with no upstream call", async () => {
+  // Unchanged rule (S18/F3): an array is not a Stack name, so the sentence names the
+  // type rather than pretending a Stack called 'A' was meant.
+  const client = recorder();
+  const [scoped] = mount(client);
+  assert.ok(scoped);
+
+  const result = await withStackContext("stack-from-the-link", () =>
+    scoped.execute("c1", { stackId: ["A"] }),
+  );
+
   assert.equal(result.isError, true);
-  const text = textOf(result);
-  // Both Stacks are named, so the reader can see the conflict rather than a
-  // mysterious refusal.
-  assert.match(text, /stack-from-the-link/);
-  assert.match(text, /some-other-stack/);
+  assert.equal(
+    textOf(result),
+    "ingest_jobs_list takes stackId as a string, and the call sent a array. " +
+      "Call it again without stackId to use this turn's Stack.",
+  );
   assert.equal(client.calls.length, 0, "a refused call must not read anything");
+});
+
+test("the override is not silent: one record names the turn's Stack and the argument's (D1)", async () => {
+  const client = recorder();
+  const log = capturedLog();
+  const [scoped] = mount(client, [SCOPED], log.logger);
+  assert.ok(scoped);
+
+  const result = await withStackContext("stack-from-the-link", () =>
+    scoped.execute("c1", { stackId: "some-other-stack" }),
+  );
+
+  assert.notEqual(result.isError, true);
+  assert.equal(log.lines.length, 1, "exactly one record per overridden call");
+  const [record] = log.parsed();
+  assert.equal(record?.level, "info");
+  assert.equal(record?.message, "tool call overrides the turn's Stack");
+  assert.equal(record?.tool, "ingest_jobs_list");
+  assert.equal(record?.turnStackId, "stack-from-the-link");
+  assert.equal(record?.argumentStackId, "some-other-stack");
+  assert.match(String(record?.time), /^\d{4}-\d{2}-\d{2}T/, "it is a record, not a sentence");
+});
+
+test("the non-override paths emit no such record", async () => {
+  // Nothing diverged, so there is nothing to report: the fallback path, the agreeing
+  // path and the refusal all stay quiet.
+  const client = recorder();
+  const log = capturedLog();
+  const [scoped] = mount(client, [SCOPED], log.logger);
+  assert.ok(scoped);
+
+  await withStackContext("stack-from-the-link", () => scoped.execute("c1", { limit: 1 }));
+  await withStackContext("stack-from-the-link", () => scoped.execute("c2", { stackId: "stack-from-the-link" }));
+  await scoped.execute("c3", {});
+
+  assert.deepEqual(log.lines, [], "no override happened, so nothing is logged");
 });
 
 test("a tool whose schema declares no stackId is called exactly as before", async () => {

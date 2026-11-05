@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { Sidebar } from "./Sidebar.tsx";
 import { ChatWindow } from "./ChatWindow.tsx";
 import { MessageList } from "./MessageList.tsx";
+import type { RefObject } from "react";
 import { initialChatState, type ChatState } from "../lib/chat-reducer.ts";
 
 function state(overrides: Partial<ChatState> = {}): ChatState {
@@ -85,9 +86,14 @@ describe("Sidebar", () => {
 });
 
 describe("MessageList", () => {
+  // The transcript needs the scroll container that holds it. jsdom has no
+  // layout, so these rendering checks pass a ref that is never attached.
+  const noScroll: RefObject<HTMLElement | null> = { current: null };
+
   it("renders stored messages", () => {
     render(
       <MessageList
+        scrollRef={noScroll}
         state={state({
           messages: [
             { id: "1", role: "user", text: "hello" },
@@ -101,7 +107,7 @@ describe("MessageList", () => {
   });
 
   it("shows the pending user message before the reply arrives", () => {
-    render(<MessageList state={state({ status: "streaming", pendingUserText: "waiting" })} />);
+    render(<MessageList scrollRef={noScroll} state={state({ status: "streaming", pendingUserText: "waiting" })} />);
     expect(screen.getByText("waiting")).toBeDefined();
     // The activity list now owns the progress indicator, so the old anonymous
     // "thinking" dots are gone on purpose.
@@ -109,13 +115,13 @@ describe("MessageList", () => {
   });
 
   it("shows the streaming text while it grows", () => {
-    render(<MessageList state={state({ status: "streaming", streamingText: "partial ans" })} />);
+    render(<MessageList scrollRef={noScroll} state={state({ status: "streaming", streamingText: "partial ans" })} />);
     expect(screen.getByText(/partial ans/)).toBeDefined();
   });
 
   it("renders model output as text, not as markup", () => {
     const injected = '<img src=x onerror="alert(1)">';
-    render(<MessageList state={state({ messages: [{ id: "1", role: "assistant", text: injected }] })} />);
+    render(<MessageList scrollRef={noScroll} state={state({ messages: [{ id: "1", role: "assistant", text: injected }] })} />);
     // The tag must be visible as characters and produce no element.
     expect(screen.getByText(injected)).toBeDefined();
     expect(document.querySelector("img")).toBeNull();
@@ -125,6 +131,7 @@ describe("MessageList", () => {
 describe("ChatWindow", () => {
   const base = {
     state: state(),
+    conversationId: "c1",
     loadingThread: false,
     onSend: () => {},
     onRetry: () => {},
