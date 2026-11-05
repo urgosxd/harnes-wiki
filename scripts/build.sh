@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 #
+# DEPRECATED — kept for reference, may be removed.
+#
+# The documented path is now the plain `docker buildx` commands in the README section
+# "Building and publishing both architectures". This script builds the same two images
+# with the same multi-arch tag, and nothing requires it: read it if you want the
+# reasoning behind the builder and the platform flags, then run the README commands.
+#
 # Build both services for linux/amd64 and linux/arm64 as one multi-arch tag each.
 #
 #   ./scripts/build.sh 0.1.0                  # local only: tags in this machine

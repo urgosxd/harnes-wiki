@@ -13,13 +13,15 @@
 # source instead of using the arm64 image that was tested, and "what is deployed"
 # would stop being a name you can point at.
 #
-# ## Why the tags are required
+# ## Why `latest`, and what that costs
 #
-# `VERSION` has no default. A deployment must be able to say exactly which build it
-# runs; a `latest` that moves on its own makes an incident impossible to bisect.
+# Both services deploy the `latest` tag, so a target host needs no version variable to
+# start a stack. The cost is that `latest` moves: the tag no longer identifies a build.
+# What replaces it is the image digest — `deploy.sh` resolves and prints the digest of
+# each image between `pull` and `up`, which is the only exact reference to what ran.
 #
-#   REGISTRY=ghcr.io/your-user VERSION=0.1.0 docker compose -f docker-compose.prod.yml up -d
-#   VERSION=0.1.0 docker compose -f docker-compose.prod.yml up -d   # local images
+#   REGISTRY=ghcr.io/your-user docker compose -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.prod.yml up -d   # local images
 #
 # ## What is NOT duplicated from the development file
 #
@@ -54,9 +56,9 @@ services:
   server:
     # REGISTRY is OPTIONAL here on purpose: `${REGISTRY:+...}` prefixes only when it
     # has a value, so a stack built on this host runs from the local images while a
-    # deployment pulls from a registry. VERSION is required in both cases, because a
-    # deployment has to name exactly which build it runs.
-    image: ${REGISTRY:+${REGISTRY}/}agentdocumentor-server:${VERSION:?VERSION must be set, e.g. 0.1.0}
+    # deployment pulls from a registry. The tag is `latest` in both cases; the digest
+    # `deploy.sh` prints at deploy time is what pins it after the fact.
+    image: ${REGISTRY:+${REGISTRY}/}agentdocumentor-server:latest
     container_name: agentdoc-server
     restart: unless-stopped
     depends_on:
@@ -111,7 +113,7 @@ services:
       - internal
 
   web:
-    image: ${REGISTRY:+${REGISTRY}/}agentdocumentor-web:${VERSION:?VERSION must be set, e.g. 0.1.0}
+    image: ${REGISTRY:+${REGISTRY}/}agentdocumentor-web:latest
     container_name: agentdoc-web
     restart: unless-stopped
     depends_on:

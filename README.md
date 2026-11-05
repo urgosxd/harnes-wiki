@@ -441,15 +441,54 @@ recompiling instead of using the arm64 image that was actually tested.
 
 ### Building and publishing both architectures
 
+`latest` is the production tag, and the build is plain `docker buildx` — no wrapper script.
+Both services go up as one multi-arch manifest list under that single tag:
+
 ```bash
-./scripts/build.sh 0.1.0                                  # local images only
-PUSH=1 REGISTRY=ghcr.io/your-user ./scripts/build.sh 0.1.0  # publish a manifest list
+# 1. local multi-arch manifest build (both services, not published)
+docker buildx build --builder multibuilder --platform linux/amd64,linux/arm64 \
+  -f server/Dockerfile -t ghcr.io/your-user/agentdocumentor-server:latest --load server
+docker buildx build --builder multibuilder --platform linux/amd64,linux/arm64 \
+  -f web/Dockerfile    -t ghcr.io/your-user/agentdocumentor-web:latest    --load web
 ```
 
-One tag holds `linux/amd64` **and** `linux/arm64`; the consuming host resolves its
-own architecture and knows nothing about this. `REGISTRY` has no default on purpose:
-a guessed namespace publishes images into somebody else's account. `VERSION` is
-required for the same reason a deployment must be able to name what it runs.
+`--push` publishes instead of loading, and requires `REGISTRY`: a push has no namespace
+to land in otherwise, and a guessed one publishes into somebody else's account.
+
+```bash
+REGISTRY=ghcr.io/your-user
+docker buildx build --builder multibuilder --platform linux/amd64,linux/arm64 \
+  -f server/Dockerfile -t "$REGISTRY/agentdocumentor-server:latest" --push server
+docker buildx build --builder multibuilder --platform linux/amd64,linux/arm64 \
+  -f web/Dockerfile    -t "$REGISTRY/agentdocumentor-web:latest"    --push web
+```
+
+One platform at a time, for the arch you are on or for a daemon that cannot load a
+manifest list:
+
+```bash
+docker buildx build --builder multibuilder --platform linux/arm64 \
+  -f server/Dockerfile -t "$REGISTRY/agentdocumentor-server:latest" --load server
+docker buildx build --builder multibuilder --platform linux/arm64 \
+  -f web/Dockerfile    -t "$REGISTRY/agentdocumentor-web:latest"    --load web
+```
+
+`--load` of a manifest list needs containerd's image store; if the daemon reports none,
+use the single-platform form above or `--push`. The `multibuilder` builder is a one-time
+setup:
+
+```bash
+docker buildx create --name multibuilder --driver docker-container
+```
+
+One tag holds `linux/amd64` **and** `linux/arm64`; the consuming host resolves its own
+architecture and knows nothing about this.
+
+`latest` is what runs. That is the trade: the tag alone no longer identifies a
+deployment, because the next publish moves it and nothing in the tag says which build it
+replaced. `deploy.sh` resolves and prints the **digest** of each image between `pull` and
+`up`, and that digest — not the tag — is the only exact reference to what actually ran.
+See **Rollback** below for what to do with it.
 
 Verified on this machine, not assumed:
 
@@ -460,17 +499,15 @@ Verified on this machine, not assumed:
 | The web bundle builds on arm64 | esbuild and rollup resolve their platform binaries |
 | No native bindings of our own | **zero** `.node` files mapped in the runtime |
 | Base images are multi-arch | `node:22.23.2-alpine`, `nginx:1.27-alpine`, `postgres:16-alpine` |
-| Same tag, two architectures | `docker run --platform linux/amd64` and `linux/arm64` both from `:0.1.0` |
+| Same tag, two architectures | `docker run --platform linux/amd64` and `linux/arm64` both from `:latest` |
 
-`--load` of a manifest list needs containerd's image store. On a daemon without it,
-either publish with `PUSH=1 REGISTRY=...`, or build one platform at a time with
-`PLATFORMS=linux/arm64 ./scripts/build.sh 0.1.0`. The script says this instead of
-failing halfway.
+`scripts/build.sh` still exists and still builds the same two images, but the commands
+above are the documented path; the script is kept for reference and may be removed.
 
 ### Deploy: one command
 
 `./scripts/deploy.sh` is the recommended path: it validates `.env.prod`, pulls the
-tagged images, then runs `docker compose -f docker-compose.prod.yml up -d --wait`.
+`latest` images, then runs `docker compose -f docker-compose.prod.yml up -d --wait`.
 It is the validation and healthcheck-gated path, and it exists because two of the
 failures below cannot be corrected after the fact — a placeholder
 `POSTGRES_PASSWORD` is baked into the volume on the first `initdb`, and a placeholder
@@ -509,13 +546,13 @@ Every validation message names the variable and never its value.
 
 | Variable | If it is missing or wrong | Effect |
 |---|---|---|
-| `VERSION` | `${VERSION:?}` in the compose file | **aborts**: a deployment must name the build it runs |
 | `POSTGRES_PASSWORD` | `${POSTGRES_PASSWORD:?}`, still a placeholder, or containing `@ : / # ? %` or a space | **aborts**: `deploy.sh` refuses, because the value is interpolated into `DATABASE_URL` and is baked into the volume on the first `initdb` |
 | `CHAT_API_KEY` | empty or still `CHANGE_ME` | **aborts** in `deploy.sh`: the server starts, then every turn fails with `No API key found for the selected model` |
 | `CHAT_THINKING_LEVEL` | not one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | **aborts** at startup: `config.ts` throws |
 | `PUBLIC_BASE_URL`, `INGEST_API_BASE_URL` | not an absolute http(s) origin, or carrying a path | **aborts** at startup: `config.ts` throws |
+| `VERSION` | — | **no effect**: nothing requires it and nothing reads it. The images are tagged `latest`; the digest `deploy.sh` prints is what identifies the build. Set it and it is simply unused |
 | `PI_WORKSPACE_DIR`, `CHAT_PROVIDER`, `CHAT_MODEL`, `PI_AGENT_CONFIG_MODE` | empty in `.env.prod` | **no effect**: the compose file supplies all four (`/data/workspace`, `synthetic`, `syn:large:text`, `generate`); an entry here is ignored, and `deploy.sh` warns instead of pretending otherwise |
-| `REGISTRY` | empty (allowed) | no registry involved: `agentdocumentor-server:$VERSION` and `agentdocumentor-web:$VERSION` must already exist on this host |
+| `REGISTRY` | empty | **required to pull**: a deployment consumes registry images, so on a fresh host this is the variable that makes `pull` possible. Empty is allowed and selects local images, but then `agentdocumentor-server:latest` and `agentdocumentor-web:latest` must already exist on that host |
 | `INGEST_API_BASE_URL` | empty (allowed) | degrades: uploads keep working, ingest-by-document answers `503 ingest_not_configured` |
 | `PUBLIC_BASE_URL` | empty (allowed) | degrades: upload-backed ingests are disabled |
 | `AUTH_MODE` | `open` (the default) | degrades: the name in the link IS the identity, with no secret behind it |
@@ -527,6 +564,29 @@ the compose file pins `generate` — that is what lets the server write its own
 
 The images themselves come from **Building and publishing both architectures**
 above: `deploy.sh` pulls them and never builds them.
+
+### Rollback
+
+`latest` is what runs, so a rollback is a digest operation, not a tag operation. Deploy
+prints the two references; each one is the exact image that host is running:
+
+```text
+  rollback: docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --no-deps --force-recreate server
+            image:    ghcr.io/your-user/agentdocumentor-server@sha256:9f2c…
+            pin first: docker tag ghcr.io/your-user/agentdocumentor-server@sha256:9f2c… ghcr.io/your-user/agentdocumentor-server:latest
+```
+
+`docker compose` reads the tag from the compose file and never accepts a digest on the
+command line, which is why `deploy.sh` prints the `docker tag` step: pinning the digest
+back onto `:latest` and then recreating the service puts back exactly what ran, with no
+pull to overwrite it. A version-pinned tag in `docker-compose.prod.yml` remains the
+stronger guarantee if you ever want it back — the cost is that every host then has to
+carry the version it should run, which is the thing `latest` removes.
+
+If `deploy.sh` reports `(digest unavailable — pin a version tag for a rollback
+guarantee)`, the image was not in the local store with a registry digest (a locally
+built image, for instance): there is nothing to roll back to by digest, and the tag is
+all you have.
 
 `docker-compose.prod.yml` has **no `build:` key at all**, so it cannot compile
 anything even by accident. It also requires `POSTGRES_PASSWORD` rather than

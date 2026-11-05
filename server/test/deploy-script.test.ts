@@ -116,9 +116,14 @@ const PASSWORD = "0123456789abcdef".repeat(4);
 // Distinctive enough that finding it in any output means it was echoed.
 const API_KEY = "sk-deploy-validator-no-echo-9f2c";
 
-/** The variables that make `--check` report no problem at all. */
+/**
+ * The variables that make `--check` report no problem at all.
+ *
+ * No `VERSION`: the production images are tagged `latest`, so a passing check must not
+ * depend on a version being present. `VERSION` stays in `DEPLOY_VARIABLES` above only so
+ * an inherited export cannot leak into the child and mask that.
+ */
 const completeEnv = (overrides: Record<string, string | null> = {}): Record<string, string | null> => ({
-  VERSION: "0.1.0",
   POSTGRES_PASSWORD: PASSWORD,
   REGISTRY: "ghcr.io/agentdocumentor",
   CHAT_API_KEY: API_KEY,
@@ -188,13 +193,29 @@ test("POSTGRES_PASSWORD with a colon fails and the value is never printed", { sk
   );
 });
 
-test("an empty VERSION is a failure that names it", { skip }, (t) => {
-  const envPath = writeEnvFile(t, completeEnv({ VERSION: "" }));
+test("--check passes with no VERSION in the env file, and names the latest tag", { skip }, (t) => {
+  // The env file is complete except for a version: `completeEnv()` never carries one. The
+  // production images are tagged `latest`, so requiring a version would refuse a valid
+  // deployment — and printing an image the run does not deploy would be worse than the
+  // refusal. Both halves are asserted here, because an empty-tag image name (`…-server:`)
+  // is the failure mode a half-applied change would leave behind.
+  const envPath = writeEnvFile(t, completeEnv());
 
   const result = run(["--check", "--env-file", envPath]);
 
-  assert.equal(result.status, 1, "the compose file has no default tag, so an empty VERSION cannot deploy");
-  assert.match(result.stderr, /VERSION is not set/);
+  assert.equal(result.status, 0, `VERSION must no longer be required: ${result.stderr}`);
+  assert.doesNotMatch(result.stderr, /VERSION is not set/, "the VERSION requirement came back");
+  assert.ok(
+    result.stdout.includes("agentdocumentor-server:latest"),
+    `the dry run must show the server image it would deploy: ${result.stdout}`,
+  );
+  assert.ok(
+    result.stdout.includes("agentdocumentor-web:latest"),
+    `the dry run must show the web image it would deploy: ${result.stdout}`,
+  );
+  // Check mode runs no docker command, so it cannot resolve a digest; it must say so
+  // instead of printing an empty rollback line.
+  assert.match(result.stdout, /digest[^\n]*at deploy time/i);
 });
 
 test("an unknown argument is a usage error, not a validation failure", { skip }, (t) => {

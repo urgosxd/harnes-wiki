@@ -137,8 +137,8 @@ value_of() {
       _line=${_line%?}
       ;;
     *)
-      # Compose drops an inline comment from an UNQUOTED value, so a `VERSION=0.1.0
-      # # bump` must not be read here as a tag with a comment glued to it.
+      # Compose drops an inline comment from an UNQUOTED value, so a `CHAT_THINKING_LEVEL=medium
+      # # quieter` must not be read here as a level with a comment glued to it.
       _line=${_line%%[[:space:]]#*}
       ;;
   esac
@@ -264,7 +264,6 @@ fi
 #
 # `docker compose --env-file` never overrides the shell environment, so the value
 # that reaches the container is the exported one when both exist. Validate that.
-VERSION=$(effective VERSION)
 POSTGRES_PASSWORD=$(effective POSTGRES_PASSWORD)
 REGISTRY=$(effective REGISTRY)
 CHAT_API_KEY=$(effective CHAT_API_KEY)
@@ -280,12 +279,10 @@ PUBLIC_BASE_URL=$(effective PUBLIC_BASE_URL)
 
 # --- 3. variables the COMPOSE FILE refuses to start without ----------------
 #
-# docker-compose.prod.yml spells them `${VERSION:?}` and `${POSTGRES_PASSWORD:?}`,
-# so these are measured, not a policy this script invented.
-if [ -z "$VERSION" ]; then
-  problem "VERSION is not set. It names the image tag to deploy and docker-compose.prod.yml has no default for it (e.g. VERSION=0.1.0)."
-fi
-
+# docker-compose.prod.yml spells `${POSTGRES_PASSWORD:?}`, so this one is measured, not a
+# policy the script invented. There is no version check to match: the compose file deploys
+# the `latest` tag, and the image digest printed after the pull is what identifies the
+# build that actually ran.
 if [ -z "$POSTGRES_PASSWORD" ]; then
   problem "POSTGRES_PASSWORD is not set. docker-compose.prod.yml refuses to start without it."
 elif looks_like_placeholder "$POSTGRES_PASSWORD"; then
@@ -301,11 +298,11 @@ fi
 # REGISTRY is OPTIONAL in the compose file (`${REGISTRY:+${REGISTRY}/}`), so an
 # empty value is a supported deployment, not a mistake: it selects the local images.
 if [ -z "$REGISTRY" ]; then
-  note "registry:  (empty) -> local images agentdocumentor-server:$VERSION and agentdocumentor-web:$VERSION must already exist on this host"
+  note "registry:  (empty) -> local images agentdocumentor-server:latest and agentdocumentor-web:latest must already exist on this host"
 else
   case "$REGISTRY" in
     */)
-      problem "REGISTRY must not end with '/': docker-compose.prod.yml already adds the separator (\${REGISTRY}/agentdocumentor-server:\${VERSION})."
+      problem "REGISTRY must not end with '/': docker-compose.prod.yml already adds the separator (\${REGISTRY}/agentdocumentor-server:latest)."
       ;;
   esac
 fi
@@ -379,11 +376,11 @@ compose() {
 COMPOSE_HINT="docker compose --env-file $ENV_FILE -f $COMPOSE_FILE"
 URL=$(web_url)
 if [ -n "$REGISTRY" ]; then
-  SERVER_IMAGE="$REGISTRY/agentdocumentor-server:$VERSION"
-  WEB_IMAGE="$REGISTRY/agentdocumentor-web:$VERSION"
+  SERVER_IMAGE="$REGISTRY/agentdocumentor-server:latest"
+  WEB_IMAGE="$REGISTRY/agentdocumentor-web:latest"
 else
-  SERVER_IMAGE="agentdocumentor-server:$VERSION"
-  WEB_IMAGE="agentdocumentor-web:$VERSION"
+  SERVER_IMAGE="agentdocumentor-server:latest"
+  WEB_IMAGE="agentdocumentor-web:latest"
 fi
 
 if [ "$MODE" = check ]; then
@@ -393,7 +390,8 @@ check: OK — $ENV_FILE is complete enough to deploy.
   images:   $SERVER_IMAGE
             $WEB_IMAGE
   registry: ${REGISTRY:-(empty: local images, no pull from a registry)}
-  version:  $VERSION
+  digest:   captured at deploy time — --check runs no docker command, so there is
+            nothing to resolve yet.
 
   supplied by docker-compose.prod.yml (an entry in the env file cannot change them):
             PI_WORKSPACE_DIR=/data/workspace
@@ -416,7 +414,36 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-# --- 8. deploy --------------------------------------------------------------
+# --- 8. the rollback trail -------------------------------------------------
+#
+# The deployed tag is `latest`, so the tag itself cannot answer "what ran?" after the
+# next publish. The digest can. It is resolved HERE — after a successful pull, before
+# `up` — because this is the only moment the local image is guaranteed to be exactly
+# the one the stack is about to start.
+repo_digest() {
+  docker image inspect "$1" --format '{{index .RepoDigests 0}}' 2>/dev/null || printf '%s' ""
+}
+
+# `docker compose` reads the tag from the compose file and never accepts a digest on
+# the command line, so restoring a digest means pinning it back onto the tag first.
+# That command is printed here rather than left to be worked out during an incident.
+rollback_lines() {
+  _service=$1
+  _ref=$2
+  _digest=$3
+  note "  rollback: $COMPOSE_HINT up -d --no-deps --force-recreate $_service"
+  case "$_digest" in
+    *@sha256:*)
+      note "            image:    $_digest"
+      note "            pin first: docker tag $_digest $_ref"
+      ;;
+    *)
+      note "            image:    (digest unavailable — pin a version tag for a rollback guarantee)"
+      ;;
+  esac
+  note ""
+}
+
 printf '==> pulling %s and %s\n' "$SERVER_IMAGE" "$WEB_IMAGE"
 pull_status=0
 compose pull || pull_status=$?
@@ -440,6 +467,9 @@ if [ "$pull_status" -ne 0 ]; then
   warn "pull failed (exit $pull_status), but both images exist locally; deploying those: $SERVER_IMAGE, $WEB_IMAGE"
 fi
 
+SERVER_DIGEST=$(repo_digest "$SERVER_IMAGE")
+WEB_DIGEST=$(repo_digest "$WEB_IMAGE")
+
 printf '==> starting the stack and waiting for healthchecks (--wait)\n'
 up_status=0
 compose up -d --wait || up_status=$?
@@ -448,15 +478,25 @@ if [ "$up_status" -ne 0 ]; then
   printf '\nerror: docker compose up failed with exit status %s. Last 40 log lines:\n' "$up_status" >&2
   compose logs --tail=40 || true
   printf '\nInspect further with: %s logs -f\n' "$COMPOSE_HINT" >&2
+  printf '\nRollback trail (the digest of what was being started):\n' >&2
+  rollback_lines server "$SERVER_IMAGE" "$SERVER_DIGEST" >&2
+  rollback_lines web "$WEB_IMAGE" "$WEB_DIGEST" >&2
   exit "$up_status"
 fi
 
 cat <<DONE
 
-==> deployed $VERSION. Every service reported healthy.
+==> deployed latest. Every service reported healthy.
 
   web url:  $URL
 
+  rollback trail — `latest` can move under you, so this digest is the only way back to
+  exactly what just ran:
+
+DONE
+rollback_lines server "$SERVER_IMAGE" "$SERVER_DIGEST"
+rollback_lines web "$WEB_IMAGE" "$WEB_DIGEST"
+cat <<DONE
   follow-ups:
             $COMPOSE_HINT logs -f server
             $COMPOSE_HINT down
