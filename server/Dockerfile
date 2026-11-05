@@ -53,6 +53,9 @@ COPY src ./src
 COPY scripts ./scripts
 COPY tsconfig.json ./
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+# Skills are product content: shipped in the image so the agent scope is immutable and versioned with the tag. Ownership is set here because the entrypoint only chowns /data.
+COPY skills/ /home/node/.agents/skills/
+RUN chown -R node:node /home/node/.agents/skills
 
 # su-exec lets the entrypoint drop from root to `node` after taking ownership of
 # the data volume. Without it the process would have to run as root.
@@ -60,6 +63,10 @@ RUN apk add --no-cache su-exec && chmod +x /usr/local/bin/entrypoint.sh
 
 ENV NODE_ENV=production
 ENV PORT=8080
+# Pi resolves user-scope skills from $HOME/.agents/skills. `su-exec node` currently
+# rewrites HOME, but su-exec is installed unpinned, and a build where it does not would
+# silently find zero skills. Pinning HOME here makes discovery independent of it.
+ENV HOME=/home/node
 
 EXPOSE 8080
 
