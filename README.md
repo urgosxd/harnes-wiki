@@ -467,18 +467,66 @@ either publish with `PUSH=1 REGISTRY=...`, or build one platform at a time with
 `PLATFORMS=linux/arm64 ./scripts/build.sh 0.1.0`. The script says this instead of
 failing halfway.
 
-### Running it
+### Deploy: one command
+
+`./scripts/deploy.sh` is the recommended path: it validates `.env.prod`, pulls the
+tagged images, then runs `docker compose -f docker-compose.prod.yml up -d --wait`.
+It is the validation and healthcheck-gated path, and it exists because two of the
+failures below cannot be corrected after the fact — a placeholder
+`POSTGRES_PASSWORD` is baked into the volume on the first `initdb`, and a placeholder
+key leaves the stack looking healthy while every turn fails — so every check runs
+*before* a single docker command, and `--wait` is what makes "deployed" mean
+"healthy".
 
 ```bash
-# local images (built above), no registry involved
-VERSION=0.1.0 docker compose -f docker-compose.prod.yml up -d
+cp deploy/env.prod.example .env.prod && chmod 600 .env.prod
+$EDITOR .env.prod              # POSTGRES_PASSWORD (openssl rand -hex 24), CHAT_API_KEY
 
-# from a registry
-REGISTRY=ghcr.io/your-user VERSION=0.1.0 \
-  docker compose -f docker-compose.prod.yml pull
-REGISTRY=ghcr.io/your-user VERSION=0.1.0 \
-  docker compose -f docker-compose.prod.yml up -d
+./scripts/deploy.sh --check    # dry validation: no docker command, no file written
+./scripts/deploy.sh            # pull, then up -d --wait (healthcheck-gated)
 ```
+
+Invoking compose by hand is also a supported production path. The flag is not
+optional:
+
+```bash
+# recommended
+./scripts/deploy.sh
+
+# manual, equivalent — --env-file is required
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
+```
+
+Without `--env-file`, compose reads the **development** `.env` and the stack can
+start with development credentials. The manual form also skips the validation above
+and returns as soon as the containers are created: nothing there waits for health.
+
+`.env.prod` is git-ignored (`.env.*`). With no `.env.prod` the script copies the
+template, refuses to deploy and exits non-zero; `--env-file <path>` reads another
+file instead. `--wait` waits for the healthchecks this compose file declares rather
+than sleeping, and a failed start prints the exit status plus the last 40 log lines.
+Every validation message names the variable and never its value.
+
+| Variable | If it is missing or wrong | Effect |
+|---|---|---|
+| `VERSION` | `${VERSION:?}` in the compose file | **aborts**: a deployment must name the build it runs |
+| `POSTGRES_PASSWORD` | `${POSTGRES_PASSWORD:?}`, still a placeholder, or containing `@ : / # ? %` or a space | **aborts**: `deploy.sh` refuses, because the value is interpolated into `DATABASE_URL` and is baked into the volume on the first `initdb` |
+| `CHAT_API_KEY` | empty or still `CHANGE_ME` | **aborts** in `deploy.sh`: the server starts, then every turn fails with `No API key found for the selected model` |
+| `CHAT_THINKING_LEVEL` | not one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | **aborts** at startup: `config.ts` throws |
+| `PUBLIC_BASE_URL`, `INGEST_API_BASE_URL` | not an absolute http(s) origin, or carrying a path | **aborts** at startup: `config.ts` throws |
+| `PI_WORKSPACE_DIR`, `CHAT_PROVIDER`, `CHAT_MODEL`, `PI_AGENT_CONFIG_MODE` | empty in `.env.prod` | **no effect**: the compose file supplies all four (`/data/workspace`, `synthetic`, `syn:large:text`, `generate`); an entry here is ignored, and `deploy.sh` warns instead of pretending otherwise |
+| `REGISTRY` | empty (allowed) | no registry involved: `agentdocumentor-server:$VERSION` and `agentdocumentor-web:$VERSION` must already exist on this host |
+| `INGEST_API_BASE_URL` | empty (allowed) | degrades: uploads keep working, ingest-by-document answers `503 ingest_not_configured` |
+| `PUBLIC_BASE_URL` | empty (allowed) | degrades: upload-backed ingests are disabled |
+| `AUTH_MODE` | `open` (the default) | degrades: the name in the link IS the identity, with no secret behind it |
+
+`PI_AGENT_CONFIG_MODE` is the one that looks optional and is not: `config.ts` aborts
+when the mode is anything but `generate` **and** `PI_AGENT_DIR` is empty, which is why
+the compose file pins `generate` — that is what lets the server write its own
+`models.json` from the `CHAT_*` variables with nothing mounted.
+
+The images themselves come from **Building and publishing both architectures**
+above: `deploy.sh` pulls them and never builds them.
 
 `docker-compose.prod.yml` has **no `build:` key at all**, so it cannot compile
 anything even by accident. It also requires `POSTGRES_PASSWORD` rather than
@@ -525,7 +573,7 @@ them; the file itself is never mounted.
 
 | | Development | Production |
 |---|---|---|
-| Command | `source scripts/dev-env.sh` + `npm start` | `docker compose -f docker-compose.prod.yml up -d` |
+| Command | `source scripts/dev-env.sh` + `npm start` | `./scripts/deploy.sh` |
 | Compose file | `docker-compose.yml` (`build:`) | `docker-compose.prod.yml` (`image:`) |
 | Where it builds | on this machine, from the source tree | nowhere — the image is pulled |
 | Architectures | whatever this machine is | `linux/amd64` **and** `linux/arm64`, one tag |
