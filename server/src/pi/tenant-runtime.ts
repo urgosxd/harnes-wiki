@@ -13,6 +13,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "typebox";
 import { agentToolNames, createAgentTools, type AgentToolOptions } from "./agent-tools.ts";
 import { currentStackId } from "./stack-context.ts";
+import { stackPromptExtension } from "./stack-prompt.ts";
 import { Type } from "typebox";
 import type { ThinkingLevelName } from "../config.ts";
 
@@ -152,6 +153,11 @@ export class TenantRuntime {
       cwd: workspaceDir,
       agentDir,
       noExtensions: true,
+      // `noExtensions` disables discovery of extension FILES; an inline factory still
+      // loads, and this one carries the turn's Stack into the prompt (`stack-prompt.ts`).
+      // It is registered here because the loader is per tenant and the handler resolves
+      // the Stack per turn, from the request's own async chain — never from this object.
+      extensionFactories: [stackPromptExtension],
       // Skills are documentation the model can consult; they are not a dev surface
       // and are not shown in the UI.
       noSkills: !capabilities.skills,
