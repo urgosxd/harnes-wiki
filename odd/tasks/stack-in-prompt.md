@@ -5,7 +5,7 @@ never learns its value, so a question like "ingest this into my stack" is answer
 which Stack, or by picking one from `list_stacks`. This feature puts the link's Stack into the
 system prompt of the turn, without persisting it and without changing who wins a divergence.
 
-Status: in progress
+Status: complete
 Branch: feature/stack-in-prompt
 Created: 2026-11-17
 Requester: the repo owner, in the chat session.
@@ -47,12 +47,41 @@ gap — never papered over with a unit test of the composition alone (S22 of
 
 | ID | Task | Spec | Route | Commit |
 |---|---|---|---|---|
-| T1 | RED test proving the provider's system prompt carries the turn's Stack, then implement the section and wire it into the runtime; README updated with it | S1-S8 | worker | pending |
-| T2 | Verification: focused test, full server suite, typecheck, web suite | S1-S8 | inline | pending |
-| T3 | Work-unit commit on `feature/stack-in-prompt` | S1-S8 | inline | pending |
+| T1 | RED test proving the provider's system prompt carries the turn's Stack, then implement the section and wire it into the runtime; README updated with it | S1-S8 | worker | `3cea3a1` |
+| T2 | Verification: focused test, full server suite, typecheck, web suite | S1-S8 | inline | `3cea3a1` |
+| T3 | Work-unit commit on `feature/stack-in-prompt` | S1-S8 | inline | `3cea3a1` |
 
 ## Log
 
 L1 (verbatim, the request):
 
 > "lo que quiero es que cuando abra el agente web y lo abra con el stakc en el url, al preguntar en el chat ya sepa que estoy refiriendome a ese stack y no a otro"
+
+L2 (decision: carrier). The Stack reaches the model as a FORCED PROMPT, not as a user
+message and not as a tool description. A `before_agent_start` result `systemPrompt` is
+projected as the leading system message of the provider request and is not recorded
+(`agent-session.js` `_installAgentForcedPromptProjection`), which is the only carrier that
+satisfies S2 and S3 at once: the model reads it before choosing a tool, the user's own text
+is never rewritten, and no new value is stored. Rejected: prepending to `session.prompt()`
+(persists the section into the transcript and shows it in the chat) and reloading the
+`DefaultResourceLoader` per turn (re-discovers resources and races between concurrent turns
+of the same user).
+
+L3 (decision: tag). The section is wrapped in `<session_stack>`. The SDK wraps every named
+section in a tag of its own name (`buildSystemPromptSections`), and a bare paragraph appended
+to an already-rendered prompt would read as a continuation of the last section.
+
+L4 (evidence). RED: the provider request carried no Stack, and all four tests failed on that
+assertion (`server/test/stack-prompt.test.ts`). GREEN after the wiring: 4/4. Suite: server
+293 tests, 250 pass, 0 fail, 43 skipped (pre-existing Postgres/credential gates; the new file
+skips nothing); server typecheck clean; web typecheck clean and 246/246 green after restoring
+an incomplete `web/node_modules` (`react-markdown` and `remark-gfm` were declared and absent,
+which failed 9 web files before this branch touched anything — `web/` has no changes here).
+
+L5 (gap, disclosed not papered). The test observes the `TranscriptContext` handed to the
+provider API implementation, i.e. after Pi's own projection, not a serialized HTTP body. Same
+object the production provider code receives; the difference is only serialization.
+
+L6 (delegation). T1 was delegated to `agentdocumentor-dev` under the label `stack-in-prompt`;
+its own subagents are read-only, so the implementation ran inside that agent rather than in a
+nested writer.
