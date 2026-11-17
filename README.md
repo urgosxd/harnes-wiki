@@ -893,6 +893,17 @@ argument names the link's Stack or when the argument is absent: neither is a
 divergence. This supersedes the earlier rule that refused any argument disagreeing
 with the link; nothing is refused for disagreeing now.
 
+The model also reads the Stack directly, so "ingest this into my stack" resolves
+without asking which one it means. Every turn's system prompt names the link's Stack,
+says that "my stack", "this stack" and "the stack" mean it, and says that a
+stack-scoped tool omitting `stackId` applies it. The value is resolved per turn from
+the request's own context — the same `stackId` the tool proxy reads — and is projected
+onto the provider request only: it is never stored, never added to the conversation and
+never shown in the chat, and two turns running at once cannot see each other's. A link
+without `stackId` adds no section at all, leaving the fail-closed error above as the
+only statement about the missing Stack. The resolution order is untouched: the section
+states the default, an explicit argument still wins, and a divergence is still reported.
+
 ## Reaching an MCP server over HTTP
 
 The tenant MCP seam has two transports, and a `tenant_mcp` row states which it
