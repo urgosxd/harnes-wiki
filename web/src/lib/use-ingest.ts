@@ -65,6 +65,18 @@ export type IngestNotice = {
 } | null;
 
 /**
+ * How often the Recent list is re-read while the panel is open.
+ *
+ * Five seconds, for a reason rather than a taste: the job on screen already polls at 250 ms
+ * → 2 s, so this interval is only about the ROWS nobody is following — a job someone else
+ * started, or one that finished a moment ago. Fast enough that the list is not visibly
+ * stale when the panel opens, slow enough that a background tab does not read the list
+ * every couple of seconds, and longer than the poll's own ceiling so the two never land in
+ * lockstep.
+ */
+export const LIST_REFRESH_MS = 5_000;
+
+/**
  * What the ingest surface says when the link names no Stack.
  *
  * It names the parameter AND the shape of a working link, because the link is the
@@ -182,6 +194,14 @@ export interface UseIngestResult {
   starting: boolean;
   /** True while the active job is being polled. */
   following: boolean;
+  /**
+   * Tell the hook the jobs panel is on screen, and that it is gone again.
+   *
+   * The interval refresh is scoped to the panel being OPEN, and this hook is created above
+   * the view switch — deliberately, so a follow survives a trip to the chat — so the panel
+   * is the only thing that knows. `true` while mounted, `false` on the way out.
+   */
+  setListLive(live: boolean): void;
   /** Start an ingest from a source. A chosen `stackId` wins over the link's Stack. */
   start(source: string, options?: IngestWriteOptions): Promise<void>;
   /**
@@ -216,10 +236,13 @@ export interface UseIngestResult {
 export function useIngest({
   client,
   stackId,
+  listRefreshMs = LIST_REFRESH_MS,
 }: {
   client: ApiClient;
   /** The tenant, already resolved from the link. `null` blocks the whole surface. */
   stackId: string | null;
+  /** Injection seam for tests: how often the list is re-read while it is live. */
+  listRefreshMs?: number;
 }): UseIngestResult {
   // Read once and never mutated: the link is the only source, so there is no
   // selection to track and nothing a later render could contradict.
@@ -238,6 +261,9 @@ export function useIngest({
   const [pollNotice, setPollNotice] = useState<IngestNotice>(null);
   const [starting, setStarting] = useState(false);
   const [following, setFollowing] = useState(false);
+  // Whether the jobs panel is on screen. The interval refresh is scoped to this and not to
+  // the hook's lifetime, because the hook outlives the view on purpose.
+  const [listLive, setListLive] = useState(false);
   // The user's explicit choice on this surface. `null` until they pick: the link's value
   // is applied as the fallback by `resolvedStackId` rather than copied into state, so a
   // link that changes still decides until someone chooses otherwise.
@@ -260,6 +286,16 @@ export function useIngest({
   const inFlight = useRef<Set<string>>(new Set());
 
   const abortRef = useRef<AbortController | null>(null);
+
+  /**
+   * Whether a list read is outstanding.
+   *
+   * Read by the interval tick and by nothing else: an explicit refresh (mount, and after
+   * every action) keeps its old behaviour of simply asking, because dropping it would make
+   * the list the user just changed wait for a tick. A timer, on the other hand, must not
+   * stack a second read on a host that has not answered the first.
+   */
+  const listInFlight = useRef(false);
 
   /**
    * The choices the control offers.
@@ -347,6 +383,7 @@ export function useIngest({
 
   const refreshList = useCallback(async () => {
     if (!stackId) return;
+    listInFlight.current = true;
     try {
       const list = await client.listIngestJobs(stackId);
       setJobs(list);
@@ -354,6 +391,7 @@ export function useIngest({
     } catch (error) {
       setListNotice(noticeFor(error));
     } finally {
+      listInFlight.current = false;
       setLoadingList(false);
     }
   }, [client, stackId]);
@@ -361,6 +399,23 @@ export function useIngest({
   useEffect(() => {
     void refreshList();
   }, [refreshList]);
+
+  /**
+   * Re-read the list on an interval, while the panel says it is open.
+   *
+   * A tick that lands on an outstanding read is DROPPED rather than queued, which is what
+   * keeps a slow host from being asked again before it has answered. With no Stack the
+   * timer is not even created: there is nothing safe to read, and `refreshList` refuses
+   * anyway.
+   */
+  useEffect(() => {
+    if (!listLive || !stackId) return;
+    const timer = setInterval(() => {
+      if (listInFlight.current) return;
+      void refreshList();
+    }, listRefreshMs);
+    return () => clearInterval(timer);
+  }, [listLive, listRefreshMs, refreshList, stackId]);
 
   // A poll loop outliving the view would keep calling a component that no longer
   // exists; the abort is what actually ends it.
@@ -599,6 +654,7 @@ export function useIngest({
     pollNotice,
     starting,
     following,
+    setListLive,
     start,
     follow,
     stopFollowing,

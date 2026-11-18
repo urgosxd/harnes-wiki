@@ -795,3 +795,115 @@ describe("useIngest: a blip reads as reconnecting, not as a failed job (S2)", ()
     await waitFor(() => expect(view.result.current.following).toBe(false));
   });
 });
+
+/**
+ * THE LIST REFRESHES ON ITS OWN, WHILE THE PANEL IS ON SCREEN
+ *
+ * The defect: `refreshList` was wired to mount and to the actions, and `web/src` had no
+ * `setInterval` at all. A job that appeared in Recent stayed absent, and a row that
+ * finished stayed "live", until somebody clicked Refresh — the list was a photograph.
+ *
+ * Three properties are asserted, and the third is the one that keeps the fix from becoming
+ * a request storm: an interval while the panel is open, never a second read stacked on one
+ * still in flight, and nothing at all when the surface has no Stack.
+ *
+ * The interval is injected (20 ms) because the real one is 5 s: the value is a product
+ * choice, not something a test should wait for.
+ */
+const TEST_REFRESH_MS = 20;
+
+function intervalHarness() {
+  const state = {
+    listReads: 0,
+    /** Reads at or after this ordinal hang until the test releases them. */
+    hangFrom: Number.POSITIVE_INFINITY,
+    releases: [] as (() => void)[],
+  };
+  const fetchImpl = (async (url: string) => {
+    const href = String(url);
+    if (href.endsWith("/stacks")) return json({ stackIds: ["A"] });
+    if (href.endsWith("/documents")) return json({ documents: [] });
+    if (!/\/ingest\/jobs(\?|$)/.test(href)) return json({ jobs: [] });
+    state.listReads += 1;
+    if (state.listReads >= state.hangFrom) {
+      await new Promise<void>((resolve) => state.releases.push(resolve));
+    }
+    return json({ jobs: [] });
+  }) as unknown as typeof fetch;
+  const client = new ApiClient({
+    baseUrl: "/api",
+    headers: () => ({ "x-user-id": "u" }),
+    fetchImpl,
+  });
+  return { client, state };
+}
+
+describe("useIngest: the jobs list refreshes on an interval (S5)", () => {
+  it("refreshes while the panel is open, and stops when it closes", async () => {
+    const { client, state } = intervalHarness();
+    const view = renderHook(() =>
+      useIngest({ client, stackId: "A", listRefreshMs: TEST_REFRESH_MS }),
+    );
+    await waitFor(() => expect(view.result.current.loadingList).toBe(false));
+    const afterMount = state.listReads;
+
+    act(() => view.result.current.setListLive(true));
+    await waitFor(() => expect(state.listReads).toBeGreaterThan(afterMount), { timeout: 2_000 });
+
+    // And it stops when the panel closes: a timer over a list nobody is looking at is the
+    // same request storm in a quieter place.
+    act(() => view.result.current.setListLive(false));
+    const afterClose = state.listReads;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(state.listReads).toBe(afterClose);
+  });
+
+  it("does not stack a refresh on one that is still in flight", async () => {
+    const { client, state } = intervalHarness();
+    const view = renderHook(() =>
+      useIngest({ client, stackId: "A", listRefreshMs: TEST_REFRESH_MS }),
+    );
+    await waitFor(() => expect(view.result.current.loadingList).toBe(false));
+
+    // Every read from the next one on hangs until the test says otherwise, so several
+    // interval ticks land while the first is genuinely outstanding.
+    state.hangFrom = state.listReads + 1;
+    act(() => view.result.current.setListLive(true));
+    await waitFor(() => expect(state.listReads).toBe(2), { timeout: 2_000 });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(state.listReads).toBe(2);
+    expect(state.releases).toHaveLength(1);
+
+    // Once it answers, the interval carries on: the guard defers a read, it does not stop
+    // the refresh.
+    await act(async () => {
+      for (const release of state.releases) release();
+    });
+    await waitFor(() => expect(state.listReads).toBeGreaterThan(2), { timeout: 2_000 });
+    act(() => view.result.current.setListLive(false));
+  });
+
+  it("issues no request at all when the surface has no Stack", async () => {
+    const seen: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      seen.push(String(url));
+      return json({ stackIds: [] });
+    }) as unknown as typeof fetch;
+    const client = new ApiClient({
+      baseUrl: "/api",
+      headers: () => ({ "x-user-id": "u" }),
+      fetchImpl,
+    });
+
+    const view = renderHook(() =>
+      useIngest({ client, stackId: null, listRefreshMs: TEST_REFRESH_MS }),
+    );
+    await waitFor(() => expect(view.result.current.loadingList).toBe(false));
+    act(() => view.result.current.setListLive(true));
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    // `GET /stacks` is the only thing this state may ask, exactly as before: no list read,
+    // no poll, nothing into a tenant nobody named.
+    expect(seen.filter((url) => !url.endsWith("/stacks"))).toEqual([]);
+  });
+});

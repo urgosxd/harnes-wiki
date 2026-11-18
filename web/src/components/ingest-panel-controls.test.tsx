@@ -62,6 +62,7 @@ function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
     pollNotice: null,
     starting: false,
     following: false,
+    setListLive: () => {},
     start: async () => {},
     follow: () => {},
     stopFollowing: () => {},
