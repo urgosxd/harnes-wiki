@@ -71,7 +71,7 @@ rather than interrupted.
 |---|---|---|---|---|
 | T1 | Server half: `deleteJob` / `retryJob` on the adapter, the two routes beside the job reads, README ingest rows | S2-S4, S6, S7 | worker A | 086a075 |
 | T2 | Server tests: RED first, then proving the sent verb/path/query, verbatim passthrough, the refusals not becoming `502`, the blank id, and the tolerant id read | S2-S6 | worker A | 086a075 |
-| T3 | Web half: the two controls in the ingest panel, the payload read tolerantly, a refusal shown as a refusal and never retried automatically | S1, S2, S4, S6, S7 | worker B | 14cbccb |
+| T3 | Web half: the two controls in the ingest panel, the payload read tolerantly, a refusal shown as a refusal and never retried automatically | S1, S2, S4, S6, S7 | worker B | 14cbccb, f42712e |
 | T4 | Feature-document census line and reconciliation of the two halves | S8 | inline | 086a075 |
 
 ## Log
@@ -123,3 +123,29 @@ the other repository, not a captured response, so the adapter forwards the retry
 untouched and reads the new id tolerantly rather than depending on a shape nobody has seen.
 The retry `stackId` from L2 remains an assumption: it is sent for consistency with every other
 ingest call and has NOT been verified against the host's retry route.
+
+L4 (reconciliation: the fourth slice, the slice sizes, what stays unproven).
+
+The delivery on `feature/ingest-operator-controls` is four commits: `086a075` (server),
+`14cbccb` (web), `8b5f985` (documentation), `f42712e` (tests). The fourth is test-only — the two
+web files that pin the `409` allow-list edges and the operator-control scope — and it is the
+durable proof behind T3, so the table above now names it beside the web slice instead of leaving
+that work resting on the commit it arrived in.
+
+Slice sizes, entered as a reviewer-workload note rather than as an apology: slice 1 is ~690
+authored lines and slice 2 is ~1140, both past the ~400 target. Neither was re-cut, because the
+bulk is new tests (477 + 373 + 273 + 183) and the only split available separates a test from the
+behaviour it proves; this repository ships behaviour and its proof in the same commit, so a
+slice carrying one without the other would have to be trusted on its word.
+
+The `409` regression an independent verifier caught, and the shape of the fix. The notice branch
+is an allow-list now: a `409` naming `job_still_working` or `job_changed` renders the host's own
+code and words, once. Everything else — a `409` carrying no code at all, and the `busy` lock
+`start` hits — keeps the original sentence byte for byte: "Another ingest is running. That is a
+retry signal, not a failure." Both sides are pinned by literal assertions.
+
+Unverified against the host, named here instead of implied: the real `204` / `202` bodies for
+delete and retry, the exact wording of `job_changed`, and the retry `stackId` query from L2.
+S1's trace is a reading of the other repository, not a captured response, which is why the
+adapter forwards the retry payload untouched and reads the new id tolerantly rather than
+depending on a shape nobody here has seen.
