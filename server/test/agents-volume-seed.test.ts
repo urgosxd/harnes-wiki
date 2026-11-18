@@ -226,4 +226,21 @@ test("a missing agents seed fails the boot instead of starting without a role", 
   // The alternative is the failure this whole step exists to remove: a container that
   // comes up healthy with zero definitions and fails later, in a user's turn.
   assert.notEqual(result.status, 0, "an image with no seed must not pass the seeding step");
+
+  // And the operator is told what is wrong, in this script's own voice. `cp`'s
+  // `cannot stat` against a target `mkdir -p` just created reads like a permissions
+  // problem in the volume, which sends the reader to the wrong place entirely: the fault
+  // is in the IMAGE, and the fix is to rebuild it. Pinned verbatim so a rewording has to
+  // be deliberate.
+  assert.equal(
+    result.stderr,
+    `agents-seed: ${fixture.target} is empty and this image carries no seed at ${fixture.seed}\n` +
+      `agents-seed: nothing was copied and the boot is stopping here rather than starting ` +
+      `without agents; rebuild the image from the deployment's checkout (its agents are ` +
+      `baked in at ${fixture.seed}), or mount a directory that already has content\n`,
+    `the operator must be told what is missing and what to do: ${result.stderr}`,
+  );
+  assert.doesNotMatch(result.stderr, /cannot stat/, "the raw `cp` failure must not be what is shown");
+  assert.deepEqual(filesUnder(fixture.target), [], "nothing may be copied from a missing seed");
+  assert.doesNotMatch(result.stdout, /agents-seed:/, "a failed seed must not claim a state");
 });

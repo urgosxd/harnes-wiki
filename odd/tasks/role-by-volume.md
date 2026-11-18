@@ -209,3 +209,41 @@ What each point changed:
   declared names (boot), or a warning naming both names plus a notice in the turn's output
   (turn time), with the last valid text still applied. Body-only edits are pinned as
   producing neither a warning nor a notice.
+
+L7 (the rendered prompt's ORDER changed, accepted, and pinned by a test):
+
+An independent verification compared the rendered system prompt at base (`ece45e7`) with
+this branch and found one ordering change, nothing lost:
+
+- at base: `base prompt → # Role: … → <cwd> → <session_stack>`
+- on this branch: `base prompt → <cwd> → # Role: … → <session_stack>`
+
+The cause is the mechanism, not a defect: the role used to be composed at boot and handed
+to Pi as the session prompt, so Pi's own sections followed it; it is now appended per turn
+to a prompt Pi has already rendered, so it lands after Pi's `<cwd>` block. The role text is
+byte-identical and the one order that carries meaning — the standing identity (`# Role: …`)
+before the turn's own fact (`<session_stack>`) — is unchanged.
+
+**Decision: accept the new order; do not restore the old one.** Moving Pi's `<cwd>` block
+to put the role back where it was would be hand-surgery on another component's output for
+zero semantic gain. What the acceptance needs is a guard, so
+`server/test/role-prompt-drift.test.ts` asserts the DOCUMENTED order (`<cwd>` before
+`# Role:`, `# Role:` before `<session_stack>`), exactly one `# Role:` heading, and that the
+boot composition and the per-turn one are identical once the `<cwd>` block is normalized
+away — so any OTHER drift still fails. `README.md` states the position in one sentence
+where the role and Stack sections are described.
+
+Two smaller reports from the same verification are fixed in the same commit:
+
+- **The log line lied when there had never been a role.** `unusable()` in `agent-role.ts`
+  warned "the turn keeps the last valid role text" even on a first turn, which ran with no
+  role at all (the notice already said so). The outcome is now appended from the same
+  expression the notice uses — "…; this turn ran without a role" versus "…; this turn used
+  the last valid role text" — and both branches are pinned by exact-text assertions in
+  `role-per-turn.test.ts`, so the words cannot drift from the behaviour again.
+- **A missing agents seed spoke in `cp`'s voice.** `cp: cannot stat …` against a target
+  `mkdir -p` had just created reads like a permissions problem in the volume, when the
+  fault is the image. `entrypoint.sh` now names the empty target and the absent seed, says
+  nothing was copied and the boot is stopping, and exits non-zero exactly as before; the
+  wording is pinned verbatim in `agents-volume-seed.test.ts`. The skills step is untouched
+  beyond sharing the same wording, and `SKILLS_SEED_ONLY` still means what it meant.

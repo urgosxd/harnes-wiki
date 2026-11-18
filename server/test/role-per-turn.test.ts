@@ -330,6 +330,55 @@ test("a role file that was never readable leaves no role, and the turn still run
   }
 });
 
+test("the unusable-role warning says which of the two things actually happened", async () => {
+  // S5 has TWO outcomes, and one wording for both is a lie in whichever branch it does
+  // not describe: a first turn has no valid text to keep, so it ran with no role at all.
+  // The exact sentences are pinned here, in both branches, so the words cannot drift away
+  // from the behaviour again — a near-miss assertion (`/role/`) would not have caught it.
+  const files = layout();
+  assert.equal(existsSync(files.file), false);
+  const h = await harness(files.file);
+  try {
+    // Branch 1: never readable, nothing to fall back to.
+    await h.turn("conv-wording-none");
+    assert.deepEqual(
+      h.logged.filter((entry) => entry.level === "warn").map((entry) => entry.message),
+      ["agent role could not be read; this turn ran without a role"],
+      "a first turn with no readable file must say the turn ran WITHOUT a role",
+    );
+    assert.equal(
+      h.logged.find((entry) => entry.level === "warn")?.fields.hadPrevious,
+      false,
+      "the record must carry the fact the sentence describes",
+    );
+
+    // Branch 2: one good turn first, so there IS a last valid text to keep.
+    files.write("ROLE-TEXT-WORDING");
+    h.logged.splice(0);
+    await h.turn("conv-wording-good");
+    assert.deepEqual(
+      h.logged.filter((entry) => entry.level === "warn").map((entry) => entry.message),
+      [],
+      "a readable file must warn about nothing",
+    );
+
+    files.remove();
+    await h.turn("conv-wording-kept");
+    assert.deepEqual(
+      h.logged.filter((entry) => entry.level === "warn").map((entry) => entry.message),
+      ["agent role could not be read; this turn used the last valid role text"],
+      "a later turn with a previous good text must say the text was KEPT",
+    );
+    assert.equal(
+      h.logged.find((entry) => entry.level === "warn")?.fields.hadPrevious,
+      true,
+      "the record must carry the fact the sentence describes",
+    );
+  } finally {
+    await h.close();
+  }
+});
+
 test("the role section stays distinguishable from the turn's Stack, and comes first", async () => {
   const files = layout();
   files.write("ROLE-TEXT-ORDER");

@@ -138,7 +138,7 @@ export class AgentRoleReader {
       stats = statSync(source.path);
     } catch (error) {
       return this.unusable(source, previous, {
-        message: "agent role could not be read; the turn keeps the last valid role text",
+        message: "agent role could not be read",
         what: "could not be read",
         error,
       });
@@ -153,7 +153,7 @@ export class AgentRoleReader {
       text = readFileSync(source.path, "utf8");
     } catch (error) {
       return this.unusable(source, previous, {
-        message: "agent role could not be read; the turn keeps the last valid role text",
+        message: "agent role could not be read",
         what: "could not be read",
         error,
       });
@@ -164,7 +164,7 @@ export class AgentRoleReader {
       parsed = parseAgentDefinition(text, source.path);
     } catch (error) {
       return this.unusable(source, previous, {
-        message: "agent role file was refused; the turn keeps the last valid role text",
+        message: "agent role file was refused",
         what: "was refused",
         error,
       });
@@ -176,7 +176,7 @@ export class AgentRoleReader {
     // At turn time the refusal is recoverable, so it is a warning plus the last text.
     if (unsupportedKeys.length > 0) {
       return this.unusable(source, previous, {
-        message: "agent role file was refused; the turn keeps the last valid role text",
+        message: "agent role file was refused",
         what: "was refused",
         error: new Error(
           `frontmatter carries ${unsupportedKeys.join(", ")}, which this runtime cannot honor`,
@@ -191,8 +191,7 @@ export class AgentRoleReader {
     // a role under a name this deployment never selected.
     if (definition.name !== source.name) {
       return this.unusable(source, previous, {
-        message: "agent role file declares a different name than the selected definition; " +
-          "the turn keeps the last valid role text",
+        message: "agent role file declares a different name than the selected definition",
         what: "declares a name this deployment did not select",
         error: new Error(
           `it now declares name "${definition.name}", and this deployment selected "${source.name}"`,
@@ -218,22 +217,29 @@ export class AgentRoleReader {
    * describing different files. The sentence says what the turn actually did, because
    * "the role file is broken" without that leaves the reader guessing whether the agent
    * ran with a stale role or with none.
+   *
+   * `report.message` therefore says only WHAT happened to the file, never what the turn
+   * did about it: there are two outcomes (`previous` exists, or it does not) and ONE
+   * wording for both is false in the branch it does not describe. That was a real defect —
+   * the log claimed "the turn keeps the last valid role text" on a first turn, where the
+   * turn in fact ran with no role at all — so the outcome is appended here, from the same
+   * expression the notice uses, and both branches are pinned by a test.
    */
   private unusable(
     source: AgentRoleSource,
     previous: CachedRole | undefined,
     report: { message: string; what: string; error: unknown },
   ): { entry: CachedRole | undefined; problem: string } {
-    this.log.warn(report.message, {
+    const used =
+      previous === undefined
+        ? "this turn ran without a role"
+        : "this turn used the last valid role text";
+    this.log.warn(`${report.message}; ${used}`, {
       file: source.path,
       role: source.name,
       error: describe(report.error),
       hadPrevious: previous !== undefined,
     });
-    const used =
-      previous === undefined
-        ? "this turn ran without a role"
-        : "this turn used the last valid role text";
     return {
       entry: previous,
       problem: `The agent role file ${source.path} ${report.what} (${describe(report.error)}); ${used}.`,

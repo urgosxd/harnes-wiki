@@ -56,10 +56,20 @@ seed_volume() {
     return 0
   fi
 
-  mkdir -p "$target"
   # No fallback here on purpose. A missing seed is a broken image, and the boot must fail
   # loudly rather than come up healthy with zero skills or zero definitions — which is the
-  # state this whole step exists to remove.
+  # state this whole step exists to remove. The failure is worded here instead of left to
+  # `cp`, because `cp` reports `cannot stat` against a target `mkdir -p` has just created,
+  # which reads like a permissions accident in the volume: name what is missing, and what
+  # the operator can do about it, then stop non-zero exactly as before. It is checked
+  # BEFORE the `mkdir`, so a boot that cannot fill the volume does not leave an empty
+  # directory behind to confuse the next diagnosis.
+  if [ ! -d "$seed" ]; then
+    echo "$label-seed: $target is empty and this image carries no seed at $seed" >&2
+    echo "$label-seed: nothing was copied and the boot is stopping here rather than starting without $label; rebuild the image from the deployment's checkout (its $label are baked in at $seed), or mount a directory that already has content" >&2
+    exit 1
+  fi
+  mkdir -p "$target"
   cp -a "$seed"/. "$target"/
   # Only root can chown, and only root has anything to correct: the copy is root-owned,
   # while an unprivileged run already owns what it just wrote. Guarding on `id -u` is what

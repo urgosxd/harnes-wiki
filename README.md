@@ -188,7 +188,9 @@ is kept, and a warning is logged.
 
 Selecting a definition with `AGENT_DEFINITION=<name>` appends it to the system prompt
 as `# Role: <name>`, followed by the description and the body, before the turn's Stack
-section. The base prompt stays first and unmodified, so a role adds to the product's
+section. Because the role is appended per turn rather than composed at boot, it lands
+after Pi's own `<cwd>` block and before the Stack section, and its content is unchanged.
+The base prompt stays first and unmodified, so a role adds to the product's
 behavior instead of replacing it. With `AGENT_DEFINITION` unset nothing changes in the
 prompt: the plain one is used, and definitions are still read so their problems are
 visible at startup.
