@@ -335,6 +335,7 @@ if (inCheckout) {
         "stack-in-prompt.md",
         "ui-improve.md",
         "urlparam-stackId.md",
+        "users-with-tokens.md",
       ],
       "the documents that carry task rows are declared here, never inferred; a new one " +
         "must be added deliberately so a task table cannot slip in unread",
