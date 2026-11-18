@@ -26,6 +26,12 @@
  *
  * There is no SSE and no WebSocket. Polling starts at 250 ms and backs off to at
  * most 2 s, and it stops only when BOTH dimensions are terminal-or-absent.
+ *
+ * ## The payload's `dimensions` array is a report, not a lifecycle
+ *
+ * The producer also publishes per-dimension results (`wiki`, `kg`, …). Those are RENDERED
+ * — `dimensionRows` narrows them to rows the panel can show — and they deliberately do not
+ * feed `isJobSettled`, which keeps reading the `ingest`/`compile` pair.
  */
 
 /** Terminal `ingest.status` values: nothing will change these again. */
@@ -119,6 +125,17 @@ export interface IngestJob {
   updatedAt: string;
   ingest: IngestDimension;
   compile: CompileDimension;
+  /**
+   * Per-dimension results, as the producer publishes them.
+   *
+   * `unknown` on purpose, and this is the only field in this module with that type. The
+   * producer is an EXTERNAL service: it can add a dimension this build has never heard of,
+   * and it can answer a shape nobody promised. A declared `Array<{name: string}>` would be
+   * a promise this side cannot keep — it would typecheck while the value was `42`, and the
+   * first non-object entry would throw inside render. So the payload stays unknown here and
+   * `dimensionRows` below narrows it, entry by entry, to something renderable.
+   */
+  dimensions?: unknown;
 }
 
 /** The `202` answer: the job identity plus both dimensions as they started. */
@@ -145,9 +162,68 @@ export function isCompileSettled(compile: CompileDimension): boolean {
  * Both halves must be terminal. `ingest.succeeded` with `compile.running` is
  * still work in progress, and stopping the poller there would freeze the UI on a
  * compile that is about to finish or fail.
+ *
+ * ## This reads `ingest`/`compile` and NOT `dimensions`, deliberately
+ *
+ * The payload's `dimensions` array is RENDERED (`dimensionRows`); it does not decide when
+ * the loop stops. Whether a dimension can reach a terminal status before the overall job
+ * status does is UNVERIFIED — nothing in this repository observes the producer's
+ * scheduler — and a settle rule built on that guess fails in both directions: guess "a
+ * settled dimension ends the job" wrongly and the screen freezes on work still happening;
+ * guess the ordering the other way and a finished job polls forever. So the lifecycle
+ * stays the pair the service documents as two state machines, and the array informs the
+ * screen without moving the rule.
  */
 export function isJobSettled(job: IngestJob): boolean {
   return isIngestSettled(job.ingest) && isCompileSettled(job.compile);
+}
+
+/**
+ * One dimension row the panel can render: a name, a status, and optionally a summary.
+ *
+ * Nothing here is derived. If the payload did not say it, this row does not carry it.
+ */
+export interface JobDimensionRow {
+  name: string;
+  /** The dimension's OWN status word, exactly as the producer wrote it (trimmed). */
+  status: string;
+  /** Only when the payload carried a non-empty string: absent means absent, never "". */
+  summary?: string;
+}
+
+/**
+ * The renderable rows of a job's `dimensions` array, in the producer's order.
+ *
+ * Tolerance is a rule here, not a defensive habit. The array is external, so a non-array,
+ * an entry that is not an object, a missing `name`, or a non-string `status` are all
+ * shapes that can arrive, and every one of them must produce a row that is missing rather
+ * than a row that lies or a throw that blanks the whole panel.
+ *
+ * An entry survives when it carries a non-blank string `name` AND a non-blank string
+ * `status` — those two are the row. `summary` is the one field a row can live without, so
+ * a non-string or blank summary drops the summary line and keeps the dimension: hiding a
+ * reported result because of its prose would be the opposite of the rule.
+ *
+ * An empty result means "render the fixed pair instead" — the caller's decision, made on
+ * `length === 0`, so an empty array and an unusable one are the same fact: nothing to show.
+ *
+ * Names are NOT deduplicated and NOT reordered: repetition and order are the payload's.
+ */
+export function dimensionRows(job: Pick<IngestJob, "dimensions">): JobDimensionRow[] {
+  const raw = job.dimensions;
+  if (!Array.isArray(raw)) return [];
+
+  const rows: JobDimensionRow[] = [];
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const record = entry as Record<string, unknown>;
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    const status = typeof record.status === "string" ? record.status.trim() : "";
+    if (name === "" || status === "") continue;
+    const summary = typeof record.summary === "string" ? record.summary.trim() : "";
+    rows.push(summary === "" ? { name, status } : { name, status, summary });
+  }
+  return rows;
 }
 
 /**
