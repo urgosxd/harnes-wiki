@@ -121,8 +121,15 @@ services:
       retries: 12
       start_period: 10s
     # No published port: only the web container reaches the API.
+    #
+    # `wiki-link`: the hub's network, created by llm-wiki-compiler's
+    # docker-compose.hub.yml (start that stack first). It is joined, not
+    # redefined — the hub binds a fixed IP there and validates the request's
+    # `Host` header against it, so the address in INGEST_API_BASE_URL and in the
+    # tenant_mcp row has to be that same literal address.
     networks:
       - internal
+      - wiki-link
 
   web:
     build:
@@ -140,6 +147,15 @@ services:
 networks:
   internal:
     driver: bridge
+
+  # Owned by llm-wiki-compiler's docker-compose.hub.yml, which creates it with a
+  # fixed subnet and gives the hub a fixed IP. Declared `external` here on
+  # purpose: recreating this stack must not try to create it, and `up` should
+  # fail loudly ("network not found") if the hub was never started, because a
+  # server without this network answers every wiki tool call with a dead socket.
+  wiki-link:
+    name: wiki-link
+    external: true
 
 volumes:
   agentdoc-pgdata:

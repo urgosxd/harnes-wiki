@@ -117,8 +117,15 @@ services:
       retries: 12
       start_period: 10s
     # No published port: only the web container reaches the API.
+    #
+    # `wiki-link`: the hub's network, created by llm-wiki-compiler's
+    # docker-compose.hub.yml (start that stack first). It is joined, not
+    # redefined — the hub binds a fixed IP there and validates the request's
+    # `Host` header against it, so the address in INGEST_API_BASE_URL and in the
+    # tenant_mcp row has to be that same literal address.
     networks:
       - internal
+      - wiki-link
 
   web:
     image: ${REGISTRY:+${REGISTRY}/}agentdocumentor-web:latest
@@ -132,10 +139,31 @@ services:
       - "127.0.0.1:8088:80"
     networks:
       - internal
+      # Caddy's network (its own compose project, `external: true`). The Caddyfile
+      # proxies wiki.<domain> to `agentdoc-web:80`, so this container has to be
+      # resolvable there by that exact name — container_name is the alias. Without
+      # it Caddy answers 502: it cannot even resolve the upstream.
+      - proxiable
 
 networks:
   internal:
     driver: bridge
+
+  # Owned by llm-wiki-compiler's docker-compose.hub.yml, which creates it with a
+  # fixed subnet and gives the hub a fixed IP. Declared `external` here on
+  # purpose: recreating this stack must not try to create it, and `up` should
+  # fail loudly ("network not found") if the hub was never started, because a
+  # server without this network answers every wiki tool call with a dead socket.
+  wiki-link:
+    name: wiki-link
+    external: true
+
+  # Owned by the caddy compose project (/home/urgosxd/Desktop/caddy), which
+  # publishes 80/443. Joined here so that proxy can reach `agentdoc-web:80` by
+  # name; the 8088 loopback port stays for local checks and scripts.
+  proxiable:
+    name: proxiable
+    external: true
 
 volumes:
   agentdoc-pgdata:
