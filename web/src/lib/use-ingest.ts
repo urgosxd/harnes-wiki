@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiClient, ApiError, type UploadedDocument } from "./api.ts";
-import { type IngestJob, type PollOutcome, type PollStopReason } from "./ingest.ts";
+import {
+  type IngestJob,
+  type PollOutcome,
+  type PollStopReason,
+  type PollTransientFailure,
+} from "./ingest.ts";
 
 /**
  * Owns the ingest-jobs view: the list, the polled job, and the stop notice.
@@ -49,8 +54,13 @@ export type IngestNotice = {
    * `unavailable` is 503, `unknown` is 404, `not_configured` is our own 503, and
    * `stalled` is none of them: the job is known and its state is on screen, but it
    * will not advance. Four different facts, four different pieces of advice.
+   *
+   * `reconnecting` is a fifth and deliberately not a failure: the last read did not
+   * answer, the follow is STILL RUNNING, and the last snapshot is still on screen. It is
+   * reported by the loop itself, through `onTransient`, so it states what happened rather
+   * than guessing from a timer that nothing has arrived.
    */
-  kind: "unavailable" | "unknown" | "error" | "not_configured" | "stalled";
+  kind: "unavailable" | "unknown" | "error" | "not_configured" | "stalled" | "reconnecting";
   message: string;
 } | null;
 
@@ -382,7 +392,13 @@ export function useIngest({
         .pollIngestJob(id, {
           signal: controller.signal,
           stackId: targetStackId,
-          onUpdate: (job) => setActiveJob(job),
+          onUpdate: (job) => {
+            setActiveJob(job);
+            // A read that succeeded ends the reconnect: the notice a blip put on screen is
+            // cleared by the recovery itself, not by the user clicking Dismiss.
+            setPollNotice((current) => (current?.kind === "reconnecting" ? null : current));
+          },
+          onTransient: (failure) => setPollNotice(reconnectingNotice(failure)),
         })
         .then((outcome) => {
           if (abortRef.current === controller) {
@@ -627,6 +643,23 @@ function refusalMessage(error: ApiError): string {
       : `The ingest service refused this request (${error.status}).`;
   }
   return error.code && !said.includes(error.code) ? `${error.code}: ${said}` : said;
+}
+
+/**
+ * The notice for a read that failed while the follow keeps going.
+ *
+ * Two sentences, and both halves are load-bearing: what the read said, and that the job is
+ * still being followed. Without the second the message reads like the failure the loop
+ * used to end on — which is the bug this replaces.
+ */
+export function reconnectingNotice(failure: PollTransientFailure): IngestNotice {
+  const said = failure.message.trim();
+  return {
+    kind: "reconnecting",
+    message:
+      `The job status could not be read just now: ${said === "" ? "no answer." : said} ` +
+      "Still trying, and the last state stays on screen.",
+  };
 }
 
 /** Map a stop reason to what the user can act on. */

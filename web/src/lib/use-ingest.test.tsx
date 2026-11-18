@@ -1,8 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { ApiClient } from "./api.ts";
 import type { IngestJob } from "./ingest.ts";
-import { useIngest } from "./use-ingest.ts";
+import { POLL_MAX_MS, pollJob } from "./ingest.ts";
+import { noticeForOutcome, useIngest } from "./use-ingest.ts";
 
 /**
  * WHY THESE ASSERTIONS
@@ -567,5 +568,230 @@ describe("useIngest: a 409 that is not a job-control refusal keeps its own sente
       kind: "error",
       message: ALREADY_RUNNING_SENTENCE,
     }));
+  });
+});
+
+/**
+ * THE FOLLOW MUST SURVIVE A BLIP — AND MUST NOT SURVIVE IT FOREVER
+ *
+ * The defect: a `fetch` that threw (the `catch` around the read in `ingest.ts`) and any
+ * status other than `503`/`404` both `return`ed out of the loop with `reason: "error"`.
+ * One blip therefore froze the panel while the job kept running on the server, and the
+ * only recovery was a reload.
+ *
+ * The fix has to be bounded or "keep trying" becomes an endless spinner against a host
+ * that will never answer, so the bound is the window the loop already had
+ * (`STALL_AFTER_MS`) rather than a second constant. Both halves are asserted here with an
+ * injected `sleep` and an injected `Date.now`: no test waits 90 seconds, and no test reads
+ * a wall clock to decide whether the loop is bounded.
+ *
+ * `404` after a snapshot and `503` are the regression guards: they are NOT blips, and
+ * folding them into the retry would turn "this job expired" into a spinner.
+ */
+
+/** A job snapshot the loop can advance through: `updatedAt` is what makes it move. */
+function pollSnapshot(updatedAt: string, settled = false): IngestJob {
+  return {
+    id: "job_1",
+    source: "https://example.com/a",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt,
+    ingest: { status: settled ? "succeeded" : "running", stage: "committing", attempts: [] },
+    compile: settled
+      ? { status: "succeeded", progress: null }
+      : { status: "queued", progress: null },
+  };
+}
+
+function reply(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+describe("pollJob: a transient read failure is retried, not fatal (S2)", () => {
+  it("keeps the last snapshot and continues after a network error", async () => {
+    const seen: string[] = [];
+    const failures: string[] = [];
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      if (calls === 1) return reply(pollSnapshot("t1"));
+      if (calls === 2 || calls === 3) throw new TypeError("Failed to fetch");
+      return reply(pollSnapshot("t2", true));
+    }) as unknown as typeof fetch;
+
+    const outcome = await pollJob("job_1", {
+      headers: () => ({}),
+      fetchImpl,
+      sleep: async () => {},
+      onUpdate: (job) => seen.push(job.updatedAt),
+      onTransient: (failure) => failures.push(failure.message),
+    });
+
+    // The follow did not end at the first failure: the snapshots arrive in order, and
+    // the loop stops only because the job settled.
+    expect(seen).toEqual(["t1", "t2"]);
+    expect(failures).toEqual(["Failed to fetch", "Failed to fetch"]);
+    expect(calls).toBe(4);
+    expect(outcome.reason).toBe("settled");
+    expect(outcome.job?.updatedAt).toBe("t2");
+  });
+
+  it("retries a status that is neither 404 nor 503, and says what it said", async () => {
+    let calls = 0;
+    const failures: { message: string; status?: number }[] = [];
+    const fetchImpl = (async () => {
+      calls += 1;
+      if (calls === 1) return reply({ error: { code: "upstream", message: "no" } }, 502);
+      return reply(pollSnapshot("t2", true));
+    }) as unknown as typeof fetch;
+
+    const outcome = await pollJob("job_1", {
+      headers: () => ({}),
+      fetchImpl,
+      sleep: async () => {},
+      onUpdate: () => {},
+      onTransient: (failure) => failures.push(failure),
+    });
+
+    // The status travels with the failure, and the sentence is the one this loop has
+    // always produced for a bare status — no new copy for a case that has words.
+    expect(failures).toEqual([{ status: 502, message: "The server answered 502." }]);
+    expect(calls).toBe(2);
+    expect(outcome.reason).toBe("settled");
+  });
+
+  it("stops with `error` naming the wait once no read succeeds for the stall window (S3)", async () => {
+    // The clock is driven, not slept: `Date.now` is the loop's own measure of how long it
+    // has gone unanswered, and the injected `sleep` advances it by exactly the delay the
+    // backoff asked for.
+    let now = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+
+    try {
+      const outcome = await pollJob("job_1", {
+        headers: () => ({}),
+        fetchImpl,
+        // The whole curve at the ceiling, so the elapsed time is arithmetic rather than an
+        // artefact of how the backoff happened to accumulate.
+        initialDelay: POLL_MAX_MS,
+        sleep: async (ms) => {
+          now += ms;
+        },
+        onUpdate: () => {},
+      });
+
+      expect(outcome.reason).toBe("error");
+      // The bound is the stall window this loop already had, and the notice names it: 45
+      // waits of 2 s, and the 46th read is the one that ends the follow.
+      expect(outcome.message).toContain("No read of this job has succeeded for 1 min 30 s");
+      expect(calls).toBe(46);
+      expect(now).toBe(90_000);
+      // Nothing was invented on the way out: no snapshot was ever read, so none is shown.
+      expect(outcome.job).toBeUndefined();
+
+      // And it lands on the existing notice channel, not on a new one (S9).
+      expect(noticeForOutcome(outcome)).toEqual({ kind: "error", message: outcome.message });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+});
+
+describe("pollJob: the two answers that are NOT blips keep their meaning (S4)", () => {
+  it("ends as `unknown` when a 404 arrives after a snapshot exists", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      if (calls === 1) return reply(pollSnapshot("t1"));
+      return reply({ error: { code: "job_not_found" } }, 404);
+    }) as unknown as typeof fetch;
+
+    const outcome = await pollJob("job_1", {
+      headers: () => ({}),
+      fetchImpl,
+      sleep: async () => {},
+      onUpdate: () => {},
+    });
+
+    // A snapshot that arrived and then vanished is EXPIRED, not late: the leading-404
+    // tolerance is only for a job nothing has been seen of yet.
+    expect(outcome.reason).toBe("unknown");
+    expect(calls).toBe(2);
+    expect(outcome.job?.updatedAt).toBe("t1");
+  });
+
+  it("ends as `unavailable` on a 503, even after a snapshot", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      if (calls === 1) return reply(pollSnapshot("t1"));
+      return reply({ error: { code: "jobs_unavailable" } }, 503);
+    }) as unknown as typeof fetch;
+
+    const outcome = await pollJob("job_1", {
+      headers: () => ({}),
+      fetchImpl,
+      sleep: async () => {},
+      onUpdate: () => {},
+    });
+
+    expect(outcome.reason).toBe("unavailable");
+    expect(calls).toBe(2);
+  });
+});
+
+describe("useIngest: a blip reads as reconnecting, not as a failed job (S2)", () => {
+  it("keeps the last snapshot on screen, says it is reconnecting, and clears itself", async () => {
+    let polls = 0;
+    const fetchImpl = (async (url: string) => {
+      const href = String(url);
+      if (href.includes("/ingest/jobs/")) {
+        polls += 1;
+        if (polls === 1) return reply(pollSnapshot("t1"));
+        if (polls === 2 || polls === 3) throw new TypeError("Failed to fetch");
+        // Still moving, so the follow continues on its own and the notice has to be able
+        // to disappear without the user doing anything.
+        return reply(pollSnapshot(`t${polls}`));
+      }
+      if (href.endsWith("/documents")) return reply({ documents: [] });
+      if (href.endsWith("/stacks")) return reply({ stackIds: ["A"] });
+      return reply({ jobs: [] });
+    }) as unknown as typeof fetch;
+    const client = new ApiClient({
+      baseUrl: "/api",
+      headers: () => ({ "x-user-id": "u" }),
+      fetchImpl,
+    });
+
+    const view = renderHook(() => useIngest({ client, stackId: "A" }));
+    await waitFor(() => expect(view.result.current.loadingList).toBe(false));
+
+    act(() => view.result.current.follow("job_1"));
+    await waitFor(() => expect(view.result.current.activeJob?.updatedAt).toBe("t1"));
+
+    await waitFor(() => expect(view.result.current.pollNotice?.kind).toBe("reconnecting"));
+    // A blip is not a reason to blank the pane or to claim the job failed: the last
+    // snapshot stays, and the loop is still running.
+    expect(view.result.current.activeJob?.updatedAt).toBe("t1");
+    expect(view.result.current.following).toBe(true);
+
+    // The next good read continues the sequence and clears the notice by itself.
+    await waitFor(
+      () => expect(view.result.current.activeJob?.updatedAt).toBe("t4"),
+      { timeout: 5_000 },
+    );
+    expect(view.result.current.pollNotice).toBeNull();
+    expect(view.result.current.following).toBe(true);
+
+    view.result.current.stopFollowing();
+    await waitFor(() => expect(view.result.current.following).toBe(false));
   });
 });

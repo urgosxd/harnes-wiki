@@ -480,3 +480,112 @@ describe("retryIngestJob", () => {
     });
   });
 });
+
+/**
+ * WHY THESE ASSERTIONS
+ *
+ * `pollIngestJob` is the seam between the hook and the poll loop, and it rebuilds the
+ * loop's options one field at a time. A field it does not forward is a fact the hook
+ * cannot see: that is why the "reconnecting" notice (S2 of
+ * `odd/tasks/ingest-follow-resilience.md`) needs `onTransient` to travel through here, and
+ * why the forwarding is proven in both directions instead of only the new one.
+ *
+ *  - forward it, and the loop calls it on every transient failure WHILE it keeps polling;
+ *  - omit it, and nothing else about the seam changes: the same snapshots arrive, the same
+ *    outcome comes back, and `404`/`503` still end the follow with their own reasons.
+ *
+ * The last pair is the reason the omission case is not decoration: a shared seam whose old
+ * path is untested is how the old behaviour silently changes.
+ */
+describe("pollIngestJob: the loop's options reach the loop", () => {
+  const running = {
+    id: "ing_1",
+    source: "https://example.com/a",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:01.000Z",
+    ingest: { status: "running", stage: "committing", attempts: [] },
+    compile: { status: "queued", progress: null },
+  };
+  const settled = {
+    ...running,
+    updatedAt: "2026-01-01T00:00:02.000Z",
+    ingest: { status: "succeeded", stage: "committing", attempts: [] },
+    compile: { status: "succeeded", progress: null },
+  };
+
+  function reply(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  /** A transport that blips on the second read and settles on the third. */
+  function blippingTransport(extra: (call: number) => Response | undefined = () => undefined) {
+    let calls = 0;
+    return vi.fn(async (_url: string, _init?: RequestInit) => {
+      calls += 1;
+      const custom = extra(calls);
+      if (custom) return custom;
+      if (calls === 1) return reply(running);
+      if (calls === 2) throw new TypeError("Failed to fetch");
+      return reply(settled);
+    });
+  }
+
+  it("forwards `onTransient`, and the loop keeps going after the failure it reports", async () => {
+    const fetchMock = blippingTransport();
+    const api = client(fetchMock as unknown as typeof fetch);
+    const failures: { message: string; status?: number }[] = [];
+    const snapshots: string[] = [];
+
+    const outcome = await api.pollIngestJob("ing_1", {
+      onUpdate: (job) => snapshots.push(job.updatedAt),
+      onTransient: (failure) => failures.push(failure),
+    });
+
+    // The callback reached the LOOP, not a wrapper: it carries the loop's own failure
+    // shape, and the read that failed did not end the follow.
+    expect(failures).toEqual([{ message: "Failed to fetch" }]);
+    expect(snapshots).toEqual([running.updatedAt, settled.updatedAt]);
+    expect(outcome).toMatchObject({ reason: "settled" });
+  });
+
+  it("changes nothing observable when `onTransient` is omitted", async () => {
+    const fetchMock = blippingTransport();
+    const api = client(fetchMock as unknown as typeof fetch);
+    const snapshots: string[] = [];
+
+    const outcome = await api.pollIngestJob("ing_1", {
+      onUpdate: (job) => snapshots.push(job.updatedAt),
+    });
+
+    // Same reads, same snapshots, same outcome as the test above: the field is additive,
+    // and the loop's behaviour does not depend on whether anyone is listening.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(snapshots).toEqual([running.updatedAt, settled.updatedAt]);
+    expect(outcome).toMatchObject({ reason: "settled" });
+  });
+
+  it("still ends as `unavailable` on a 503 through this seam (S4)", async () => {
+    const fetchMock = blippingTransport((call) =>
+      call === 2 ? reply({ error: { code: "jobs_unavailable" } }, 503) : undefined,
+    );
+    const api = client(fetchMock as unknown as typeof fetch);
+
+    await expect(
+      api.pollIngestJob("ing_1", { onUpdate: () => {} }),
+    ).resolves.toMatchObject({ reason: "unavailable" });
+  });
+
+  it("still ends as `unknown` when a 404 arrives after a snapshot (S4)", async () => {
+    const fetchMock = blippingTransport((call) =>
+      call === 2 ? reply({ error: { code: "job_not_found" } }, 404) : undefined,
+    );
+    const api = client(fetchMock as unknown as typeof fetch);
+
+    await expect(
+      api.pollIngestJob("ing_1", { onUpdate: () => {} }),
+    ).resolves.toMatchObject({ reason: "unknown" });
+  });
+});
