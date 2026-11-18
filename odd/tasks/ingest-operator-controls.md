@@ -5,7 +5,7 @@ Both are operations the service already offers and neither interrupts a running 
 feature adds a proxy and a UI over them; it invents no cancel. Scope: server routes and
 adapter, the web panel, this document.
 
-Status: in progress
+Status: complete
 Branch: feature/ingest-operator-controls
 Created: 2026-11-17
 Requester: the repo owner
@@ -69,10 +69,10 @@ rather than interrupted.
 
 | ID | Task | Spec | Route | Commit |
 |---|---|---|---|---|
-| T1 | Server half: `deleteJob` / `retryJob` on the adapter, the two routes beside the job reads, README ingest rows | S2-S4, S6, S7 | worker A | pending |
-| T2 | Server tests: RED first, then proving the sent verb/path/query, verbatim passthrough, the refusals not becoming `502`, the blank id, and the tolerant id read | S2-S6 | worker A | pending |
-| T3 | Web half: the two controls in the ingest panel, the payload read tolerantly, a refusal shown as a refusal and never retried automatically | S1, S2, S4, S6, S7 | worker B | pending |
-| T4 | Feature-document census line and reconciliation of the two halves | S8 | inline | pending |
+| T1 | Server half: `deleteJob` / `retryJob` on the adapter, the two routes beside the job reads, README ingest rows | S2-S4, S6, S7 | worker A | 086a075 |
+| T2 | Server tests: RED first, then proving the sent verb/path/query, verbatim passthrough, the refusals not becoming `502`, the blank id, and the tolerant id read | S2-S6 | worker A | 086a075 |
+| T3 | Web half: the two controls in the ingest panel, the payload read tolerantly, a refusal shown as a refusal and never retried automatically | S1, S2, S4, S6, S7 | worker B | 14cbccb |
+| T4 | Feature-document census line and reconciliation of the two halves | S8 | inline | 086a075 |
 
 ## Log
 
@@ -93,3 +93,33 @@ well, for consistency with every other ingest call, which names the Stack in the
 an ASSUMPTION about the host's retry route, not a documented fact — the host's own answer is the
 authority, and if it rejects or ignores the parameter the fix belongs here rather than in a
 guessed Stack.
+
+L3 (delivery: two implementation commits, one regression, one assumption still open).
+
+Delivered on `feature/ingest-operator-controls` in two implementation slices, plus the commit
+that carries this evidence:
+
+- `086a075` — server: `deleteJob` / `retryJob` on the adapter and the two routes beside the job
+  reads, refusals forwarded verbatim, a `204` answered with no body and no declared length, the
+  tolerant `newJobId`, the whole server suite for it (`test/ingest-controls.test.ts`), the
+  README rows and the census line in `test/feature-doc.test.ts`. T1, T2, T4.
+- `14cbccb` — web: the two controls in the panel, `deleteIngestJob` / `retryIngestJob` with the
+  tolerant new-id read, per-control in-flight state, the rule that lays the row out inline, and
+  the `409` fix below. T3.
+
+One regression of existing behaviour was found while closing, and fixed in the web slice.
+Worker B rewrote the SHARED `409` notice branch so it renders the host's own code and words.
+That was right for `job_still_working` and `job_changed` and wrong for the other `409`: `start`
+hitting the one-ingest-at-a-time lock had always answered "Another ingest is running. That is a
+retry signal, not a failure.", the sentence disappeared, and the new test pinned the new copy,
+so nothing guarded the old one. The branch now separates the two facts on the only evidence the
+response carries — a `409` naming a job-control code keeps the host's words; anything else, the
+`busy` lock or no code at all, restores the original sentence byte for byte, on `start` and on
+the documents paths that share the mapping. Both facts are pinned by literal assertions.
+
+Still unproven, and named here instead of implied: the host's real `204` / `202` bodies for
+delete and retry, and the exact wording it uses for `job_changed`. S1's trace is a reading of
+the other repository, not a captured response, so the adapter forwards the retry payload
+untouched and reads the new id tolerantly rather than depending on a shape nobody has seen.
+The retry `stackId` from L2 remains an assumption: it is sent for consistency with every other
+ingest call and has NOT been verified against the host's retry route.
