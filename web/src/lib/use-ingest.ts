@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiClient, ApiError, type UploadedDocument } from "./api.ts";
 import {
+  compileBlockedByIngestFailure,
+  isJobSettled,
   type IngestJob,
   type PollOutcome,
   type PollStopReason,
@@ -298,6 +300,24 @@ export function useIngest({
   const listInFlight = useRef(false);
 
   /**
+   * Whether the list has answered at least once on this visit.
+   *
+   * The re-attach decision below waits for a real answer rather than for a mount: an empty
+   * list is a fact, a list that has not arrived is not, and a failed first read must not
+   * spend the visit's one chance to adopt a job.
+   */
+  const listReadOnce = useRef(false);
+
+  /**
+   * Whether the re-attach automation has had its chance on this visit.
+   *
+   * One chance, taken once: the automation adopts a job, or decides there is none to adopt,
+   * and then it is over — for the user's explicit choices (a follow of another job, a
+   * `stopFollowing`) and for the job it adopted ending, this visit is the user's.
+   */
+  const autoResumeDone = useRef(false);
+
+  /**
    * The choices the control offers.
    *
    * A failed read is NOT a failed surface: a host that cannot list its Stacks still
@@ -387,6 +407,7 @@ export function useIngest({
     try {
       const list = await client.listIngestJobs(stackId);
       setJobs(list);
+      listReadOnce.current = true;
       setListNotice(null);
     } catch (error) {
       setListNotice(noticeFor(error));
@@ -425,10 +446,15 @@ export function useIngest({
     abortRef.current?.abort();
     abortRef.current = null;
     setFollowing(false);
+    // Stopping IS an instruction: the automation must not start another follow behind it.
+    autoResumeDone.current = true;
   }, []);
 
   const follow = useCallback(
     (id: string, options: { stackId?: string | undefined } = {}) => {
+      // Asking to watch something specific is the user taking the screen: whatever the
+      // automation might have adopted on this visit, it does not get to do it now.
+      autoResumeDone.current = true;
       // A job is watched in the Stack it belongs to: the one chosen for its start, else
       // the link's. Nothing to follow without one — the read would answer for whichever
       // Stack the endpoint is bound to. Only an explicit per-job Stack is honored here:
@@ -474,6 +500,30 @@ export function useIngest({
     },
     [client, refreshList, stackId, stopFollowing],
   );
+
+  /**
+   * The re-attach: on the first list read of a visit, adopt the job that is still working.
+   *
+   * This is the fix for "I have to press F5 to see the job again". It is AUTOMATIC and has
+   * no link parameter (Option A of `odd/tasks/ingest-follow-resilience.md` L3): the whole
+   * point is that a plain reload of the same link gets the state back, so making the
+   * recovery depend on the user editing the URL would reintroduce the action being removed.
+   *
+   * It runs at most once per visit, and it yields to the user in every direction: a job
+   * already being followed, an explicit `follow` of another job, a `stopFollowing`, and the
+   * adopted job ending all end it, because a screen that keeps re-adopting jobs is a screen
+   * the user cannot steer.
+   */
+  useEffect(() => {
+    if (autoResumeDone.current || !listReadOnce.current) return;
+    // One chance, whatever the answer: adopting nothing is also a decision.
+    autoResumeDone.current = true;
+    // Something is already on screen (a job started from the form before the list
+    // answered, say). Never replace it.
+    if (activeId !== null) return;
+    const candidate = mostRecentlyUpdatedRunning(jobs);
+    if (candidate) follow(candidate.id);
+  }, [activeId, follow, jobs]);
 
   /**
    * Start an ingest for an uploaded document, by reference.
@@ -665,6 +715,32 @@ export function useIngest({
     retryingIds,
     clearPollNotice: () => setPollNotice(null),
   };
+}
+
+/**
+ * The job the re-attach should adopt: the most recently updated one that still has work
+ * ahead of it.
+ *
+ * "Still running" is NOT `!isJobSettled`. A job whose ingest failed while its compile reads
+ * `queued` is not settled by the pair, but nothing will ever start that compile
+ * (`compileBlockedByIngestFailure`), so adopting it would open the panel on a corpse and
+ * then report it stalled. The candidate set is therefore "not settled AND not blocked", and
+ * `updatedAt` — which the producer writes on every transition — picks the freshest.
+ *
+ * A tie keeps the earlier job in the list's order, and an unparsable timestamp cannot win
+ * over a real one: neither is worth a second rule.
+ */
+function mostRecentlyUpdatedRunning(jobs: IngestJob[]): IngestJob | undefined {
+  const updatedAtMs = (job: IngestJob): number => {
+    const at = Date.parse(job.updatedAt);
+    return Number.isNaN(at) ? Number.NEGATIVE_INFINITY : at;
+  };
+  return jobs
+    .filter((job) => !isJobSettled(job) && !compileBlockedByIngestFailure(job))
+    .reduce<IngestJob | undefined>(
+      (best, job) => (best === undefined || updatedAtMs(job) > updatedAtMs(best) ? job : best),
+      undefined,
+    );
 }
 
 /** The same set with `id` added, as a new value so React sees the change. */

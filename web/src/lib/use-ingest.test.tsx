@@ -907,3 +907,156 @@ describe("useIngest: the jobs list refreshes on an interval (S5)", () => {
     expect(seen.filter((url) => !url.endsWith("/stacks"))).toEqual([]);
   });
 });
+
+/**
+ * COMING BACK TO THE PAGE MUST NOT MEAN PRESSING F5
+ *
+ * The third gap in the report: `follow` was only ever called from a user action, so a
+ * reload lost the follow and the panel opened on an empty detail pane while the job ran on.
+ * The decision (Option A, `odd/tasks/ingest-follow-resilience.md` L3) is automatic and has
+ * no link parameter: on the first list read of a visit, with nothing being followed, adopt
+ * the most recently updated job that still has work ahead of it.
+ *
+ * The second half of that rule is what these tests are really about: the automation gets ONE
+ * chance per visit. Once the user picks a job, stops a follow, or the adopted job ends, the
+ * screen belongs to the user and nothing is imposed again.
+ */
+function listJob(
+  id: string,
+  updatedAt: string,
+  status: "running" | "succeeded" = "running",
+): IngestJob {
+  return {
+    id,
+    source: "https://example.com/a",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt,
+    ingest: { status, stage: "committing", attempts: [] },
+    compile:
+      status === "running"
+        ? { status: "queued", progress: null }
+        : { status: "succeeded", progress: null },
+  };
+}
+
+/** The list, mutable between reads; a poll answers the job it names, else a settled one. */
+function autoResumeHarness(initial: IngestJob[]) {
+  let jobs = initial;
+  const calls: { method: string; url: string }[] = [];
+  const fetchImpl = (async (url: string, init?: RequestInit) => {
+    const href = String(url);
+    calls.push({ method: init?.method ?? "GET", url: href });
+    if (href.includes("/ingest/jobs/")) {
+      const id = decodeURIComponent(href.split("/ingest/jobs/")[1]!.split("?")[0]!);
+      return json(jobs.find((job) => job.id === id) ?? listJob(id, "2026-01-01T00:00:09.000Z", "succeeded"));
+    }
+    if (href.endsWith("/stacks")) return json({ stackIds: ["A"] });
+    if (href.endsWith("/documents")) return json({ documents: [] });
+    return json({ jobs });
+  }) as unknown as typeof fetch;
+  const client = new ApiClient({
+    baseUrl: "/api",
+    headers: () => ({ "x-user-id": "u" }),
+    fetchImpl,
+  });
+  return {
+    client,
+    setJobs: (next: IngestJob[]) => {
+      jobs = next;
+    },
+    polls: () => calls.filter((call) => call.url.includes("/ingest/jobs/")),
+  };
+}
+
+describe("useIngest: it re-attaches to a running job on mount (S6)", () => {
+  it("follows the only running job without the user asking", async () => {
+    const h = autoResumeHarness([listJob("job_run", "2026-01-01T00:00:05.000Z")]);
+    const view = renderHook(() => useIngest({ client: h.client, stackId: "A" }));
+
+    await waitFor(() => expect(view.result.current.activeId).toBe("job_run"));
+    expect(view.result.current.following).toBe(true);
+    expect(h.polls().some((call) => call.url.includes("/ingest/jobs/job_run"))).toBe(true);
+
+    view.result.current.stopFollowing();
+    await waitFor(() => expect(view.result.current.following).toBe(false));
+  });
+
+  it("follows the most recently updated one when several are still running", async () => {
+    const h = autoResumeHarness([
+      listJob("job_older", "2026-01-01T00:00:01.000Z"),
+      listJob("job_newest", "2026-01-01T00:00:09.000Z"),
+      listJob("job_middle", "2026-01-01T00:00:04.000Z"),
+    ]);
+    const view = renderHook(() => useIngest({ client: h.client, stackId: "A" }));
+
+    await waitFor(() => expect(view.result.current.activeId).toBe("job_newest"));
+    expect(h.polls().some((call) => call.url.includes("/ingest/jobs/job_older"))).toBe(false);
+
+    view.result.current.stopFollowing();
+    await waitFor(() => expect(view.result.current.following).toBe(false));
+  });
+
+  it("follows nothing when every job has finished or is blocked", async () => {
+    // Two different kinds of dead: a settled job, and a job whose ingest FAILED while its
+    // compile still reads `queued` — nothing will ever start that compile, so adopting it
+    // would open the panel on a corpse.
+    const blocked = listJob("job_blocked", "2026-01-01T00:00:08.000Z");
+    blocked.ingest = { status: "failed", stage: "committing", attempts: [], error: "boom" };
+    const h = autoResumeHarness([
+      listJob("job_done", "2026-01-01T00:00:05.000Z", "succeeded"),
+      blocked,
+    ]);
+    const view = renderHook(() => useIngest({ client: h.client, stackId: "A" }));
+
+    await waitFor(() => expect(view.result.current.loadingList).toBe(false));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(view.result.current.activeId).toBeNull();
+    expect(h.polls()).toEqual([]);
+  });
+});
+
+describe("useIngest: the automation never overrides the user (S7)", () => {
+  it("does not take the screen back once the user follows another job", async () => {
+    const h = autoResumeHarness([listJob("job_run", "2026-01-01T00:00:05.000Z")]);
+    const view = renderHook(() => useIngest({ client: h.client, stackId: "A" }));
+    await waitFor(() => expect(view.result.current.activeId).toBe("job_run"));
+
+    // The user picks one instead, and it is already finished.
+    act(() => view.result.current.follow("job_done"));
+    await waitFor(() => expect(view.result.current.activeId).toBe("job_done"));
+    await waitFor(() => expect(view.result.current.following).toBe(false));
+
+    // A later read of the list surfaces something newer and still running.
+    h.setJobs([
+      listJob("job_run", "2026-01-01T00:00:05.000Z"),
+      listJob("job_newer", "2026-01-01T00:00:09.000Z"),
+    ]);
+    await act(async () => {
+      await view.result.current.refreshList();
+    });
+
+    expect(view.result.current.activeId).toBe("job_done");
+    expect(h.polls().some((call) => call.url.includes("job_newer"))).toBe(false);
+  });
+
+  it("does not start anything again after the user stops following", async () => {
+    const h = autoResumeHarness([listJob("job_run", "2026-01-01T00:00:05.000Z")]);
+    const view = renderHook(() => useIngest({ client: h.client, stackId: "A" }));
+    await waitFor(() => expect(view.result.current.activeId).toBe("job_run"));
+
+    view.result.current.stopFollowing();
+    await waitFor(() => expect(view.result.current.following).toBe(false));
+
+    h.setJobs([
+      listJob("job_run", "2026-01-01T00:00:05.000Z"),
+      listJob("job_other", "2026-01-01T00:00:07.000Z"),
+    ]);
+    await act(async () => {
+      await view.result.current.refreshList();
+    });
+
+    expect(view.result.current.following).toBe(false);
+    expect(h.polls().some((call) => call.url.includes("job_other"))).toBe(false);
+  });
+});
