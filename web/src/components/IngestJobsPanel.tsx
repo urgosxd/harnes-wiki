@@ -35,6 +35,10 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
   // the order (choice first, link as fallback) so there is exactly one precedence rule.
   const stackId = ingest.resolvedStackId;
 
+  // The job the user is looking at. Read once so the controls below cannot act on a
+  // different id than the one on screen.
+  const active = ingest.activeJob;
+
   const pick = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     // Clear the input so picking the SAME file twice still fires a change: a user
@@ -298,15 +302,53 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
         </section>
 
         <section className="jobs-panel__detail" aria-label="Job detail">
-          {ingest.activeJob ? (
+          {active ? (
             <>
+              {/*
+                The operator controls, for the job ON SCREEN and no other.
+
+                Three rules live here, and all three are about not guessing:
+
+                 - They are never disabled from the job's own status. Whether a job may
+                   be deleted is the host's answer; a working job is REFUSED with
+                   `409 job_still_working`, and that refusal is what the operator has to
+                   read. Pre-judging it would hide the answer and invent a policy.
+                 - There is no cancel and no stop. The upstream service cannot interrupt
+                   a job, so a control promising that would be a promise this product
+                   cannot keep.
+                 - Each one is disabled while ITS request is out, so a second click is
+                   not a second request.
+              */}
+              <div className="jobs-panel__controls">
+                <button
+                  type="button"
+                  className="button button--small"
+                  aria-label={`Delete job ${active.id}`}
+                  disabled={ingest.deletingIds.has(active.id) || ingest.retryingIds.has(active.id)}
+                  onClick={() => void ingest.deleteJob(active.id)}
+                >
+                  {ingest.deletingIds.has(active.id) ? "Deleting…" : "Delete"}
+                </button>
+                <button
+                  type="button"
+                  className="button button--small"
+                  aria-label={`Retry job ${active.id}`}
+                  disabled={ingest.deletingIds.has(active.id) || ingest.retryingIds.has(active.id)}
+                  onClick={() => void ingest.retryJob(active.id)}
+                >
+                  {ingest.retryingIds.has(active.id) ? "Retrying…" : "Retry"}
+                </button>
+                <span className="jobs-panel__hint">
+                  A job that is still working is refused, not stopped.
+                </span>
+              </div>
               {ingest.following && (
                 <p className="jobs-panel__following" role="status">
                   <span className="spinner" aria-hidden="true" />
                   Updating automatically…
                 </p>
               )}
-              <IngestJobView job={ingest.activeJob} />
+              <IngestJobView job={active} />
             </>
           ) : (
             <p className="jobs-panel__empty">

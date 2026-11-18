@@ -181,6 +181,13 @@ export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): voi
     // turning a caller's typo into a deployment outage. 401, 429 or a future 4xx
     // would have gone the same way.
     if (upstream.status < 500 || upstream.status === 503) {
+      // A `204` forbids a body by definition. `sendJson` would write `{}` with a
+      // `content-length` for it, which is a payload nobody can read and a header that
+      // lies to whatever proxy sits in front of this server.
+      if (upstream.status === 204) {
+        res.writeHead(204).end();
+        return;
+      }
       sendJson(res, upstream.status, upstream.body ?? {});
       return;
     }
@@ -287,6 +294,35 @@ export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): voi
   /** Every retained job, newest first, exactly as the host orders them. */
   router.get("/ingest/jobs", async (ctx) => {
     await forward(ctx.res, (c) => c.listJobs(stackIdFrom(ctx.url)));
+  });
+
+  /**
+   * Delete a liquidated job. The operator's cleanup, and the service's own answer.
+   *
+   * There is deliberately no cancel beside this: the service has none, and delete does
+   * NOT stop a running job — it refuses with `409 job_still_working` and leaves the job
+   * working. Routing a cancel through a delete would tell an operator their run stopped
+   * while it kept writing.
+   */
+  router.delete("/ingest/jobs/:id", async (ctx) => {
+    const id = ctx.params.id ?? "";
+    if (id.trim() === "") throw new HttpError(404, "job_not_found", "no ingest job was named");
+    await forward(ctx.res, (c) => c.deleteJob(id, stackIdFrom(ctx.url)));
+  });
+
+  /**
+   * Re-execute a liquidated job. Answers a NEW job with a new id, so the caller polls the
+   * id it gets back, not the one it sent.
+   *
+   * The body is forwarded untouched: the host names the new job `jobId` on one answer and
+   * `id` on another, and `newJobId` in the adapter reads either. Rewriting the payload into
+   * one shape here would bind every client to a shape the provider never promised. A
+   * refusal travels verbatim as well, and is never retried by this server.
+   */
+  router.post("/ingest/jobs/:id/retry", async (ctx) => {
+    const id = ctx.params.id ?? "";
+    if (id.trim() === "") throw new HttpError(404, "job_not_found", "no ingest job was named");
+    await forward(ctx.res, (c) => c.retryJob(id, stackIdFrom(ctx.url)));
   });
 
   // ---------------------------------------------------------------------------

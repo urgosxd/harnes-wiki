@@ -548,6 +548,43 @@ describe("noticeFor: 503 and 404 are different facts", () => {
   });
 });
 
+describe("noticeFor: a 409 is two different facts", () => {
+  it("shows the host's own code and words for the two job-control refusals", () => {
+    // The delete/retry vocabulary. `job_still_working` means the job is alive and was
+    // NOT interrupted; `job_changed` means it moved under us. Both are answers about a
+    // specific job, and both keep the service's own words instead of a paraphrase.
+    const stillWorking = noticeFor(
+      new ApiError(409, "job_still_working", "job job_1 is still working; it was not deleted."),
+    );
+    expect(stillWorking).toEqual({
+      kind: "error",
+      message: "job_still_working: job job_1 is still working; it was not deleted.",
+    });
+
+    const changed = noticeFor(
+      new ApiError(409, "job_changed", "job job_1 changed while you were acting on it."),
+    );
+    expect(changed).toEqual({
+      kind: "error",
+      message: "job_changed: job job_1 changed while you were acting on it.",
+    });
+  });
+
+  it("keeps the retry-signal sentence for the lock, which is no job-control answer", () => {
+    // The concurrency lock is the same status and a different fact. Its sentence predates
+    // the operator controls and is quoted literally, because it is what the user reads.
+    const sentence = "Another ingest is running. That is a retry signal, not a failure.";
+    expect(noticeFor(new ApiError(409, "busy", "another mutation holds the lock"))).toEqual({
+      kind: "error",
+      message: sentence,
+    });
+    expect(noticeFor(new ApiError(409, undefined, "request failed with 409"))).toEqual({
+      kind: "error",
+      message: sentence,
+    });
+  });
+});
+
 /** A hand-built result object, so the panel is testable without a live client. */
 function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
   return {
@@ -575,6 +612,10 @@ function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
     follow: vi.fn(),
     stopFollowing: vi.fn(),
     refreshList: vi.fn(async () => {}),
+    deleteJob: vi.fn(async () => {}),
+    retryJob: vi.fn(async () => {}),
+    deletingIds: new Set<string>(),
+    retryingIds: new Set<string>(),
     clearPollNotice: vi.fn(),
     ...overrides,
   };
@@ -1108,5 +1149,237 @@ describe("IngestJobsPanel: the Stack the ingest uses", () => {
     expect(screen.getByRole("option", { name: "A" })).toBeDefined();
     expect(screen.getByLabelText("Source")).toBeDefined();
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+/**
+ * WHY THESE ASSERTIONS
+ *
+ * The operator controls are the surface's most dangerous buttons, and the rules they
+ * must not break are all invisible from a screenshot:
+ *
+ *   - they belong to the job the user is LOOKING AT, and act on that id;
+ *   - they are disabled while THAT id's request is out, so a double click cannot mean
+ *     two deletes;
+ *   - they are not pre-judged: a running job still offers Delete, because the `409` is
+ *     the authority on whether it may be deleted, not our reading of its status;
+ *   - a refusal is rendered in the host's own words (`job_still_working`), because a
+ *     working job is REFUSED, not stopped — there is no cancel anywhere in this product;
+ *   - deleting the job being watched leaves no spinner and no stale detail behind.
+ */
+describe("IngestJobsPanel: delete and retry", () => {
+  it("offers Delete and Retry for the job on screen, and acts on its id", () => {
+    const deleteJob = vi.fn(async () => {});
+    const retryJob = vi.fn(async () => {});
+    const active = job();
+    render(
+      <IngestJobsPanel
+        ingest={fakeIngest({ activeJob: active, activeId: active.id, deleteJob, retryJob })}
+        onClose={() => {}}
+      />,
+    );
+
+    const del = screen.getByRole("button", { name: new RegExp(`Delete job ${active.id}`) });
+    const retry = screen.getByRole("button", { name: new RegExp(`Retry job ${active.id}`) });
+
+    fireEvent.click(del);
+    fireEvent.click(retry);
+    expect(deleteJob).toHaveBeenCalledWith(active.id);
+    expect(retryJob).toHaveBeenCalledWith(active.id);
+  });
+
+  it("does not pre-judge deletability from the job's status", () => {
+    // The row is still moving, which is exactly the case the host answers with
+    // `409 job_still_working`. Disabling the button here would be our guess winning over
+    // the service's answer — and it would hide the refusal the user needs to read.
+    const active = job({ ingest: { status: "running", stage: "committing", attempts: [] } });
+    render(
+      <IngestJobsPanel
+        ingest={fakeIngest({ activeJob: active, activeId: active.id })}
+        onClose={() => {}}
+      />,
+    );
+
+    const del = screen.getByRole("button", { name: new RegExp(`Delete job ${active.id}`) }) as HTMLButtonElement;
+    const retry = screen.getByRole("button", { name: new RegExp(`Retry job ${active.id}`) }) as HTMLButtonElement;
+    expect(del.disabled).toBe(false);
+    expect(retry.disabled).toBe(false);
+  });
+
+  it("disables them while that job's own request is in flight", () => {
+    const active = job();
+    const { rerender } = render(
+      <IngestJobsPanel
+        ingest={fakeIngest({ activeJob: active, activeId: active.id, deletingIds: new Set([active.id]) })}
+        onClose={() => {}}
+      />,
+    );
+
+    // While the delete is out, one click cannot become two, and the label says which
+    // request is running rather than leaving a dead-looking button.
+    const deleting = screen.getByRole("button", { name: new RegExp(`Delete job ${active.id}`) }) as HTMLButtonElement;
+    const retryWhileDeleting = screen.getByRole("button", { name: new RegExp(`Retry job ${active.id}`) }) as HTMLButtonElement;
+    expect(deleting.disabled).toBe(true);
+    expect(deleting.textContent).toBe("Deleting…");
+    expect(retryWhileDeleting.disabled).toBe(true);
+
+    rerender(
+      <IngestJobsPanel
+        ingest={fakeIngest({ activeJob: active, activeId: active.id, retryingIds: new Set([active.id]) })}
+        onClose={() => {}}
+      />,
+    );
+    const retrying = screen.getByRole("button", { name: new RegExp(`Retry job ${active.id}`) }) as HTMLButtonElement;
+    const delWhileRetrying = screen.getByRole("button", { name: new RegExp(`Delete job ${active.id}`) }) as HTMLButtonElement;
+    expect(retrying.disabled).toBe(true);
+    expect(retrying.textContent).toBe("Retrying…");
+    expect(delWhileRetrying.disabled).toBe(true);
+  });
+
+  it("renders no controls at all when the surface is blocked for lack of a Stack", () => {
+    // The jobs are supplied on purpose: the controls must be absent because the surface
+    // has no tenant, not because the fixture happened to be empty.
+    render(
+      <IngestJobsPanel
+        ingest={fakeIngest({
+          stackId: null,
+          resolvedStackId: null,
+          stackIds: [],
+          blockedProblem:
+            "This page needs a stackId in the link. Open the link you were given, " +
+            "which ends in ?user=<name>&stackId=<stack-id>.",
+          jobs: [job()],
+          activeJob: job(),
+          activeId: job().id,
+        })}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: /Delete job/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Retry job/ })).toBeNull();
+  });
+
+  it("never offers a cancel, because the upstream service has none", () => {
+    const active = job();
+    render(
+      <IngestJobsPanel
+        ingest={fakeIngest({ activeJob: active, activeId: active.id, following: true })}
+        onClose={() => {}}
+      />,
+    );
+
+    // A working job is REFUSED, not stopped. Any control or copy promising interruption
+    // would be a promise this product cannot keep.
+    for (const name of [/cancel/i, /stop/i, /abort/i, /interrupt/i]) {
+      expect(screen.queryByRole("button", { name })).toBeNull();
+    }
+  });
+});
+
+/**
+ * The controls over the REAL hook and the REAL client, with only the transport stubbed.
+ *
+ * A mocked `deleteJob` proves the button is wired; it cannot prove that a `409` reaches
+ * the screen in the host's words, nor that deleting the followed job leaves the detail
+ * pane empty. Those are the two facts an operator depends on, so they are driven end to
+ * end here.
+ */
+describe("IngestJobsPanel: operator controls end to end", () => {
+  const LISTED = SETTLED_JOB;
+
+  /** A transport whose list holds one job, whose poll keeps it running, and whose DELETE answers as told. */
+  function operatorClient(del: Response) {
+    return stackingClient(({ method, url }) => {
+      if (method === "DELETE") return del;
+      if (method === "GET" && /\/ingest\/jobs\/[^?]+/.test(url)) {
+        return jsonResponse({ ...LISTED, ingest: { status: "running", stage: "committing", attempts: [] } });
+      }
+      if (method === "GET" && /\/ingest\/jobs(\?|$)/.test(url)) {
+        return jsonResponse({ jobs: [LISTED] });
+      }
+      return undefined;
+    });
+  }
+
+  async function openTheJob() {
+    fireEvent.click(await screen.findByText(/Source saved/));
+    return screen.findByRole("button", { name: /Delete job/ });
+  }
+
+  it("renders the host's own 409 refusal verbatim, and sends the delete once", async () => {
+    const { client, seen } = operatorClient(
+      jsonResponse(
+        {
+          error: {
+            code: "job_still_working",
+            message: "job job_1 is still working; it was not deleted.",
+          },
+        },
+        409,
+      ),
+    );
+
+    render(<StackPanel client={client} stackId="A" />);
+    const del = await openTheJob();
+    fireEvent.click(del);
+
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toContain("job_still_working"),
+    );
+    // The service's sentence too, not just its code: "it was not deleted" is the answer.
+    expect(screen.getByRole("alert").textContent).toContain("it was not deleted");
+
+    // One click, one request. A refusal is not something to hammer.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(seen.filter((wire) => wire.method === "DELETE")).toHaveLength(1);
+    // And the job is still on screen: a refused delete changed nothing.
+    expect(screen.getByRole("button", { name: /Delete job job_1/ })).toBeDefined();
+  });
+
+  it("deleting the followed job leaves no spinner and no stale detail", async () => {
+    const { client, seen } = operatorClient(new Response(null, { status: 204 }));
+
+    render(<StackPanel client={client} stackId="A" />);
+    const del = await openTheJob();
+
+    // A live job paints the following spinner; the delete has to take it away with it.
+    await waitFor(() => expect(screen.getByText("Updating automatically…")).toBeDefined());
+
+    fireEvent.click(del);
+
+    await waitFor(() =>
+      expect(screen.getByText(/Start an ingest, or pick a job from the list to follow it/)).toBeDefined(),
+    );
+    expect(screen.queryByText("Updating automatically…")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Delete job/ })).toBeNull();
+    expect(screen.queryByRole("region", { name: "Ingest job job_1" })).toBeNull();
+
+    // The request carried the link's Stack in the query, like every other ingest call.
+    const deletes = seen.filter((wire) => wire.method === "DELETE");
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]!.url).toBe("/api/ingest/jobs/job_1?stackId=A");
+  });
+
+  it("retries the job on screen and follows the job the answer names", async () => {
+    const { client, seen } = stackingClient(({ method, url }) => {
+      if (method === "POST" && url.includes("/retry")) return jsonResponse({ jobId: "job_2" }, 202);
+      if (method === "GET" && /\/ingest\/jobs\/[^?]+/.test(url)) return jsonResponse(SETTLED_JOB);
+      if (method === "GET" && /\/ingest\/jobs(\?|$)/.test(url)) return jsonResponse({ jobs: [LISTED] });
+      return undefined;
+    });
+
+    render(<StackPanel client={client} stackId="A" />);
+    await openTheJob();
+    const retry = screen.getByRole("button", { name: /Retry job/ });
+    fireEvent.click(retry);
+
+    // The NEW job is the one watched: it is the one that will make progress.
+    await waitFor(() =>
+      expect(seen.some((wire) => wire.url === "/api/ingest/jobs/job_2?stackId=A")).toBe(true),
+    );
+    const retries = seen.filter((wire) => wire.method === "POST" && wire.url.includes("/retry"));
+    expect(retries).toHaveLength(1);
+    expect(retries[0]!.url).toBe("/api/ingest/jobs/job_1/retry?stackId=A");
   });
 });

@@ -1,6 +1,7 @@
 /**
  * @file src/ingest/client.ts
- * @description HTTP adapter for an external ingest service: start a job, read it.
+ * @description HTTP adapter for an external ingest service: start a job, read it, and
+ * run the operator's two controls over it (delete a liquidated one, retry it).
  *
  * ## This file knows the PROTOCOL, not the provider
  *
@@ -142,6 +143,35 @@ export class IngestClient {
     return this.request("GET", `/api/ingest/jobs${stackQuery(stackId)}`);
   }
 
+  /**
+   * Delete a liquidated job row.
+   *
+   * Only the SERVICE decides whether a row may be cleaned up, and its refusals are
+   * different facts rather than one failure: `409 job_still_working` says the job is
+   * running and that this call does NOT interrupt it, `409 job_changed` says the row
+   * moved since it was read, `404 job_not_found` says this host never had it. All three
+   * travel to the caller unchanged, and none of them is retried here: repeating the
+   * operation the host just refused is not a recovery, it is the same refusal again.
+   */
+  async deleteJob(id: string, stackId?: string): Promise<UpstreamResponse> {
+    return this.request("DELETE", `/api/ingest/jobs/${encodeURIComponent(id)}${stackQuery(stackId)}`);
+  }
+
+  /**
+   * Re-execute a liquidated job as a NEW job, minted by the service (`ing_${ulid()}`).
+   *
+   * The original row is untouched, so a caller must follow the id it gets BACK rather
+   * than the one it sent; `newJobId` below reads it from whichever key the host used.
+   * Both operations share the host's one guard — a row can be re-executed exactly when
+   * it can be cleaned up — which is why a working job is refused here as well.
+   */
+  async retryJob(id: string, stackId?: string): Promise<UpstreamResponse> {
+    return this.request(
+      "POST",
+      `/api/ingest/jobs/${encodeURIComponent(id)}/retry${stackQuery(stackId)}`,
+    );
+  }
+
   private async request(method: string, path: string, body?: unknown): Promise<UpstreamResponse> {
     // The URL is the ONLY source of the Host header. Nothing from the incoming
     // browser request is consulted here: no Host, no Origin, no cookies.
@@ -175,6 +205,29 @@ export class IngestClient {
 
     return { status: response.status, body: await parseBody(response) };
   }
+}
+
+/**
+ * The id of the job a retry minted, read from the payload the service answered with.
+ *
+ * Two keys appear in the wild: `jobId`, which the start route already answers with, and
+ * `id`, which is what a job snapshot calls the same value. Reading both is the point —
+ * a reader pinned to one shape eventually polls `undefined`, and the failure shows up as
+ * a spinner rather than as an error. The payload is only READ: the retry route forwards
+ * it byte for byte, because a body this adapter rewrote would bind every client to a
+ * shape the provider never promised.
+ *
+ * Blank counts as absent: an id of whitespace names no job anyone can read.
+ */
+export function newJobId(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const record = body as { jobId?: unknown; id?: unknown };
+  for (const candidate of [record.jobId, record.id]) {
+    if (typeof candidate !== "string") continue;
+    const trimmed = candidate.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
 }
 
 /**
