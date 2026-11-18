@@ -608,6 +608,7 @@ function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
     pollNotice: null,
     starting: false,
     following: false,
+    setListLive: vi.fn(),
     start: vi.fn(async () => {}),
     follow: vi.fn(),
     stopFollowing: vi.fn(),
@@ -1381,5 +1382,46 @@ describe("IngestJobsPanel: operator controls end to end", () => {
     const retries = seen.filter((wire) => wire.method === "POST" && wire.url.includes("/retry"));
     expect(retries).toHaveLength(1);
     expect(retries[0]!.url).toBe("/api/ingest/jobs/job_1/retry?stackId=A");
+  });
+});
+
+/**
+ * THE PANEL TELLS THE HOOK IT IS ON SCREEN
+ *
+ * The hook lives above the view switch, on purpose: a follow must survive a trip to the
+ * chat tab. That is exactly why the interval refresh cannot live on the hook's own mount —
+ * it would keep reading a list nobody is looking at. The panel is the thing that knows when
+ * the surface is open, so it says so, and says so again on the way out (S5 of
+ * `odd/tasks/ingest-follow-resilience.md`).
+ *
+ * Asserted on the wiring rather than on a timer: the interval itself is proven in
+ * `web/src/lib/use-ingest.test.tsx` with an injected length, and re-proving it here would
+ * mean waiting five real seconds for the same statement.
+ */
+describe("IngestJobsPanel: it announces itself as live while it is open", () => {
+  it("sets the list live on mount and off on unmount", () => {
+    const setListLive = vi.fn();
+    const { unmount } = render(
+      <IngestJobsPanel ingest={fakeIngest({ setListLive })} onClose={() => {}} />,
+    );
+
+    expect(setListLive).toHaveBeenCalledWith(true);
+
+    unmount();
+    expect(setListLive).toHaveBeenLastCalledWith(false);
+  });
+
+  it("still announces itself on the blocked surface, so the choice can be acted on", () => {
+    // The blocked panel renders a different tree, but it is the same open surface: one
+    // wiring at the top of the component, not one per branch.
+    const setListLive = vi.fn();
+    render(
+      <IngestJobsPanel
+        ingest={fakeIngest({ setListLive, blockedProblem: "This page needs a stackId in the link." })}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(setListLive).toHaveBeenCalledWith(true);
   });
 });

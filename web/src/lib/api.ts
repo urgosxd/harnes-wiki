@@ -1,5 +1,11 @@
 import { SseParser, parseChatFrame, type ChatFrame } from "./sse.ts";
-import { pollJob, type IngestJob, type IngestJobAccepted, type PollOutcome } from "./ingest.ts";
+import {
+  pollJob,
+  type IngestJob,
+  type IngestJobAccepted,
+  type PollOutcome,
+  type PollTransientFailure,
+} from "./ingest.ts";
 
 /**
  * A document this user uploaded.
@@ -367,6 +373,8 @@ export class ApiClient {
       signal?: AbortSignal;
       fetchImpl?: typeof fetch;
       sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+      /** Forwarded to the loop: the reads that failed while it kept trying. */
+      onTransient?: (failure: PollTransientFailure) => void;
     },
   ): Promise<PollOutcome> {
     return pollJob(id, {
@@ -374,6 +382,7 @@ export class ApiClient {
       ...(options.stackId ? { stackId: options.stackId } : {}),
       headers: this.headers,
       onUpdate: options.onUpdate,
+      ...(options.onTransient ? { onTransient: options.onTransient } : {}),
       // The client's own transport, so a poll goes wherever every other call
       // goes. Falling back to global `fetch` here would silently bypass an
       // injected transport and talk to a different origin than the rest of the

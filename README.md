@@ -629,7 +629,27 @@ a retry — so the view is two columns and never one status.
 
 Polling backs off from 250 ms to 2 s and stops as soon as both dimensions settle;
 the service streams nothing. A `409 busy` is surfaced as a retry signal, not a
-failure.
+failure, and a read that fails is retried instead of ending the follow (below).
+
+### Staying attached: a reload, a blip and the list
+
+The panel is a window on the job, not a photograph of it, so three things happen
+without being asked (`S2`-`S7` of `odd/tasks/ingest-follow-resilience.md`).
+
+| Situation | What happens |
+|---|---|
+| A read throws, or answers a status other than `404`/`503` | Retried on the same 250 ms → 2 s backoff. The last snapshot stays on screen and the notice says it is reconnecting; the next good read clears it |
+| No read succeeds for 90 s | The follow stops with `reason: "error"` and a notice naming how long it went unanswered. The bound is the SAME `STALL_AFTER_MS` window that decides an unmoving job is orphaned — one notion of dead, not two |
+| A `404` after a snapshot, or a `503` | Unchanged, on purpose: an expired job and a host that does not track jobs are ANSWERS, not blips, and retrying them would turn them into spinners |
+| The panel is open | The **Recent** list is re-read every 5 s. A tick that lands on a read still in flight is dropped rather than queued, and nothing is read while the link names no Stack |
+| The panel opens with nothing being followed | The most recently updated job that still has work ahead of it is followed automatically — once per visit |
+| The user follows another job, stops the follow, or the adopted job ends | The automation is over for that visit. The screen is the user's |
+
+The re-attach asks the list which job is most recently running: there is no `job=`
+parameter and nothing is stored, so a single job is still not shareable by link, and a
+page cannot follow one it was never told about. A job whose ingest failed while its
+compile still reads `queued` is not adopted either — nothing will ever start that
+compile, so following it would only delay the same bad news.
 
 ### Per-dimension results
 
@@ -652,7 +672,7 @@ failed `kg` is visibly failed even when the compile reads `succeeded`.
 
 | Payload | What the detail pane shows |
 |---|---|
-| `dimensions` is usable | One row per dimension, and the fixed `Ingest` / `Compile` columns are not drawn beside them |
+| `dimensions` is usable | The fixed `Ingest` / `Compile` columns, always, plus one row per dimension beside them. The one row not drawn twice is a dimension that merely repeats a fixed section's name (`ingest` / `compile`), which the fixed column already carries |
 | Absent, empty, or with nothing in it readable | The fixed `Ingest` / `Compile` columns, exactly as before |
 
 The array is a **report**, not a lifecycle. It never decides when polling stops: a job

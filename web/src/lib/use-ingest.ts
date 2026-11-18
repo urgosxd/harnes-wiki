@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiClient, ApiError, type UploadedDocument } from "./api.ts";
-import { type IngestJob, type PollOutcome, type PollStopReason } from "./ingest.ts";
+import {
+  compileBlockedByIngestFailure,
+  isJobSettled,
+  type IngestJob,
+  type PollOutcome,
+  type PollStopReason,
+  type PollTransientFailure,
+} from "./ingest.ts";
 
 /**
  * Owns the ingest-jobs view: the list, the polled job, and the stop notice.
@@ -49,10 +56,27 @@ export type IngestNotice = {
    * `unavailable` is 503, `unknown` is 404, `not_configured` is our own 503, and
    * `stalled` is none of them: the job is known and its state is on screen, but it
    * will not advance. Four different facts, four different pieces of advice.
+   *
+   * `reconnecting` is a fifth and deliberately not a failure: the last read did not
+   * answer, the follow is STILL RUNNING, and the last snapshot is still on screen. It is
+   * reported by the loop itself, through `onTransient`, so it states what happened rather
+   * than guessing from a timer that nothing has arrived.
    */
-  kind: "unavailable" | "unknown" | "error" | "not_configured" | "stalled";
+  kind: "unavailable" | "unknown" | "error" | "not_configured" | "stalled" | "reconnecting";
   message: string;
 } | null;
+
+/**
+ * How often the Recent list is re-read while the panel is open.
+ *
+ * Five seconds, for a reason rather than a taste: the job on screen already polls at 250 ms
+ * → 2 s, so this interval is only about the ROWS nobody is following — a job someone else
+ * started, or one that finished a moment ago. Fast enough that the list is not visibly
+ * stale when the panel opens, slow enough that a background tab does not read the list
+ * every couple of seconds, and longer than the poll's own ceiling so the two never land in
+ * lockstep.
+ */
+export const LIST_REFRESH_MS = 5_000;
 
 /**
  * What the ingest surface says when the link names no Stack.
@@ -172,6 +196,14 @@ export interface UseIngestResult {
   starting: boolean;
   /** True while the active job is being polled. */
   following: boolean;
+  /**
+   * Tell the hook the jobs panel is on screen, and that it is gone again.
+   *
+   * The interval refresh is scoped to the panel being OPEN, and this hook is created above
+   * the view switch — deliberately, so a follow survives a trip to the chat — so the panel
+   * is the only thing that knows. `true` while mounted, `false` on the way out.
+   */
+  setListLive(live: boolean): void;
   /** Start an ingest from a source. A chosen `stackId` wins over the link's Stack. */
   start(source: string, options?: IngestWriteOptions): Promise<void>;
   /**
@@ -206,10 +238,13 @@ export interface UseIngestResult {
 export function useIngest({
   client,
   stackId,
+  listRefreshMs = LIST_REFRESH_MS,
 }: {
   client: ApiClient;
   /** The tenant, already resolved from the link. `null` blocks the whole surface. */
   stackId: string | null;
+  /** Injection seam for tests: how often the list is re-read while it is live. */
+  listRefreshMs?: number;
 }): UseIngestResult {
   // Read once and never mutated: the link is the only source, so there is no
   // selection to track and nothing a later render could contradict.
@@ -228,6 +263,9 @@ export function useIngest({
   const [pollNotice, setPollNotice] = useState<IngestNotice>(null);
   const [starting, setStarting] = useState(false);
   const [following, setFollowing] = useState(false);
+  // Whether the jobs panel is on screen. The interval refresh is scoped to this and not to
+  // the hook's lifetime, because the hook outlives the view on purpose.
+  const [listLive, setListLive] = useState(false);
   // The user's explicit choice on this surface. `null` until they pick: the link's value
   // is applied as the fallback by `resolvedStackId` rather than copied into state, so a
   // link that changes still decides until someone chooses otherwise.
@@ -250,6 +288,34 @@ export function useIngest({
   const inFlight = useRef<Set<string>>(new Set());
 
   const abortRef = useRef<AbortController | null>(null);
+
+  /**
+   * Whether a list read is outstanding.
+   *
+   * Read by the interval tick and by nothing else: an explicit refresh (mount, and after
+   * every action) keeps its old behaviour of simply asking, because dropping it would make
+   * the list the user just changed wait for a tick. A timer, on the other hand, must not
+   * stack a second read on a host that has not answered the first.
+   */
+  const listInFlight = useRef(false);
+
+  /**
+   * Whether the list has answered at least once on this visit.
+   *
+   * The re-attach decision below waits for a real answer rather than for a mount: an empty
+   * list is a fact, a list that has not arrived is not, and a failed first read must not
+   * spend the visit's one chance to adopt a job.
+   */
+  const listReadOnce = useRef(false);
+
+  /**
+   * Whether the re-attach automation has had its chance on this visit.
+   *
+   * One chance, taken once: the automation adopts a job, or decides there is none to adopt,
+   * and then it is over — for the user's explicit choices (a follow of another job, a
+   * `stopFollowing`) and for the job it adopted ending, this visit is the user's.
+   */
+  const autoResumeDone = useRef(false);
 
   /**
    * The choices the control offers.
@@ -337,13 +403,16 @@ export function useIngest({
 
   const refreshList = useCallback(async () => {
     if (!stackId) return;
+    listInFlight.current = true;
     try {
       const list = await client.listIngestJobs(stackId);
       setJobs(list);
+      listReadOnce.current = true;
       setListNotice(null);
     } catch (error) {
       setListNotice(noticeFor(error));
     } finally {
+      listInFlight.current = false;
       setLoadingList(false);
     }
   }, [client, stackId]);
@@ -351,6 +420,23 @@ export function useIngest({
   useEffect(() => {
     void refreshList();
   }, [refreshList]);
+
+  /**
+   * Re-read the list on an interval, while the panel says it is open.
+   *
+   * A tick that lands on an outstanding read is DROPPED rather than queued, which is what
+   * keeps a slow host from being asked again before it has answered. With no Stack the
+   * timer is not even created: there is nothing safe to read, and `refreshList` refuses
+   * anyway.
+   */
+  useEffect(() => {
+    if (!listLive || !stackId) return;
+    const timer = setInterval(() => {
+      if (listInFlight.current) return;
+      void refreshList();
+    }, listRefreshMs);
+    return () => clearInterval(timer);
+  }, [listLive, listRefreshMs, refreshList, stackId]);
 
   // A poll loop outliving the view would keep calling a component that no longer
   // exists; the abort is what actually ends it.
@@ -360,10 +446,15 @@ export function useIngest({
     abortRef.current?.abort();
     abortRef.current = null;
     setFollowing(false);
+    // Stopping IS an instruction: the automation must not start another follow behind it.
+    autoResumeDone.current = true;
   }, []);
 
   const follow = useCallback(
     (id: string, options: { stackId?: string | undefined } = {}) => {
+      // Asking to watch something specific is the user taking the screen: whatever the
+      // automation might have adopted on this visit, it does not get to do it now.
+      autoResumeDone.current = true;
       // A job is watched in the Stack it belongs to: the one chosen for its start, else
       // the link's. Nothing to follow without one — the read would answer for whichever
       // Stack the endpoint is bound to. Only an explicit per-job Stack is honored here:
@@ -382,7 +473,13 @@ export function useIngest({
         .pollIngestJob(id, {
           signal: controller.signal,
           stackId: targetStackId,
-          onUpdate: (job) => setActiveJob(job),
+          onUpdate: (job) => {
+            setActiveJob(job);
+            // A read that succeeded ends the reconnect: the notice a blip put on screen is
+            // cleared by the recovery itself, not by the user clicking Dismiss.
+            setPollNotice((current) => (current?.kind === "reconnecting" ? null : current));
+          },
+          onTransient: (failure) => setPollNotice(reconnectingNotice(failure)),
         })
         .then((outcome) => {
           if (abortRef.current === controller) {
@@ -403,6 +500,30 @@ export function useIngest({
     },
     [client, refreshList, stackId, stopFollowing],
   );
+
+  /**
+   * The re-attach: on the first list read of a visit, adopt the job that is still working.
+   *
+   * This is the fix for "I have to press F5 to see the job again". It is AUTOMATIC and has
+   * no link parameter (Option A of `odd/tasks/ingest-follow-resilience.md` L3): the whole
+   * point is that a plain reload of the same link gets the state back, so making the
+   * recovery depend on the user editing the URL would reintroduce the action being removed.
+   *
+   * It runs at most once per visit, and it yields to the user in every direction: a job
+   * already being followed, an explicit `follow` of another job, a `stopFollowing`, and the
+   * adopted job ending all end it, because a screen that keeps re-adopting jobs is a screen
+   * the user cannot steer.
+   */
+  useEffect(() => {
+    if (autoResumeDone.current || !listReadOnce.current) return;
+    // One chance, whatever the answer: adopting nothing is also a decision.
+    autoResumeDone.current = true;
+    // Something is already on screen (a job started from the form before the list
+    // answered, say). Never replace it.
+    if (activeId !== null) return;
+    const candidate = mostRecentlyUpdatedRunning(jobs);
+    if (candidate) follow(candidate.id);
+  }, [activeId, follow, jobs]);
 
   /**
    * Start an ingest for an uploaded document, by reference.
@@ -583,6 +704,7 @@ export function useIngest({
     pollNotice,
     starting,
     following,
+    setListLive,
     start,
     follow,
     stopFollowing,
@@ -593,6 +715,32 @@ export function useIngest({
     retryingIds,
     clearPollNotice: () => setPollNotice(null),
   };
+}
+
+/**
+ * The job the re-attach should adopt: the most recently updated one that still has work
+ * ahead of it.
+ *
+ * "Still running" is NOT `!isJobSettled`. A job whose ingest failed while its compile reads
+ * `queued` is not settled by the pair, but nothing will ever start that compile
+ * (`compileBlockedByIngestFailure`), so adopting it would open the panel on a corpse and
+ * then report it stalled. The candidate set is therefore "not settled AND not blocked", and
+ * `updatedAt` — which the producer writes on every transition — picks the freshest.
+ *
+ * A tie keeps the earlier job in the list's order, and an unparsable timestamp cannot win
+ * over a real one: neither is worth a second rule.
+ */
+function mostRecentlyUpdatedRunning(jobs: IngestJob[]): IngestJob | undefined {
+  const updatedAtMs = (job: IngestJob): number => {
+    const at = Date.parse(job.updatedAt);
+    return Number.isNaN(at) ? Number.NEGATIVE_INFINITY : at;
+  };
+  return jobs
+    .filter((job) => !isJobSettled(job) && !compileBlockedByIngestFailure(job))
+    .reduce<IngestJob | undefined>(
+      (best, job) => (best === undefined || updatedAtMs(job) > updatedAtMs(best) ? job : best),
+      undefined,
+    );
 }
 
 /** The same set with `id` added, as a new value so React sees the change. */
@@ -627,6 +775,23 @@ function refusalMessage(error: ApiError): string {
       : `The ingest service refused this request (${error.status}).`;
   }
   return error.code && !said.includes(error.code) ? `${error.code}: ${said}` : said;
+}
+
+/**
+ * The notice for a read that failed while the follow keeps going.
+ *
+ * Two sentences, and both halves are load-bearing: what the read said, and that the job is
+ * still being followed. Without the second the message reads like the failure the loop
+ * used to end on — which is the bug this replaces.
+ */
+export function reconnectingNotice(failure: PollTransientFailure): IngestNotice {
+  const said = failure.message.trim();
+  return {
+    kind: "reconnecting",
+    message:
+      `The job status could not be read just now: ${said === "" ? "no answer." : said} ` +
+      "Still trying, and the last state stays on screen.",
+  };
 }
 
 /** Map a stop reason to what the user can act on. */
