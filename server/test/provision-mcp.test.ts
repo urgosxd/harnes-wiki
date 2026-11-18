@@ -105,19 +105,26 @@ const MUTATING_TOOLS = [
 /**
  * Every MCP tool the role's body tells the model to call.
  *
- * Two spellings have to be read, because the body uses both. Four tools are named in
- * their fully qualified form (`mcp__llmwiki__read_page`), which is what the model is
- * handed and therefore the authoritative spelling; `query_stack` and `list_stacks`
- * are named bare, in backticks, in the prose about the graph dimension. Reading only
- * the prefixed ones would have missed exactly the tool that was missing.
+ * Two spellings are read, and the reason each one is still read is different now.
+ *
+ * The BARE spelling — a snake_case name in backticks — is what the shipped body uses:
+ * after `role-by-volume` (S2) there is one MCP host and the role names its tools the way
+ * the model is handed them, with no server-name prefix. `tenant_mcp.exposed_tools` holds
+ * bare names too (`src/pi/tenant-runtime.ts` intersects them with each connected server's
+ * own `listTools()`), so a prefixed spelling in the body would be describing a tool that
+ * cannot be granted at all.
+ *
+ * The QUALIFIED spelling (`mcp__llmwiki__read_page`) is read for the opposite reason: it
+ * is the spelling a role copied from a multi-host deployment arrives with, and a body
+ * that regresses to it must still have its tool coverage checked rather than being read
+ * as prose. The shipped body does not use it — `test` below pins that.
  *
  * The bare pattern is deliberately greedy about snake_case identifiers: a role that
  * mentions `some_tool` in prose is asking for it, and a false positive here fails
  * closed — loudly, at test time — instead of shipping a role that cannot call what it
  * was told to call.
  */
-function roleTools(): Set<string> {
-  const body = readFileSync(ROLE, "utf8");
+function roleTools(body: string = readFileSync(ROLE, "utf8")): Set<string> {
   const names = new Set<string>();
   for (const match of body.matchAll(/\bmcp__[A-Za-z0-9_]+?__([a-z][a-z0-9_]*)/g)) {
     names.add(match[1]!);
@@ -131,10 +138,11 @@ function roleTools(): Set<string> {
 test("every MCP tool the shipped role names is provisioned", () => {
   const needed = roleTools();
   // A guard against the vacuous pass: if the extractor stops matching, the coverage
-  // assertion below would pass while pinning nothing at all. `read_page` arrives
-  // prefixed and `query_stack` only bare, so both extraction paths are proven live.
-  assert.ok(needed.has("read_page"), "the fully qualified spelling must be extracted");
-  assert.ok(needed.has("query_stack"), "the bare spelling must be extracted");
+  // assertion below would pass while pinning nothing at all. One name from each
+  // dimension the body talks about, so a body that stopped naming tools entirely is
+  // caught here instead of passing a subset check against an empty set.
+  assert.ok(needed.has("search_pages"), "the page-retrieval tools must be extracted");
+  assert.ok(needed.has("query_stack"), "the graph dimension's read must be extracted");
 
   const missing = [...needed].filter((name) => !TOOLS.includes(name)).sort();
   assert.deepEqual(
@@ -142,6 +150,39 @@ test("every MCP tool the shipped role names is provisioned", () => {
     [],
     `the role instructs the model to call tools that are not provisioned: ${missing.join(", ")}`,
   );
+});
+
+/**
+ * S2 of `odd/tasks/role-by-volume.md`: ONE MCP host, named the way the model is handed it.
+ *
+ * `mcp__…__tool` is a multi-server spelling: it names a server, so a role written that way
+ * only works while the deployment keeps that server's name, and it describes a tool
+ * `exposed_tools` cannot match. `llmwiki_kg` was the second host the requester removed.
+ * Both are pinned absent rather than merely unmentioned, because either one reappearing is
+ * the exact regression this spec exists for.
+ */
+test("the shipped role names its tools bare, with no second host", () => {
+  const body = readFileSync(ROLE, "utf8");
+
+  assert.doesNotMatch(
+    body,
+    /mcp__/,
+    "the body must not use a host-qualified tool spelling: one MCP host, named bare",
+  );
+  assert.doesNotMatch(
+    body,
+    /llmwiki_kg/,
+    "the body must not refer to the second (knowledge-graph) host",
+  );
+});
+
+test("the qualified spelling is still extracted, so a regression is measured", () => {
+  // Proven on a body written the old way: the extractor's first pattern is not dead code
+  // kept "just in case" — it is what keeps a role copied from a multi-host deployment
+  // covered by the subset check above instead of being read as prose.
+  const legacy = "Call `mcp__llmwiki__read_page` and `mcp__llmwiki_kg__query_stack`.";
+  const needed = roleTools(legacy);
+  assert.deepEqual([...needed].sort(), ["query_stack", "read_page"]);
 });
 
 test("no mutating tool is provisioned", () => {

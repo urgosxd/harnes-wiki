@@ -129,10 +129,18 @@ role and did not get it.
 `server/agents/wiki-agentic-search.md` is a copy of a local pi-herdsman definition:
 agentic search over the wiki, choosing between page retrieval and knowledge-graph
 traversal in a bounded, self-stopping loop instead of relaying one composed answer. The
-body is copied verbatim; the frontmatter carries only `name` and `description`, because
-a selected definition carrying `model`, `thinking` or `tools` fails the boot, and a YAML
-block list (`  - item`) fails the parse for every file in the directory rather than
-loading silently.
+reasoning is the original's; the ONE thing rewritten is how it names its tools.
+
+The agent talks to a single MCP host, so the body names its tools the way the model is
+handed them — `search_pages`, `query_wiki`, `read_page`, `get_context_pack`,
+`list_stacks`, `query_stack` — and not as `mcp__<server>__<tool>`. The qualified form
+names a server, so it only works while the deployment keeps that server's name, and
+`tenant_mcp.exposed_tools` holds bare names: a prefixed spelling there would match
+nothing and quietly grant no capability. A second host (`llmwiki_kg`) is gone with it.
+The frontmatter carries only `name` and `description`, because a selected definition
+carrying `model`, `thinking` or `tools` fails the boot, and a YAML block list
+(`  - item`) fails the parse for every file in the directory rather than loading
+silently.
 
 Select it with `AGENT_DEFINITION=wiki-agentic-search` and **restart the server**: agent
 definitions are read once at startup. The file does not set the model or the tools —
