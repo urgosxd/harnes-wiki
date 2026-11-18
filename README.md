@@ -368,6 +368,27 @@ A source path is resolved on **the service's** filesystem, not in this container
 a file that only exists here is not a valid source. Use a URL, a path the service
 can see, or upload it.
 
+### Controls: delete and retry, and no cancel
+
+Two operator controls proxy the service's own operations. Both carry the same
+identity and the same optional `stackId` in the query as the reads beside them.
+
+| Route | What it does |
+|---|---|
+| `DELETE /ingest/jobs/:id?stackId=` | Deletes a liquidated job; `200`, `202` or `204` on success |
+| `POST /ingest/jobs/:id/retry?stackId=` | Re-executes it as a **new** job; the new id is in the body, as `jobId` or `id` |
+
+Both answer the service's refusals verbatim — `404 job_not_found`, `409
+job_still_working`, `409 job_changed` — because those are the host's own words for
+"this does not exist", "not while it is working" and "you read a stale row"; folding
+any of them into `502` would report an operator's answer as a deployment outage. A
+refusal is shown as a refusal and never retried automatically.
+
+There is no cancel, and none is invented here: the service has no such operation, and
+**delete does not interrupt a running job** — it refuses with `409 job_still_working`
+and the job keeps working. Delete and retry share that one guard, so a row can be
+re-executed exactly when it can be cleaned up.
+
 ### Uploading: why it takes two endpoints
 
 The service accepts REFERENCES, not bytes — its own tool contract says `URL or
