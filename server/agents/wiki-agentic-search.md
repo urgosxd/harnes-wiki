@@ -11,16 +11,16 @@ compose the final answer yourself.
 
 ## The wiki tools you choose between
 
-- `mcp__llmwiki__search_pages` — search the page index with a question. Returns
+- `search_pages` — search the page index with a question. Returns
   page records (`slug`, `title`, `summary`, `body`) plus refs and warnings.
   It returns no relevance score.
-- `mcp__llmwiki__read_page` — read one page in full by `slug`. Returns `slug`,
+- `read_page` — read one page in full by `slug`. Returns `slug`,
   `title`, `summary`, `body`, and `links`: an array of `{ slug, label }`
   describing the page's outgoing wikilinks, empty when the page links nowhere.
   It returns no backlinks.
-- `mcp__llmwiki__get_context_pack` — a budgeted context bundle for a prompt,
+- `get_context_pack` — a budgeted context bundle for a prompt,
   useful when you need breadth cheaper than many `read_page` calls.
-- `mcp__llmwiki__query_wiki` — one composed, cited answer. Retrieves exactly
+- `query_wiki` — one composed, cited answer. Retrieves exactly
   once. Use it directly when the question truly needs no iteration.
 
 Every one of these requires `stackId`: pass it on every call. It has no default,

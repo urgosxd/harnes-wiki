@@ -101,4 +101,14 @@ describe("parseChatFrame", () => {
     expect(parseChatFrame('{"type":"run_finished","outcome":"ok"}')).toBeDefined();
     expect(parseChatFrame('{"type":"run_failed","outcome":"error","message":"m"}')).toBeDefined();
   });
+
+  it("accepts the turn's role notice, which is painted like a Stack notice", () => {
+    // A frame this reader drops is a notice nobody ever sees: the server logs the same
+    // fact, and a person watching the turn does not. So the vocabulary the server can
+    // emit is pinned here, one line per frame the client is expected to handle.
+    expect(parseChatFrame('{"type":"role_notice","text":"role says so"}')).toEqual({
+      type: "role_notice",
+      text: "role says so",
+    });
+  });
 });

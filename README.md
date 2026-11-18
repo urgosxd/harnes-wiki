@@ -79,8 +79,8 @@ Never commit provider credentials.
 | `CHAT_API_KEY` | Provider key. The container generates its own `models.json` from it and never carries it in the image. |
 | `POSTGRES_PASSWORD` | Database password. Applied on the volume's first `initdb` only; see the note below. |
 | `PI_WORKSPACE_DIR` | Neutral workspace handed to the session as `cwd`. Never a real project path. |
-| `PI_AGENTS_DIR` | Directory holding agent definitions (`*.md`). Defaults to `$HOME/.agents/agents`; a missing directory is allowed. |
-| `AGENT_DEFINITION` | Name of the agent definition to apply, e.g. `documentor` or `wiki-agentic-search`. Empty (the default) uses the plain system prompt. Read once at startup, so changing it needs a restart. |
+| `PI_AGENTS_DIR` | Directory holding agent definitions (`*.md`). Defaults to `$HOME/.agents/agents`; a missing directory is allowed. The selected definition's FILE is re-read on every turn. |
+| `AGENT_DEFINITION` | Name of the agent definition to apply, e.g. `documentor` or `wiki-agentic-search`. Empty (the default) uses the plain system prompt. The SELECTION is read once at startup, so changing it needs a restart; the selected file's TEXT is re-read on every turn, so editing it does not. |
 | `CHAT_PROVIDER` | Provider id for the chat model, e.g. `synthetic`. |
 | `CHAT_MODEL` | Model id inside that provider. |
 | `CHAT_THINKING_LEVEL` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
@@ -97,10 +97,84 @@ starts the server with zero credentials and every turn fails with
 ### Agent definitions
 
 An agent definition is a role for the agent: a `name`, a `description` and a body of
-text. `server/agents/documentor.md` is the example this repository ships, and in
-development that directory is bind-mounted read-only to `/home/node/.agents/agents`,
-so editing a file takes effect on the next restart instead of a rebuild. Production
-bakes the same files into the image.
+text. `server/agents/documentor.md` is the example this repository ships.
+
+**The file's text is read once per TURN, not once per process.** `AGENT_DEFINITION`
+selects which definition to apply and is still a startup fact — change it and you restart —
+but the selected file is re-read from disk on every turn and lands in that turn's leading
+system prompt. So correcting a role is an edit, not a release: the next message uses the
+new text, with no restart, no rebuild and no new tag. A `role_notice` sentence in the
+turn's own output says so when the text on disk cannot be used or names tools this
+deployment does not have (see **Correcting a role** below).
+
+#### The operating model: one role, edited in place
+
+Read this before inferring a hot-swap from the mechanism. There is ONE role per
+deployment:
+
+- `AGENT_DEFINITION=<name>` is set at deployment and stays. It selects which definition
+  is applied, and changing it needs a restart. With one role, you should never need to.
+- What changes at runtime is the CONTENT of that role's file: correct its text, save it
+  into the volume, and the next message uses it — no restart, no rebuild, no new tag.
+- Nothing switches roles at runtime. There is no `.active` marker, no stored selection, no
+  fallback from one definition to another. The server reads the one file the selection
+  names, once per turn, and applies it.
+
+#### Which definition is applied (the identity rule)
+
+The applied definition is the one whose frontmatter **declares** the selected name:
+
+```yaml
+---
+name: wiki-agentic-search     # THIS is the identity AGENT_DEFINITION matches
+description: Agentic search over the wiki
+---
+```
+
+The FILE NAME is not part of the identity. A file called `role-v2.md` that declares
+`name: wiki-agentic-search` is what `AGENT_DEFINITION=wiki-agentic-search` applies; a file
+called `wiki-agentic-search.md` that declares `name: something-else` is not. The reason is
+the loader's own contract: it keys a directory by what each file declares, so an uploaded
+role can be named anything and the identity stays one frontmatter line — which also means
+a rename is never a silent change of what is applied.
+
+A violation is never silent:
+
+| Where | What happens |
+|---|---|
+| at boot | `AGENT_DEFINITION` naming a declaration no file carries fails the start, with the names the directory does declare. |
+| at turn time | a file whose `name:` no longer matches the selection is REFUSED: the turn runs with the last valid text, the log warns naming both names, and the turn shows a notice saying the file declares a name this deployment did not select. |
+| two files declaring the same name | the load fails naming both paths: which one wins must not be a filesystem accident. |
+
+Editing only the BODY — the normal correction path — cannot disturb the selection: the
+frontmatter is untouched, so the identity the selection matches does not move.
+
+Where the directory comes from differs by stack, exactly as it does for skills:
+
+| | Development | Production |
+|---|---|---|
+| Source | bind mount of `./server/agents`, read-only | named volume `agentdoc-agents`, seeded from the image |
+| Host path read | `server/agents` | **none** |
+| A correction | edit the file in the repo | `docker cp`/`cp` into the volume, or edit it from a container |
+
+**Development** bind-mounts `./server/agents` read-only to `/home/node/.agents/agents`, so
+an edit to a `.md` is what the next turn sees.
+
+**Production** mounts the named volume `agentdoc-agents` at that path. The image carries a
+seed at `/opt/agentdocumentor/agents` — at neither discovery scope on purpose, so there is
+one copy of each definition — and `server/entrypoint.sh` copies it into the volume on a
+first boot, when the mount is missing or empty. It prints one line either way:
+
+```text
+agents-seed: /home/node/.agents/agents was empty, seeded from /opt/agentdocumentor/agents
+agents-seed: /home/node/.agents/agents already has content, left untouched
+```
+
+**An operator's own definitions win.** A mount with anything in it is never written to, so
+a corrected role survives every restart and every image upgrade — and an image upgrade does
+not overwrite it. To refresh from a newer seed, remove the volume (`docker volume rm
+agentdocumentor_agentdoc-agents`) or copy the new files over the old ones. A missing seed
+fails the boot rather than starting healthy with zero definitions.
 
 Frontmatter is delimited by `---` and read as `key: value` lines; only `name` and
 `description` are used. Host pi-herdsman definitions also carry `tools`, `model` and
@@ -108,13 +182,18 @@ Frontmatter is delimited by `---` and read as `key: value` lines; only `name` an
 warning naming the file, so a directory copied from an existing pi-herdsman setup still
 loads. The strictness is on the selection instead — `AGENT_DEFINITION=<name>` fails the
 boot when the chosen definition carries them, because a definition that is half-honored
-is worse than one that is refused, and that is the only one the prompt would apply.
+is worse than one that is refused, and that is the only one the prompt would apply. At
+turn time the same keys are refused more gently: the edit is ignored, the last valid text
+is kept, and a warning is logged.
 
 Selecting a definition with `AGENT_DEFINITION=<name>` appends it to the system prompt
-as `# Role: <name>`, followed by the description and the body. The base prompt stays
-first and unmodified, so a role adds to the product's behavior instead of replacing
-it. With `AGENT_DEFINITION` unset nothing changes in the prompt: the plain one is used,
-and definitions are still read so their problems are visible at startup.
+as `# Role: <name>`, followed by the description and the body, before the turn's Stack
+section. Because the role is appended per turn rather than composed at boot, it lands
+after Pi's own `<cwd>` block and before the Stack section, and its content is unchanged.
+The base prompt stays first and unmodified, so a role adds to the product's
+behavior instead of replacing it. With `AGENT_DEFINITION` unset nothing changes in the
+prompt: the plain one is used, and definitions are still read so their problems are
+visible at startup.
 
 **Why this loader is ours.** Pi 1.4.0 core has no agent-definition discovery: its
 `DefaultResourceLoader` is built with `noExtensions: true` and there is no
@@ -122,20 +201,59 @@ delegate/subagent tool, so no runtime path would ever read these files. The serv
 therefore loads and validates them itself at startup. Every file is read then,
 including when no definition is selected, and the boot fails with the file name when a
 definition cannot be parsed at all rather than serving a deployment that asked for a
-role and did not get it.
+role and did not get it. The per-turn read reuses that same parser
+(`src/pi/agent-role.ts`), so a file cannot be strict at boot and lenient later.
+
+#### Correcting a role
+
+In production the definition lives in a volume, so the fix is a file copy — the server
+picks it up on the next message:
+
+```bash
+docker cp fixed-role.md agentdoc-server:/home/node/.agents/agents/wiki-agentic-search.md
+```
+
+Overwrite the selected file in place. The `name:` line inside it is the identity, so the
+destination's file name is free — but leave that line alone unless you are also changing
+`AGENT_DEFINITION` and restarting, or the edit is refused (see **the identity rule**).
+
+Three rules make that safe to do in a hurry:
+
+- **A broken edit cannot leave the agent without a role.** If the file is missing,
+  unreadable or its frontmatter is refused at turn time, the turn runs with the last valid
+  text and logs a warning. Fix the file and the next turn uses it.
+- **The file grants nothing.** Tools, model and thinking level stay deployment concerns:
+  they come from the MCP provisioning and the `AGENT_READ_TOOLS`/`AGENT_BASH`/
+  `AGENT_WRITES`/`AGENT_SKILLS` flags, `CHAT_MODEL` and `CHAT_THINKING_LEVEL`. A `.md` that
+  could widen its own permissions would be a privilege question in a text file, which is
+  the opposite of what this product wants.
+- **A role that names an unprovisioned tool says so.** The tools the body mentions are
+  compared with the ones the session actually has; a name that is not there is logged and
+  shown as a notice in that turn, naming the tool. The turn proceeds — it is a report, not
+  a refusal.
+
 
 ### The wiki search role
 
 `server/agents/wiki-agentic-search.md` is a copy of a local pi-herdsman definition:
 agentic search over the wiki, choosing between page retrieval and knowledge-graph
 traversal in a bounded, self-stopping loop instead of relaying one composed answer. The
-body is copied verbatim; the frontmatter carries only `name` and `description`, because
-a selected definition carrying `model`, `thinking` or `tools` fails the boot, and a YAML
-block list (`  - item`) fails the parse for every file in the directory rather than
-loading silently.
+reasoning is the original's; the ONE thing rewritten is how it names its tools.
 
-Select it with `AGENT_DEFINITION=wiki-agentic-search` and **restart the server**: agent
-definitions are read once at startup. The file does not set the model or the tools —
+The agent talks to a single MCP host, so the body names its tools the way the model is
+handed them — `search_pages`, `query_wiki`, `read_page`, `get_context_pack`,
+`list_stacks`, `query_stack` — and not as `mcp__<server>__<tool>`. The qualified form
+names a server, so it only works while the deployment keeps that server's name, and
+`tenant_mcp.exposed_tools` holds bare names: a prefixed spelling there would match
+nothing and quietly grant no capability. A second host (`llmwiki_kg`) is gone with it.
+The frontmatter carries only `name` and `description`, because a selected definition
+carrying `model`, `thinking` or `tools` fails the boot, and a YAML block list
+(`  - item`) fails the parse for every file in the directory rather than loading
+silently.
+
+Select it with `AGENT_DEFINITION=wiki-agentic-search`. That SELECTION is a startup fact, so
+setting it — or swapping to another definition — needs a restart; the file's text does not.
+The file does not set the model or the tools —
 those come from `CHAT_MODEL` and `CHAT_THINKING_LEVEL` in the environment, and from the
 MCP grant list in `server/scripts/provision-mcp.mjs`. The rule that list follows is
 **every read-only tool the shipped role names is granted**, so the role's instructions

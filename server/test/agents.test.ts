@@ -164,17 +164,18 @@ test("one file with unsupported keys does not stop the load, and is recorded alo
     );
     writeFileSync(join(dir, "b-documentor.md"), doc("documentor", "Answers questions."));
 
-    const { definitions, unsupported } = loadAgentDefinitions(dir);
+    const loaded = loadAgentDefinitions(dir);
+    const { definitions, unsupported } = loaded;
 
     assert.deepEqual([...definitions.keys()], ["herdsman", "documentor"]);
     assert.deepEqual(unsupported, [
       { file: join(dir, "a-herdsman.md"), keys: ["tools", "model"] },
     ]);
-    assert.deepEqual(unsupportedKeysFor({ definitions, unsupported }, "herdsman"), [
+    assert.deepEqual(unsupportedKeysFor(loaded, "herdsman"), [
       "tools",
       "model",
     ]);
-    assert.deepEqual(unsupportedKeysFor({ definitions, unsupported }, "documentor"), []);
+    assert.deepEqual(unsupportedKeysFor(loaded, "documentor"), []);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -192,6 +193,31 @@ test("unsupportedKeysFor is empty for a definition that carries no extra keys", 
     // A name that was never loaded carries no keys either: it is not this helper's
     // job to report a missing definition, and the selection already fails on that.
     assert.deepEqual(unsupportedKeysFor(loaded, "absent"), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the declared name is the identity, and the file name is not", () => {
+  // `AGENT_DEFINITION=<name>` is resolved against the frontmatter `name:`, which is how
+  // this loader keys its map — so a file may be called anything as long as it declares the
+  // selected name. The per-turn role read (`src/pi/agent-role.ts`) depends on exactly these
+  // two facts: the map answers by declared name, and `files` says which file declared it.
+  // Enforcing it at turn time as well is what stops an edited `name:` line from being
+  // applied under a name the deployment never selected.
+  const dir = mkdtempSync(join(tmpdir(), "agents-"));
+  try {
+    writeFileSync(join(dir, "role-v2.md"), doc("wiki-agentic-search", "Agentic search."));
+
+    const loaded = loadAgentDefinitions(dir);
+
+    assert.deepEqual([...loaded.definitions.keys()], ["wiki-agentic-search"]);
+    assert.equal(loaded.definitions.get("wiki-agentic-search")?.description, "Agentic search.");
+    // The path the per-turn read uses is the file that DECLARED the name.
+    assert.equal(loaded.files.get("wiki-agentic-search"), join(dir, "role-v2.md"));
+    // And the file name is not a name: selecting it would find nothing, and the boot
+    // refuses an unknown `AGENT_DEFINITION` instead of applying a role nobody asked for.
+    assert.equal(loaded.definitions.has("role-v2"), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
