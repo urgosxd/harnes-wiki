@@ -328,6 +328,7 @@ if (inCheckout) {
       [
         "ingest-dimensions-array.md",
         "ingest-dimensions-union.md",
+        "ingest-follow-resilience.md",
         "ingest-operator-controls.md",
         "multitenant-stackId.md",
         "prod-hardening.md",
