@@ -862,10 +862,14 @@ The user never sees development tooling: no terminal, no file browser, no settin
 That is a UI promise and it holds.
 
 The model is a different question. A support assistant has to read a document, so
-`read`, `grep`, `find` and `ls` are available to it, confined to the workspace, and
-skills are mounted inside that workspace at `.pi/skills`, so the same `read` can open a
-skill body. None of that appears in the interface. See **Skills** under
-**Agent definitions** for where the files come from.
+`read`, `grep`, `find` and `ls` are available to it, and skills are mounted inside the
+workspace at `.pi/skills`, so the same `read` can open a skill body. Only `read` is
+confined to the workspace, and it refuses any path outside it. `ls`, `grep` and `find`
+are started in the workspace as their working directory but are **not** path-confined:
+given a path outside the workspace they read it. That is an open finding, recorded as
+`L3` in `odd/tasks/skills-volume-and-role.md`, and it is not fixed here. None of that
+appears in the interface. See **Skills** under **Agent definitions** for where the
+files come from.
 
 `bash` is **off by default**, and that is not caution for its own sake. Two things
 were measured on the real stack:

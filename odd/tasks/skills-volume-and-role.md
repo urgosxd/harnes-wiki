@@ -56,7 +56,7 @@ array in `server/test/feature-doc.test.ts`.
 
 | ID | Task | Spec | Route | Commit |
 | --- | --- | --- | --- | --- |
-| T1 | Skills mounted into the workspace in both compose files, the baked copy removed from the image, the copied wiki role, `README.md`, the S8/S9 tests, this document and its census entry | S1-S10 | inline (no writer definition available in this session) | this commit (see the closing report for its SHA: a commit cannot name itself) |
+| T1 | Skills mounted into the workspace in both compose files, the baked copy removed from the image, the copied wiki role, `README.md`, the S8/S9 tests, this document and its census entry | S1-S10 | inline (no writer definition available in this session) | f25cf8f |
 
 ## Log
 
@@ -116,3 +116,28 @@ L4 (what stays unverified):
   `mcp__llmwiki__read_page`, and `server/scripts/provision-mcp.mjs` deliberately leaves
   `read_page` out of the grant list. The body is kept verbatim (S4); the mismatch is
   recorded, not papered over.
+
+L5 (closing record, appended by `docs(odd)`):
+
+- **The closing commit is `f25cf8f`** (`feat(skills): mount skills inside the workspace
+  and ship the wiki search role`). The T1 Commit cell could not carry its own SHA, since
+  a commit cannot name itself; this `docs(odd)` commit records it, and the cell now reads
+  `f25cf8f`.
+- **S8 and the block-list half of S9 had NO RED by design.** The confined `read` already
+  returned a body under `<cwd>/.pi/skills` before this feature, and the definition parser
+  already threw on a YAML block list (`  - item`), so a test-first failure was not
+  available for either: this feature changes PLACEMENT (the mounts), and S5 froze the
+  sandbox. The RED that did exist was the role file being absent, which failed 2 tests.
+- **The README confinement claim was corrected in this same commit.** It said `read`,
+  `grep`, `find` and `ls` were "confined to the workspace". Measured in this session,
+  only `read` is: `confinedReadOperations` is wired into `read` alone
+  (`server/src/pi/agent-tools.ts:45-51`), and the same probe that `read` refused returned
+  the outside file through `ls`, `grep` and `find`. The sentence now names which tool is
+  confined and which three are not, and points at `L3`; the gap itself is unchanged and
+  no fix is proposed there.
+- **Delivery risk, still open with the requester:** prod's skills now come from a host
+  `./server/skills` path, so a deployment that carried only the compose file and the
+  images no longer discovers any skill.
+- **Slice size:** 506 inserted lines in one commit, over the ~400 guidance. The
+  single-commit instruction fused the work, and the comment-heavy test and prose files
+  account for most of it.
