@@ -13,13 +13,23 @@ import type { IngestJob } from "../lib/ingest.ts";
  *
  * So the rules pinned here are:
  *
- *   - one row per dimension, with that dimension's OWN name, status and summary (S2);
- *   - the two fixed sections survive untouched for jobs carrying no usable array (S3);
- *   - the fixed sections do not ALSO render when the array does, so no row is shown
- *     twice for the same job (S4);
- *   - nothing in the array can throw or invent a value, and an unusable array falls back
- *     to the fixed pair (S5);
+ *   - the two fixed sections render ALWAYS: `ingest`/`compile` are the pipeline's two
+ *     state machines, and `dimensions` is a per-output breakdown (S1 of the union);
+ *   - one row per dimension, with that dimension's OWN name, status and summary, in
+ *     addition to the fixed pair and after it (S2);
+ *   - a dimension that merely repeats a fixed row's name is not rendered a second time
+ *     (S3);
+ *   - the Compile section shows the stage and the progress the payload carries, and
+ *     omits a value it does not carry instead of inventing one (S4);
+ *   - nothing in the array can throw or invent a value, and no array can blank the fixed
+ *     pair (S5);
  *   - a dimension's badge is its own, not the job's overall status (S6).
+ *
+ * The rule these tests used to pin - "when `dimensions` renders, the two fixed sections
+ * are not ALSO rendered" - is SUPERSEDED, and the test that asserted it is inverted below
+ * on purpose. A real payload broke it: `compile` was still `running` on `page_generation`
+ * while `dimensions` already reported `wiki` and `kg` as `succeeded`, so the array hid the
+ * only row that said what the job was doing right now.
  */
 
 function job(overrides: Partial<IngestJob> = {}): IngestJob {
@@ -122,22 +132,136 @@ describe("IngestJobView: the payload's dimensions (S2)", () => {
   });
 });
 
-describe("IngestJobView: no duplicated rows (S4)", () => {
-  it("does not render the two fixed sections beside the dimensions", () => {
+/**
+ * The exact job the requester pasted: the ingest closed, the compile still running on
+ * `page_generation` at 0 of 43 pages, and both reported dimensions already `succeeded`.
+ *
+ * This is the payload the superseded rule mangled: the array was non-empty, so the two
+ * fixed sections were dropped and the panel showed two green rows for a job that was
+ * still working.
+ */
+const USER_PAYLOAD = job({
+  id: "ing_01M7RDTQ37RE057Z4JZB1ZFCKW",
+  updatedAt: "2026-11-18T22:54:30.000Z",
+  ingest: {
+    status: "succeeded",
+    stage: "journaling",
+    endedAt: "2026-11-18T22:54:28.000Z",
+    message: "Source ingested.",
+    attempts: [
+      { attempt: 1, startedAt: "2026-11-18T22:54:20.000Z", endedAt: "2026-11-18T22:54:28.000Z" },
+    ],
+  },
+  compile: {
+    status: "running",
+    stage: "page_generation",
+    progress: { completed: 0, total: 43 },
+  },
+  dimensions: [
+    { name: "wiki", status: "succeeded", summary: "wiki:created" },
+    { name: "kg", status: "succeeded", summary: "kg:6 chunks, 154 entities" },
+  ],
+});
+
+describe("IngestJobView: the fixed pair and the dimensions are one union (S1, S2)", () => {
+  /**
+   * THE INVERTED TEST.
+   *
+   * This used to assert "does not render the two fixed sections beside the dimensions"
+   * (S4 of `odd/tasks/ingest-dimensions-array.md`). That spec is SUPERSEDED, not broken:
+   * the array is a per-output breakdown and the fixed pair is the job's two state
+   * machines, so the fixed sections must render whether or not the array does. The
+   * assertions are the old ones, reversed one by one.
+   */
+  it("renders the two fixed sections beside the dimensions", () => {
     const { container } = render(<IngestJobView job={TWO_DIMENSIONS} />);
 
     // The rows exist…
     expect(rows()).toHaveLength(2);
-    // …and the hardcoded columns are gone for this job, in structure AND in role:
-    // a `section` with `aria-label="Ingest"` is a region named after a dimension the
-    // payload did not necessarily contain.
-    expect(screen.queryByTestId("dimension-ingest")).toBeNull();
-    expect(screen.queryByTestId("dimension-compile")).toBeNull();
-    expect(screen.queryByRole("region", { name: "Ingest" })).toBeNull();
-    expect(screen.queryByRole("region", { name: "Compile" })).toBeNull();
-    expect(container.querySelectorAll(".job__dimensions > .dimension")).toHaveLength(2);
-    // No stage rows either: they belong to the fixed columns, which did not render.
-    expect(screen.queryAllByTestId("stage")).toHaveLength(0);
+    // …and the two fixed columns are there with them, in structure and in role.
+    expect(screen.getByTestId("dimension-ingest")).toBeDefined();
+    expect(screen.getByTestId("dimension-compile")).toBeDefined();
+    expect(screen.getByRole("region", { name: "Ingest" })).toBeDefined();
+    expect(screen.getByRole("region", { name: "Compile" })).toBeDefined();
+    expect(container.querySelectorAll(".job__dimensions > .dimension")).toHaveLength(4);
+    // Both stage rows are rendered: they belong to the fixed columns, which always render.
+    expect(screen.getAllByTestId("stage")).toHaveLength(2);
+  });
+
+  it("renders all four rows of the requester's job, the running compile among them", () => {
+    const { container } = render(<IngestJobView job={USER_PAYLOAD} />);
+
+    const sections = [
+      ...container.querySelectorAll<HTMLElement>(".job__dimensions > .dimension"),
+    ];
+    // Four rows, together. The old rule produced two of them, and the two it dropped
+    // were the only ones that said what the job was doing.
+    expect(sections).toHaveLength(4);
+
+    // The fixed pair first, in its own order…
+    expect(sections[0]?.getAttribute("aria-label")).toBe("Ingest");
+    expect(sections[1]?.getAttribute("aria-label")).toBe("Compile");
+    // …then the payload's breakdown rows, after them, in the producer's order.
+    expect(sections[2]?.getAttribute("data-dimension")).toBe("wiki");
+    expect(sections[3]?.getAttribute("data-dimension")).toBe("kg");
+
+    // The row that says what is happening RIGHT NOW.
+    const compile = screen.getByTestId("dimension-compile");
+    expect(compile.textContent).toContain("running");
+    // Its stage, as the panel humanises every stage word.
+    expect(compile.textContent).toContain("generating pages");
+    // The progress the payload carries, as the payload's pair - never a percentage this
+    // view computed. `of` is this panel's established separator for that pair.
+    expect(compile.textContent).toContain("0 of 43");
+    expect(compile.textContent).not.toMatch(/\d+\s*%/);
+
+    // The ingest's own closure and attempts, which the payload did report.
+    const ingest = screen.getByTestId("dimension-ingest");
+    expect(ingest.textContent).toContain("succeeded");
+    expect(ingest.textContent).toContain("Source ingested.");
+    expect(ingest.textContent).toContain("2026-11-18T22:54:28.000Z");
+    expect(ingest.textContent).toContain("done");
+
+    // And the breakdown rows still carry their own words.
+    expect(rows().map((row) => row.getAttribute("data-dimension"))).toEqual(["wiki", "kg"]);
+  });
+
+  it("omits the finished-at line and the attempt list only when the payload carries neither", () => {
+    // Absent means absent: no invented timestamp, no "unknown" placeholder.
+    render(
+      <IngestJobView
+        job={job({
+          ingest: { status: "running", stage: "committing", attempts: [] },
+        })}
+      />,
+    );
+
+    expect(screen.queryAllByTestId("finished-at")).toHaveLength(0);
+  });
+});
+
+describe("IngestJobView: a dimension that repeats a fixed row is not shown twice (S3)", () => {
+  it("does not render an `ingest` or `compile` dimension as its own row", () => {
+    render(
+      <IngestJobView
+        job={job({
+          dimensions: [
+            { name: "Ingest", status: "succeeded" },
+            { name: "  COMPILE ", status: "running" },
+            { name: "compile", status: "succeeded" },
+            { name: "wiki", status: "succeeded", summary: "wiki:created" },
+          ],
+        })}
+      />,
+    );
+
+    // Case, surrounding whitespace and repetition change nothing: the fixed section
+    // already carries that row, and the job is shown once.
+    expect(rows().map((row) => row.getAttribute("data-dimension"))).toEqual(["wiki"]);
+    // Both fixed sections render, exactly once each.
+    expect(screen.getAllByTestId("dimension-ingest")).toHaveLength(1);
+    expect(screen.getAllByTestId("dimension-compile")).toHaveLength(1);
+    expect(screen.getAllByTestId("stage")).toHaveLength(2);
   });
 });
 
@@ -216,7 +340,10 @@ describe("IngestJobView: nothing in the payload can throw or be invented (S5)", 
 
     const rendered = rows();
     expect(rendered.map((row) => row.getAttribute("data-dimension"))).toEqual(["wiki", "kg"]);
-    expect(screen.queryByTestId("dimension-ingest")).toBeNull();
+    // A partly broken array drops only the broken entries: it can never take the fixed
+    // pair with it.
+    expect(screen.getByTestId("dimension-ingest")).toBeDefined();
+    expect(screen.getByTestId("dimension-compile")).toBeDefined();
   });
 });
 

@@ -69,6 +69,12 @@ census array in `server/test/feature-doc.test.ts`.
 | --- | --- | --- | --- | --- |
 | T1 | Tolerant reader for `dimensions` + the rendered rows, the passthrough pin, `README.md` and this document | S1-S10 | inline | 1d6cd75 |
 
+## Supersedes
+
+| Spec | Superseded by | Why |
+| --- | --- | --- |
+| S4 | `odd/tasks/ingest-dimensions-union.md` S1-S3 | The array is a per-output breakdown, not a replacement for the two state machines. Rendering it INSTEAD OF the fixed pair hid the only row that said what the job was doing at that moment. Everything else in this document stands. |
+
 ## Log
 
 L1 (request, verbatim):
@@ -124,3 +130,16 @@ a word it cannot honestly claim (S6, and the comment at the badge says why), whi
 call sites — `ingest` and `compile` — still pass it and `ingest-jobs.test.tsx` still asserts
 `data-settled` on those two columns, which is what keeps S3's "renders exactly as it does
 today" honest.
+
+L6 (S4 superseded, reported defect): a live job — `ing_01M7RDTQ37RE057Z4JZB1ZFCKW` — arrived
+with `compile` still `running` on `page_generation` at 0 of 43 pages while `dimensions`
+already reported `wiki` and `kg` as `succeeded`. Under S4 the array was non-empty, so the two
+fixed sections were never rendered and the panel showed two green rows for a job that was
+still working; the requester had to reload the page (F5) to see the compile at all. The rule
+was wrong, not the payload: `ingest`/`compile` are the pipeline's two state machines (status,
+stage, attempts, progress) and `dimensions` is the per-output breakdown, so one cannot
+substitute for the other. S4's text is left untouched — editing a spec to agree with a later
+decision erases the record of the decision — and is marked superseded by
+`odd/tasks/ingest-dimensions-union.md` in the `## Supersedes` table above. Its test in
+`web/src/components/ingest-dimensions.test.tsx` is inverted, not deleted, with a comment
+saying which spec it used to pin.

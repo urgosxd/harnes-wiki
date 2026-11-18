@@ -204,8 +204,9 @@ export interface JobDimensionRow {
  * a non-string or blank summary drops the summary line and keeps the dimension: hiding a
  * reported result because of its prose would be the opposite of the rule.
  *
- * An empty result means "render the fixed pair instead" — the caller's decision, made on
- * `length === 0`, so an empty array and an unusable one are the same fact: nothing to show.
+ * An empty result means "nothing to add": the fixed `ingest`/`compile` sections render on
+ * every job regardless, as the union the panel is built on - so an empty array and an
+ * unusable one are the same fact here: no extra row, and nothing lost.
  *
  * Names are NOT deduplicated and NOT reordered: repetition and order are the payload's.
  */
