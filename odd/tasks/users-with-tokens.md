@@ -53,7 +53,7 @@ the declared census of `server/test/feature-doc.test.ts`.
 |---|---|---|---|---|
 | T1 | Generate the roster, mount it read-only in both compose files, export `CHAT_USERS` from it in the entrypoint, prove the export and the ignore rule | S2-S5 | inline | b054685 |
 | T2 | Prove token refusal (401 `unauthorized`) and per-token chat isolation against the real authenticator and a real server | S6 | inline | 27aa349 |
-| T3 | Write the operating procedure in `README.md`, the deployment template and this document; register the census entry | S7, S8 | inline | this commit |
+| T3 | Write the operating procedure in `README.md`, the deployment template and this document; register the census entry | S7, S8 | inline | 481f80c |
 
 ## Log
 
@@ -144,3 +144,67 @@ L5 (evidence, and three places where the brief and the code disagreed):
   lines because `.chat-users` plus its read-only mount, the entrypoint step and the two
   test files are one behaviour and are reviewed together. T1's commit is the slice
   boundary; T2 adds 155 lines of tests and T3 the prose.
+
+L6 (the database tier ran, and S6 is now fully verified rather than partially):
+
+L4 said the ownership half of S6 skipped on a machine with no reachable Postgres. That
+was true of the machine that wrote it, not of the claim. The tier has now run against a
+real database, and the difference it makes is the difference between an assumption and a
+proof:
+
+- **The database tier ran.** `docker compose up -d postgres`, then a real query through
+  `docker compose exec -T postgres psql -U agentdocumentor -d agentdocumentor -c 'select 1'`
+  answered `1` on the first attempt. The suite then ran with `CI_REQUIRE_DATABASE=1` set,
+  which turns an unreachable database into a FAILURE instead of a skip, so nothing below
+  can be a silent skip. The container was stopped afterwards with `docker compose stop
+  postgres`: no `down -v`, no volume removed, no password changed, and the existing
+  `agentdocumentor_agentdoc-pgdata` volume was reused, so the volume-password trap L4's
+  sibling work warned about never came up.
+- **Every test in `server/test/isolation.test.ts` ran, and all nine passed** (`ok 171`
+  through `ok 179` in the gated run), with zero skips in the whole suite. By name:
+  1. each user keeps their own history when running at the same time
+  2. a missing token, a wrong token and a borrowed token are all refused
+  3. a user cannot read, write to, rename or delete another user's conversation
+  4. the sidebar shows each user only their own conversations
+  5. two simultaneous turns on one conversation cannot both run
+  6. MCP connections are per tenant and do not grow with turns
+  7. each tenant's MCP tool runs against its own connection, not a shared one
+  8. a business tool enforces the tenant's scope and nothing else
+  9. the roster set up here gives every tenant its own secret
+- **The property the requester actually asked for was observed, not assumed.** Test 3 is
+  the "alice's token cannot reach bob's conversation" half: bob's own valid token gets 404
+  on alice's conversation for read, turn, rename and delete, and alice still sees it
+  untouched. Test 2 is the other half: no token, a token nobody was given, and bob's valid
+  token claiming to be alice are all refused `401 unauthorized`, while alice's token alone
+  — with no `x-user-id` at all — is served and names its own owner. Both were previously
+  DB-gated and are now run.
+- **Three distinct tokens, confirmed rather than assumed.** Test 9 asserts the roster this
+  file builds carries one token per tenant; it is ungated, and it ran and passed in both
+  runs. It is parameterised by `ISOLATION_USERS` (default 2), so it was ALSO run with
+  `ISOLATION_USERS=3`: 9/9 passed, which makes "three roster users carry three distinct
+  tokens" an observed assertion rather than an inference from the deployment file. The
+  deployment roster itself, `.chat-users`, was checked by shape only — three `id:token`
+  entries, three distinct token digests, no value read out (S3). Across the whole run
+  there are four distinct secrets present (three tenants plus the wrong-token case) and
+  none of them crosses: that is the S6 claim.
+
+Counts, both observed on this machine and not rounded:
+
+- **Before** — Postgres stopped, default gate: `421` tests, `377` pass, `0` fail, `44`
+  skipped. This reproduces L4's number exactly.
+- **After** — Postgres up, `CI_REQUIRE_DATABASE=1`: `437` tests, `437` pass, `0` fail, `0`
+  skipped.
+- **Why the total moves, since a gate should only move passes, not totals.** The 44 skips
+  became 44 passes, and a further 16 tests appear because they are children of the three
+  `describe(..., { skip })` suites in `server/test/documents.test.ts` and node's runner does
+  not count the children of a skipped suite at all. 421 + 16 = 437. Verified by
+  reproduction in both directions: the same tree printed `421 / 377 / 0 / 44` with the
+  container stopped and `437 / 437 / 0 / 0` with it up, so the delta is the database gate
+  and nothing else.
+
+So S6 is fully verified: both halves ran, under `AUTH_MODE=roster`, with one secret per
+user, against a real server and a real database. L4 stays in the document as written — it
+records what was true when it was written, and this entry is what supersedes it; editing
+L4 would have erased the fact that the gap existed. S7's other two L4 caveats stand
+unchanged: no image was built and `provision-mcp.mjs` was still not run against a live MCP
+host.
