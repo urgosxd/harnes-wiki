@@ -327,6 +327,7 @@ if (inCheckout) {
       evaluatedDocuments.sort(),
       [
         "ingest-dimensions-array.md",
+        "ingest-dimensions-union.md",
         "ingest-operator-controls.md",
         "multitenant-stackId.md",
         "prod-hardening.md",
