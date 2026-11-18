@@ -141,3 +141,51 @@ L5 (closing record, appended by `docs(odd)`):
 - **Slice size:** 506 inserted lines in one commit, over the ~400 guidance. The
   single-commit instruction fused the work, and the comment-heavy test and prose files
   account for most of it.
+
+L6 (delivery fix, supersedes the prod half of `S2`/`S3`):
+
+- **The requirement, verbatim:**
+
+  > "docker compose prod debe ser autosuficiente"
+
+- **What broke.** `f25cf8f` mounted `./server/skills` in BOTH compose files. In dev that is
+  right. In prod it made the checkout a deployment requirement: `docker-compose.prod.yml`
+  consumes images and previously needed no source beside it, so a deployment carrying only
+  the compose file and the two images started with **zero** skills and said nothing about
+  it. That is the delivery risk `L5` left open, and it is now closed.
+- **The design, and why it is this one.**
+  - The image carries a **seed** copy of `server/skills` at `/opt/agentdocumentor/skills`.
+    That path is at neither discovery scope, which is what keeps `S3`'s reason intact: Pi
+    discovers skills at `$HOME/.agents/skills` and `<cwd>/.pi/skills`, so a copy at either
+    would list every skill twice. `S3`'s words "the image bakes no skills" are superseded
+    in letter, not in intent: the baked copy is never discovered, only copied.
+  - Production mounts a **named volume** `agentdoc-skills` at `/data/workspace/.pi/skills`
+    and reads no host path at all — that is what self-sufficiency means here: this file
+    plus the images is a complete deployment.
+  - `server/entrypoint.sh` seeds the volume on the first boot: copy when the mount is
+    missing or empty, chown only when `id -u` is 0, do **nothing** when it already has
+    content, and log one line either way so the state is observable instead of silent.
+  - **An operator wins.** Seeding is a first-boot action, not a reconciliation pass: skills
+    copied into the volume, or a seeded skill an operator edited, are never overwritten by
+    a restart or an image upgrade. The cost is that an upgrade does not refresh skills —
+    remove the volume, or copy over it (`README.md`, **Skills**).
+  - A missing seed fails the boot rather than coming up healthy with no skills.
+- **What is still true from before.** Development keeps its read-only bind of
+  `./server/skills` at the same path and gets no named volume — the mount is the dev
+  source, and the seeding step simply finds content there and leaves it alone. `S5` still
+  holds: the sandbox is untouched. And the `L3` finding still stands and is still
+  unrelated to this fix: `ls`, `grep` and `find` are not confined to the workspace; only
+  `read` is.
+- **Evidence.** `server/test/entrypoint-skills-seed.test.ts` executes the real
+  `entrypoint.sh` against `mkdtemp` directories and was observed RED (4 failures) before
+  the seeding step existed, then GREEN: empty mount seeded, missing mount created and
+  seeded, populated mount untouched at exit 0, and a second boot that copies nothing and
+  claims nothing. `docker compose -f docker-compose.prod.yml config` renders
+  `agentdoc-skills` and no skills bind; `docker compose -f docker-compose.yml config`
+  still renders the dev bind. The seeding step is reachable on its own through
+  `SKILLS_SEED_ONLY=1`, which exists so a test can run it without `su-exec` or root —
+  nothing in the compose files or the Dockerfile sets it.
+- **Not proved here.** No container was started and no image was built, so the root path
+  (chown to `node`, the copy landing in a real Docker volume) and the live claim "the
+  model reads a seeded skill body in a deployed stack" are argued from the script and the
+  rendered configuration, not measured.

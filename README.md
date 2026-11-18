@@ -149,17 +149,53 @@ below — that the model may consult. This repository ships two in `server/skill
 
 Pi writes each skill's absolute `<location>` into the system prompt and expects the model
 to open it with `read`. That tool is confined to the workspace, so the only placement
-where the body is actually readable is **inside** it: both compose files mount
-`./server/skills` read-only at `/data/workspace/.pi/skills`, which is where Pi discovers
-project skills. Mounted at `$HOME/.agents/skills` — the user scope — a skill is listed
-and then refuses to open with `PathEscapeError: … is outside the workspace`.
+where the body is actually readable is **inside** it: `/data/workspace/.pi/skills`, which
+is where Pi discovers project skills. Mounted at `$HOME/.agents/skills` — the user
+scope — a skill is listed and then refuses to open with `PathEscapeError: … is outside
+the workspace`.
 
-The server image bakes **no** copy of `server/skills`. Pi discovers skills at two
-scopes (`$HOME/.agents/skills` and `<cwd>/.pi/skills`), so an image copy alongside the
-mount would list every skill twice under the same name. The mount is the single source,
-and that has one deployment consequence: a production host needs the `server/skills`
-directory beside `docker-compose.prod.yml`. It is the only host path a deployed stack
-reads, and it is mounted read-only.
+Where that directory comes from differs by stack, and the difference is deliberate:
+
+| | Development | Production |
+|---|---|---|
+| Source | bind mount of `./server/skills`, read-only | named volume `agentdoc-skills`, seeded from the image |
+| Host path read | `server/skills` | **none** |
+| Refresh | edit the file in the repo | remove the volume, or copy over it |
+
+**Development** bind-mounts `./server/skills` read-only, so an edit to a `SKILL.md` is
+what the next turn sees.
+
+**Production** mounts the named volume `agentdoc-skills` at that path and reads no host
+path at all: `docker-compose.prod.yml` plus the two published images is a complete
+deployment, and a host that carries neither the repository nor a copy of `server/skills`
+still gets the skills.
+
+The image carries a **seed** copy at `/opt/agentdocumentor/skills`, and it sits at neither
+discovery scope on purpose: Pi discovers skills at `$HOME/.agents/skills` and
+`<cwd>/.pi/skills`, so a copy in either place would list every skill twice under the same
+name. `server/entrypoint.sh` copies that seed into the volume on a first boot, when the
+mount is missing or empty, and prints one line either way:
+
+```text
+skills-seed: /data/workspace/.pi/skills was empty, seeded from /opt/agentdocumentor/skills
+skills-seed: /data/workspace/.pi/skills already has content, left untouched
+```
+
+**An operator's own skills win.** A mount that has anything in it is never written to, so
+copying your skills into the volume — or editing a seeded one — survives every restart
+and every image upgrade. The other side of that rule: an image upgrade does not refresh
+the skills either. To pick up a newer seed, remove the volume and let the next boot
+re-seed it, or copy the new files over the old ones:
+
+```bash
+docker compose -f docker-compose.prod.yml rm -sf server
+docker volume rm agentdocumentor_agentdoc-skills   # the only operation that re-seeds
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --wait
+```
+
+A missing seed fails the boot instead of starting healthy with zero skills — an image
+built without `server/skills` is a broken image, and a stack that answers every turn
+while consulting no skill is the silent state this arrangement exists to remove.
 
 To see discovery work end to end, use `server/skills/probe-skill`: ask the agent whether
 product skills are loaded and it answers `PROBE-SKILL-LOADED` when it managed to read
@@ -689,6 +725,27 @@ the compose file pins `generate` — that is what lets the server write its own
 
 The images themselves come from **Building and publishing both architectures**
 above: `deploy.sh` pulls them and never builds them.
+
+### Skills in a deployed stack
+
+A deployed stack reads no host path. Skills are a named volume, `agentdoc-skills`,
+mounted at `/data/workspace/.pi/skills` — the one place the model's confined `read` can
+open a `SKILL.md` body. It starts empty and the image seeds it on the first boot:
+`server/entrypoint.sh` copies the image's seed (`/opt/agentdocumentor/skills`) into the
+volume only when the volume is missing or empty, chowns it to `node` when running as
+root, and logs which of the two happened. Details and the reasoning are under **Skills**
+above.
+
+Two consequences worth knowing before an upgrade:
+
+- **A non-empty volume is never overwritten.** Skills you copied in, or edited, are yours
+  and survive restarts and image upgrades. To re-seed, remove the volume:
+  `docker volume rm agentdocumentor_agentdoc-skills` (with the server container
+  removed first), then `up -d`.
+- **It is a volume, so `down` keeps it and `down -v` deletes it.** A plain `down` leaves
+  the seeded skills in place; `docker compose -f docker-compose.prod.yml down -v` removes
+  `agentdoc-skills` along with the database and the workspace, and the next boot seeds it
+  again from the image.
 
 ### Rollback
 

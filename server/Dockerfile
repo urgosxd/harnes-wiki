@@ -53,13 +53,18 @@ COPY src ./src
 COPY scripts ./scripts
 COPY tsconfig.json ./
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-# Skills are deliberately NOT baked into this image. Pi discovers skills at two scopes —
-# user scope, `$HOME/.agents/skills`, and project scope, `<cwd>/.pi/skills` — so an image
-# copy plus the workspace mount the compose files declare would list every skill TWICE
-# under the same name. The mount is the single source: `server/skills` is mounted
-# read-only at `/data/workspace/.pi/skills`, which is also the only placement the model's
-# workspace-confined `read` tool can open. Re-adding a COPY here makes the mount a
-# duplicate source rather than the source.
+# Skills ship as a SEED for the workspace volume, NOT as the runtime source. The copy
+# below lands at `/opt/agentdocumentor/skills`, which is at neither of the two scopes Pi
+# discovers skills from — user scope, `$HOME/.agents/skills`, and project scope,
+# `<cwd>/.pi/skills` — because a copy at either would list every skill TWICE under the
+# same name. `entrypoint.sh` copies this seed into the workspace mount once, on a first
+# boot, and never over a mount that already has content.
+#
+# Why a seed at all: production mounts a named volume at `/data/workspace/.pi/skills`, so
+# a deployment carrying only this image and the compose file used to start with zero
+# skills and say nothing. Development does not use the seed — it bind-mounts
+# `server/skills` over the same path, and the mount wins over the seed step.
+COPY skills/ /opt/agentdocumentor/skills/
 # Agent definitions are product content for the same reason: baked here so the agent
 # scope is immutable and versioned with the tag. Production keeps this copy instead of
 # mounting a repository path, because a bind mount would let an edit on the host change
