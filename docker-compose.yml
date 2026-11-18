@@ -65,7 +65,7 @@ services:
       # would name the wrong process. Empty keeps uploads working but disables
       # ingest-by-document, since there would be no URL to hand over.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://server:8080}
-      # How the caller is identified. `open` (the default here) takes the name from
+      # How callers are identified. `open` (the default here) takes the name from
       # the request and treats it as the identity: `?user=alice` IS alice, with no
       # secret behind it, so anyone who can reach this server can act as any user.
       # That is a deliberate product decision, logged as a warning at startup.
@@ -74,6 +74,12 @@ services:
       # at least 16 characters) and is the only mode that resists impersonation.
       # `shared-token` accepts one token for everyone, which proves the caller was
       # given it and proves nothing about which user they are.
+      #
+      # The development default stays `open` on purpose: a clone has no `.chat-users`, and
+      # defaulting this stack to `roster` would fail every first `up` with a message about
+      # a file the developer never had. To try per-user tokens here, create `.chat-users`
+      # (one line, `id:token,id:token`) and set `AUTH_MODE=roster` in `.env` — the mount
+      # below is already in place.
       AUTH_MODE: ${AUTH_MODE:-open}
       # Only consulted when AUTH_MODE=roster (or as the inference fallback when
       # AUTH_MODE is unset). No `:?` here on purpose, for the same reason as
@@ -115,6 +121,17 @@ services:
       # turns this into a NAMED volume seeded from the image (docker-compose.prod.yml), so
       # a deployment reads no host path and stays self-sufficient.
       - ./server/agents:/home/node/.agents/agents:ro
+      # The per-user roster, read-only, as a FILE mount and never as a value in this file
+      # or in `.env`: those are copied around and interpolated into every service, and a
+      # token is neither. `entrypoint.sh` reads this once at boot and exports `CHAT_USERS`
+      # from it, only when `CHAT_USERS` is not already set.
+      #
+      # Read-only because a turn must never be able to rewrite the roster; a file mount
+      # because the alternative, a directory of secrets, is a second thing to look after.
+      # A missing host file is created here as an EMPTY DIRECTORY by Docker, which the
+      # entrypoint reports as its own state instead of failing obscurely. With the default
+      # `AUTH_MODE=open` that is harmless; under `AUTH_MODE=roster` it stops the boot.
+      - ./.chat-users:/run/secrets/chat-users:ro
     healthcheck:
       # /health needs no credentials, so container health does not depend on a secret.
       test:

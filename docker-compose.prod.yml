@@ -84,10 +84,20 @@ services:
       CHAT_THINKING_LEVEL: ${CHAT_THINKING_LEVEL:-medium}
       PI_WORKSPACE_DIR: /data/workspace
       DATABASE_URL: postgres://agentdocumentor:${POSTGRES_PASSWORD}@postgres:5432/agentdocumentor
-      # How callers are identified. `open` means the name in the link IS the
-      # identity and there is no secret behind it. See the README before exposing
-      # this to anyone.
-      AUTH_MODE: ${AUTH_MODE:-open}
+      # How callers are identified. `roster` is the default HERE, unlike the development
+      # stack: production is the one place where "the name in the link IS the identity" is
+      # a decision somebody has to take on purpose, and a deployment that boots open by
+      # accident is exactly what this default prevents. Each user gets a secret of their
+      # own, a claimed id that disagrees with the token is refused with `401`, and tokens
+      # shorter than 16 characters stop the boot.
+      #
+      # Still overridable, because `open` behind a private network is a legitimate choice
+      # and a compose file that refused the operator's decision would be a second product.
+      # The roster itself is NOT here and NOT in `.env`: it is mounted below.
+      AUTH_MODE: ${AUTH_MODE:-roster}
+      # Empty is the normal state: the roster arrives through the mount below. This
+      # variable exists so an orchestrator secret can OVERRIDE that file, and the
+      # entrypoint gives it precedence.
       CHAT_USERS: ${CHAT_USERS:-}
       INGEST_API_BASE_URL: ${INGEST_API_BASE_URL:-}
       INGEST_API_TIMEOUT_MS: ${INGEST_API_TIMEOUT_MS:-10000}
@@ -137,6 +147,23 @@ services:
       # image, remove the volume (`docker volume rm <project>_agentdoc-agents`) or copy
       # over it.
       - agentdoc-agents:/home/node/.agents/agents
+      # The per-user roster: the ONE host path this file reads, and it is read-only.
+      #
+      # Everything else here is a named volume because a deployment should need no source
+      # tree, and this is the deliberate exception. The alternative was `.env`, which
+      # Compose interpolates into every service that names the variable and which an
+      # operator copies between hosts by hand — a token does not belong in a file that
+      # also carries sixteen other settings.
+      #
+      # So: one line of secrets, in one file, at a path the operator owns (`chmod 600`,
+      # git-ignored), mounted read-only and read once at boot by `entrypoint.sh`, which
+      # exports `CHAT_USERS` from it. Rotating a user is editing this file and restarting
+      # the server container; nothing is baked into an image and nothing is committed.
+      #
+      # A missing host file is created here as an EMPTY DIRECTORY by Docker; with
+      # `AUTH_MODE=roster` as the default the entrypoint then STOPS the boot and says so,
+      # rather than starting a server that refuses every request.
+      - ./.chat-users:/run/secrets/chat-users:ro
     healthcheck:
       test:
         - CMD

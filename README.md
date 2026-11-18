@@ -74,8 +74,8 @@ Never commit provider credentials.
 | Variable | Purpose |
 |---|---|
 | `PI_AGENT_DIR` | Pi agent directory holding `models.json` and, when needed, `auth.json`. Mounted read-only in containers. |
-| `AUTH_MODE` | `open` (default), `shared-token` or `roster`. Chooses how a caller is identified; see **Identity: the name in the link**. |
-| `CHAT_USERS` | `id:token,id:token`, only read when `AUTH_MODE=roster`. |
+| `AUTH_MODE` | `open` (the development default), `shared-token` or `roster` (the production default). Chooses how a caller is identified; see **Identity: the name in the link**. |
+| `CHAT_USERS` | `id:token,id:token`, only read when `AUTH_MODE=roster`. Normally **not set at all**: both compose files mount `.chat-users` read-only and the entrypoint exports this from it. |
 | `CHAT_API_KEY` | Provider key. The container generates its own `models.json` from it and never carries it in the image. |
 | `POSTGRES_PASSWORD` | Database password. Applied on the volume's first `initdb` only; see the note below. |
 | `PI_WORKSPACE_DIR` | Neutral workspace handed to the session as `cwd`. Never a real project path. |
@@ -341,9 +341,10 @@ CHAT_API_KEY=sk-...
 POSTGRES_PASSWORD=<48 hex chars>
 
 # How callers are identified. `open` = the name in the link, no secret.
-# Use `roster` (with CHAT_USERS) to require per-user tokens.
+# Use `roster` to require per-user tokens. The tokens do NOT go here and do not go in
+# any compose file: they live in `.chat-users`, which both stacks mount read-only. See
+# "Three people, three tokens" below.
 AUTH_MODE=open
-# CHAT_USERS=ana:<24 hex>,luis:<24 hex>     # only read when AUTH_MODE=roster
 
 # External ingest service
 INGEST_API_BASE_URL=http://host.docker.internal:4240
@@ -373,13 +374,16 @@ Three notes that are easy to get wrong:
 
 ## Identity: the name in the link
 
-**There is no authentication.** The `user` in the link IS the identity:
+**There is no authentication** in the sense of a login: no password, no session, no
+sign-in form. In the development stack the `user` in the link IS the identity —
 
 ```
 http://localhost:8088/?user=alice
 ```
 
-That is the whole access model, and the consequence has to be stated plainly:
+— while a production deployment defaults to `AUTH_MODE=roster`, where the link also
+carries a per-user token that the server checks (see **Three people, three tokens**).
+The consequence of the first case has to be stated plainly:
 
 - **Anybody who can reach the server can act as any user.** Change `user=alice` to
   `user=bob` and you are bob.
@@ -390,9 +394,12 @@ That is the whole access model, and the consequence has to be stated plainly:
   enforced on every query; what is missing is any proof that the caller is entitled
   to the id they claim.
 
-There is no `users` table and no roster to maintain. Any name matching
+There is no `users` table and no account to create. Any name matching
 `[A-Za-z0-9._@-]{1,64}` is accepted, and it becomes a `user_id` the first time it
-creates a conversation.
+creates a conversation. What a roster deployment adds is one line in `.chat-users` per
+person — a secret, not a user record: nothing has to be migrated when someone leaves, only
+rotated. With `AUTH_MODE=open`, which is where the development stack starts, there is no
+roster to maintain at all.
 
 **The link is not a secret.** Send it however you like; what it grants is the name
 it contains, and everyone can type that name themselves.
@@ -417,6 +424,64 @@ A misspelled `AUTH_MODE` throws at startup instead of falling back to a weaker m
 With nothing configured at all, the server refuses every request: inference never
 falls forward into `open`.
 
+### Three people, three tokens: onboarding and rotating a user
+
+Each person gets a secret the others do not have, and the secrets live in ONE file:
+
+- `.chat-users`, in the deployment directory beside the compose file that mounts it, holds
+  **a single line**: `id:token,id:token,id:token`.
+- It is git-ignored (`.gitignore` names it) and should be `chmod 600`.
+- Both compose files mount it **read-only** at `/run/secrets/chat-users`, and
+  `server/entrypoint.sh` exports `CHAT_USERS` from it at boot — only when `CHAT_USERS` is
+  not already set, so a secret injected by an orchestrator still wins.
+- It is **never** in `.env` and never in a compose file: those are copied between hosts
+  and interpolated into every service that names a variable, and a token is not a setting.
+  A mounted file also has one place to rotate and one thing to protect.
+
+Production (`docker-compose.prod.yml`) defaults to `AUTH_MODE=roster`. The development
+stack stays `open` on purpose, so a fresh clone boots with no roster file at all; the mount
+is already in place there, so trying the real thing is `AUTH_MODE=roster` in `.env`.
+
+**Token shape.** 16 to 64 characters; 32 hex characters from the OS CSPRNG is what this
+repository generates. Shorter than 16 stops the boot (`CHAT_USERS token for "<id>" is too
+short`), and so does a misspelled `AUTH_MODE`, because a typo in a security setting is not
+a licence to fall back to a weaker mode.
+
+**Onboarding a person** — `dave`, from a checkout of the deployment:
+
+```bash
+# 1. a token: 32 hex characters, generated, never typed
+node -e 'process.stdout.write(require("node:crypto").randomBytes(16).toString("hex"))'
+
+# 2. add  dave:<that value>  to the single line in .chat-users, and lock the file down
+chmod 600 .chat-users
+
+# 3. restart the server so the entrypoint reads the file again
+docker compose restart server        # or: docker compose up -d server
+
+# 4. grant their MCP tools, or they chat with none — see the warning below
+cd server && USERS=dave \
+MCP_SERVER_URL=http://172.17.0.1:4173/mcp \
+DATABASE_URL=postgres://... \
+node scripts/provision-mcp.mjs       # also reads .chat-users when USERS is unset
+```
+
+**Rotating one token** is the same edit with a new value: replace `dave:<old>` with
+`dave:<new>` in `.chat-users`, restart, hand out the new link. The old link stops working
+at the restart. There is no revocation API and no expiry, so a rotation IS this edit —
+nothing else has to be told.
+
+**The link** is `?user=dave&token=<his value>`. The name must match the token's owner: a
+valid token that claims somebody else answers `401 unauthorized`, and so does a name with
+no token. On the API a token alone is enough to identify its owner; the browser needs the
+name as well, because the client turns `?user=` and `?token=` into headers and shows nothing
+at all without a name.
+
+**The silent state to watch for.** A roster user with no `tenant_mcp` rows chats normally
+and simply has **no MCP tools**: no error, no notice, no log line. Step 4 above is the fix.
+If a new user reports that the assistant cannot search the wiki or read a Stack, check the
+provisioning step before anything else — the identity worked, the grant is what is missing.
+
 ### Opening a link never asks for credentials
 
 There is no sign-in form on any path, because there is nothing to type that the link
@@ -435,8 +500,9 @@ still accepted, and the token is forwarded as `x-dev-token`, which is what keeps
 `AUTH_MODE=roster` and old links working.
 
 **Giving someone access** is just giving them the URL with their name. **Revoking**
-it is not possible without switching to `AUTH_MODE=roster`: a name has no secret to
-revoke.
+it is not possible without switching to `AUTH_MODE=roster` — where the procedure is
+**Three people, three tokens** above: a name has no secret of its own to revoke, and a
+roster entry does.
 
 ### Giving a user the wiki tools
 
@@ -453,7 +519,8 @@ node scripts/provision-mcp.mjs            # --dry-run to preview
 
 It is idempotent, and it does not create users — it grants tools to the names you
 list. A name that never appears there still opens the product; it simply has no
-tools.
+tools, and nothing says so: no error, no notice, no log line. That is the one silent
+state in a roster deployment, and it is why this step is part of onboarding.
 
 `MCP_DEFAULT_STACK_ID` is **deprecated and ignored**. The Stack comes from the
 request link (or an explicit tool argument), not from provisioning: setting the
@@ -851,7 +918,7 @@ Every validation message names the variable and never its value.
 | `REGISTRY` | empty | **required to pull**: a deployment consumes registry images, so on a fresh host this is the variable that makes `pull` possible. Empty is allowed and selects local images, but then `agentdocumentor-server:latest` and `agentdocumentor-web:latest` must already exist on that host |
 | `INGEST_API_BASE_URL` | empty (allowed) | degrades: uploads keep working, ingest-by-document answers `503 ingest_not_configured` |
 | `PUBLIC_BASE_URL` | empty (allowed) | degrades: upload-backed ingests are disabled |
-| `AUTH_MODE` | `open` (the default) | degrades: the name in the link IS the identity, with no secret behind it |
+| `AUTH_MODE` | `open` in the development stack, `roster` in `docker-compose.prod.yml` | `open` degrades: the name in the link IS the identity, with no secret behind it. `roster` with no roster file **aborts** the boot |
 
 `PI_AGENT_CONFIG_MODE` is the one that looks optional and is not: `config.ts` aborts
 when the mode is anything but `generate` **and** `PI_AGENT_DIR` is empty, which is why
@@ -990,10 +1057,9 @@ Installing Vite 8 fails on a peer conflict; do not paper over it with
 ## Acceptance: isolation and concurrency
 
 `server/test/isolation.test.ts` is the MVP's definition of done. It builds its
-server with an explicit shared token and sends a matching pair on every request, so
-it verifies **data-layer ownership under a test harness that does identify its
-callers** — not that the deployed mode can. See the note at the end of this section.
- It defaults to 2
+server with `AUTH_MODE=roster` and **one token per user**, so every request it makes
+carries that user's own secret: what it verifies is data-layer ownership under the
+deployed posture, not under a harness that trusts a header. It defaults to 2
 users (`ISOLATION_USERS=5` for the full run) and nothing in it is specific to that
 number:
 
@@ -1009,14 +1075,14 @@ simultaneous turns on one conversation yield exactly one 200 and one 409, MCP
 connections are per tenant and do not grow with turns, each tenant's MCP tool runs
 against its own connection, and a business tool enforces only its tenant's scope.
 
-**What this file cannot tell you.** With the default `AUTH_MODE=open` there is no
-secret in the deployed product, so the isolation above is a property of the queries,
-not of the running system: `?user=alice` is alice for whoever holds the link. The
-suite is kept because the ownership predicates it exercises are still the thing that
-stops one *legitimate* user's data appearing in another's sidebar, and because
-removing it would make `AUTH_MODE=roster` unverifiable the day it is switched back
-on. `scripts/smoke.mjs` prints an explicit `SKIP` for the impersonation check, with
-that reason.
+**What this file cannot tell you.** The ownership predicates it exercises are what stop
+one *legitimate* user's data appearing in another's sidebar; they are tested here with
+two different secrets, which is as far as a test can go. What no test can settle is
+whether the operator kept the roster out of a chat message: under `AUTH_MODE=roster` a
+leaked link is a leaked account until that token is rotated, and under `open` there is no
+secret at all. `scripts/smoke.mjs` prints an explicit `SKIP` for the impersonation check,
+with that reason. The ownership tests need a reachable Postgres and skip without one —
+a skip is not a pass.
 
 Both properties were mutation-checked: removing the ownership predicate makes all
 seven tests fail, and rebuilding the tenant runtime per turn fails the process

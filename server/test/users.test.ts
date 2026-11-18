@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseRoster, resolveRosterUser, tokenMatches } from "../src/http/users.ts";
 import { createAuthenticator, resolveAuthMode } from "../src/http/auth.ts";
+import { createRouter, sendJson } from "../src/http/router.ts";
 import type { IncomingMessage } from "node:http";
 
 const ROSTER = "alice:alice-token-aaaaaaaa,bob:bob-token-bbbbbbbbbb";
@@ -136,4 +137,65 @@ test("an explicit roster mode wins over a shared token", async () => {
     await authenticate(request({ "x-dev-token": "bob-token-bbbbbbbbbb", "x-user-id": "alice" })),
     undefined,
   );
+});
+
+/**
+ * The roster is the only mode that answers the question "is this caller who they say
+ * they are", so what it REFUSES is the product, not what it accepts.
+ *
+ * These go over a real HTTP socket rather than calling the authenticator directly:
+ * `undefined` from `createAuthenticator` is an internal answer, and what an operator has
+ * to be able to predict is the status and the body a client actually sees. No database
+ * and no route handler state are involved — the refusal happens before any handler runs,
+ * which is exactly why this can be asserted without one.
+ */
+test("every refusal the roster makes reaches the client as 401 unauthorized", async () => {
+  const authenticate = createAuthenticator({ mode: "roster", users: ROSTER });
+  const router = createRouter({ authenticate });
+  router.get("/conversations", async (ctx) => {
+    sendJson(ctx.res, 200, { userId: ctx.userId });
+  });
+
+  const server = await router.listen(0, "127.0.0.1");
+  const address = server.address();
+  const baseUrl = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+
+  const call = (headers: Record<string, string>, path = "/conversations") =>
+    fetch(`${baseUrl}${path}`, { headers });
+
+  try {
+    const refused: Array<[string, Record<string, string>, string]> = [
+      ["no token at all", { "x-user-id": "alice" }, "the link's name alone is not an identity"],
+      ["a wrong token", { "x-dev-token": "not-a-real-token-fixture-xxxx", "x-user-id": "alice" }, "a guess is not a token"],
+      ["bob's valid token claiming alice", { "x-dev-token": "bob-token-bbbbbbbbbb", "x-user-id": "alice" }, "the impersonation this mode exists to refuse"],
+      ["no credentials whatsoever", {}, "there is no anonymous default"],
+    ];
+
+    for (const [label, headers, why] of refused) {
+      const response = await call(headers);
+      assert.equal(response.status, 401, `${label} must be refused because ${why}`);
+      assert.deepEqual(await response.json(), { error: "unauthorized" });
+    }
+
+    // `?user=alice` is a CLIENT-SIDE spelling: the browser turns the query into headers,
+    // and the server reads headers only. Once the mode is roster, a link that carries a
+    // name and no token is precisely the case above — pinned again with the query string
+    // in the request, so a future server that started reading `?user=` cannot claim it
+    // was never asked.
+    const fromQueryString = await call({ "x-user-id": "alice" }, "/conversations?user=alice");
+    assert.equal(fromQueryString.status, 401);
+
+    // The token alone identifies its owner: `x-user-id` is optional, and the answer names
+    // the token's user, not the caller's claim.
+    const alone = await call({ "x-dev-token": "alice-token-aaaaaaaa" });
+    assert.equal(alone.status, 200);
+    assert.deepEqual(await alone.json(), { userId: "alice" });
+
+    // And the matching pair still works, which is what makes the refusals meaningful.
+    const both = await call({ "x-dev-token": "alice-token-aaaaaaaa", "x-user-id": "alice" });
+    assert.equal(both.status, 200);
+    assert.deepEqual(await both.json(), { userId: "alice" });
+  } finally {
+    server.close();
+  }
 });
