@@ -78,6 +78,8 @@ export type ChatFrame =
   | { type: "tool_finished"; tool: string; label: string; isError: boolean; notice?: string }
   /** A tool's output the caller asked for. One observation, not state. */
   | { type: "tool_result"; tool: string; text: string; isError: boolean }
+  /** One sentence about this turn, already worded by the server (the agent role). */
+  | { type: "role_notice"; text: string }
   | { type: "run_finished"; outcome: string; usage?: unknown }
   | { type: "run_failed"; outcome: string; message: string }
   | { type: "error"; message: string };
@@ -99,6 +101,7 @@ export function isChatFrame(value: unknown): value is ChatFrame {
     type === "tool_started" ||
     type === "tool_finished" ||
     type === "tool_result" ||
+    type === "role_notice" ||
     type === "run_finished" ||
     type === "run_failed" ||
     type === "error"

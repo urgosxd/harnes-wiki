@@ -7,7 +7,7 @@ Scope: the shipped role, both compose files, `server/Dockerfile`, `server/entryp
 a new `server/src/pi/agent-role.ts`, `tenant-runtime.ts`, `turn-service.ts`, `events.ts`,
 `main.ts`, the two web files that paint a notice, `README.md`, this document and its tests.
 
-Status: in progress
+Status: complete
 Branch: feature/role-by-volume
 Created: 2026-11-18
 Requester: the repo owner
@@ -64,12 +64,20 @@ refused rather than parsed.
 
 S10. This document, plus its entry in the census array in `server/test/feature-doc.test.ts`.
 
+S11. The identity rule, pinned. `AGENT_DEFINITION=<name>` is resolved against the declared
+frontmatter `name:`, so the applied definition is the file that DECLARES the selected name;
+the FILE NAME is not part of the identity. A violation is visible in both places it can
+happen: at boot an unknown name fails the start with the names the directory does declare,
+and at turn time a file whose `name:` no longer matches the selection is refused — last
+valid text, a warning naming both names, and a notice in the turn. Editing only the BODY
+must never disturb the selection.
+
 ## Tasks
 
 | ID | Task | Spec | Route | Commit |
 | --- | --- | --- | --- | --- |
-| T1 | One MCP host in the shipped role: bare tool names throughout, the provision test adjusted deliberately (both spellings still extracted, liveness proven per spelling), `README.md`, this document and its census entry | S1, S2, S9, S10 | inline | pending |
-| T2 | The role as a volume read per turn: seed + named volume in prod, bind in dev, `agent-role.ts` with a last-good cache and tool validation, the `before_agent_start` role section, the `role_notice` frame, plus `role-per-turn.test.ts` and `agents-volume-seed.test.ts` | S3-S8 | inline | this commit — a commit cannot name itself, see `L4` |
+| T1 | One MCP host in the shipped role: bare tool names throughout, the provision test adjusted deliberately (both spellings still extracted, liveness proven per spelling), `README.md`, this document and its census entry | S1, S2, S9, S10 | inline | `31720a6` |
+| T2 | The role as a volume read per turn: seed + named volume in prod, bind in dev, `agent-role.ts` with a last-good cache and tool validation, the `before_agent_start` role section, the `role_notice` frame, plus `role-per-turn.test.ts` and `agents-volume-seed.test.ts` | S3-S8, S11 | inline | this commit — a commit cannot name itself, see `L5` |
 
 ## Log
 
@@ -104,12 +112,28 @@ L2 (decisions already taken by the lead, implemented as given, and why):
   is the point of the feature — a `.md` that could widen its own permissions would be a
   privilege-escalation surface in a text file.
 
-L3 (measurements and what the implementation discovered):
+L3 (measurements, the operating model, and what the implementation discovered):
+
+**The operating model, stated so nobody infers a hot-swap from the mechanism.** There is
+ONE role per deployment, permanently: `AGENT_DEFINITION` is set at deployment and stays,
+an operator corrects that role's TEXT in place and the next turn uses it, and no runtime
+path switches which role is applied. There is no `.active` marker, no stored selection and
+no fallback chain between definitions — the reader is called with the one source the boot
+selection produced, and with nothing else. With a single role the restart `AGENT_DEFINITION`
+needs is an operation an operator should never have to perform.
 
 - **`before_agent_start` handlers compose in registration order.** `extensions/runner.js`
   re-renders the prompt for each handler from the options the previous one forced, so
   registering the role factory before the Stack factory appends role-then-Stack and both
   sections stay distinguishable (`# Role: <name>` then `<session_stack>`).
+- **The identity the selection depends on had to be re-checked per turn.** `loadAgentDefinitions`
+  keys a directory by each file's declared `name:`, so the boot selection follows the
+  declaration and not the file name. That check runs once, at boot — which left the ONE
+  line a per-turn read has to defend: editing `name:` in the volume would have applied a
+  role under a name the deployment never selected, silently. The reader now refuses it
+  (last valid text, a warning naming both names, a notice in the turn), and a test edits
+  that line to prove it. Editing only the body — the normal correction path — cannot move
+  the identity, and a test pins that too.
 - **The boot path needed one new fact from the loader**: the selected definition's FILE, not
   just its parsed text, because the per-turn read is a read of that path. `loadAgentDefinitions`
   now also returns `files` (name → path); the parse itself is reused unchanged.
@@ -119,7 +143,6 @@ L3 (measurements and what the implementation discovered):
   about this turn you should know", rather than a second vocabulary of warnings.
 
 L4 (out of scope, and what stays unproven):
-
 - **Out of scope (S8):** `AGENT_DEFINITION` still needs a restart to change, and the `.md`
   still grants nothing — it cannot add a tool, a model or a thinking level. Both are stated
   in `README.md` rather than implied.
@@ -136,3 +159,53 @@ L4 (out of scope, and what stays unproven):
 - **Not covered:** the last-good cache has no "first turn, no previous text" fallback beyond
   running without a role, because there is nothing to fall back to. That case logs and
   proceeds; it is not a second-order behaviour anyone asked for.
+
+L5 (why the last task row does not name a commit): a commit cannot contain its own SHA, and
+this branch was asked to be exactly two commits, so `T2` reads "this commit" and points
+here. `T1`'s SHA is recorded because a later commit could carry it — the row was written
+before the commit that closed it, and the second commit filled it in. The slice is larger
+than the usual ~400 authored lines because the feature was asked for as two commits and
+the second one holds the whole volume + per-turn change; that is a review-workload fact,
+not a size the reviewer can shrink without splitting the feature.
+
+L6 (requester clarification, verbatim, after the work was in flight):
+
+> "1. **There is ONE role, permanently.** They will not switch between roles;
+> `AGENT_DEFINITION` is set once at deployment and stays. So: do NOT build any
+> role-switching mechanism — no `.active` marker, no selection file, no fallback chain
+> between definitions. If you started anything in that direction, drop it. The only thing
+> that must be editable at runtime is the CONTENT of the selected role's file, which is
+> what S4 already asks for. If you have already written code that reads more than the one
+> selected definition per turn, simplify it.
+>
+> 2. **Document the operating model explicitly**, so nobody infers hot-swap from the
+> mechanism: one role, edited in place; you correct its text and the next turn uses it;
+> you do not change which role is applied without a restart, and with a single role you
+> should never need to. Put that where an operator will read it (README section about
+> agent definitions, and `L3` of the feature document), in those terms.
+>
+> 3. **Pin the identity rule, because uploads create an edge the selection depends on.**
+> With `AGENT_DEFINITION=<name>`, decide and TEST what determines the applied definition:
+> the FILE NAME, the `name:` frontmatter, or both having to agree. Then make the failure
+> visible rather than silent — if an operator renames the file or edits `name:` so they
+> disagree, the deployment must not quietly apply nothing or apply a role under the wrong
+> name. State which rule you chose, why, and what the operator sees when it is violated.
+> Also confirm that editing only the BODY (the normal correction path) never disturbs the
+> selection."
+
+What each point changed:
+
+- **1 — nothing to drop.** The reader is called with the single source the boot selection
+  produced (`roleReader.resolve(roleSource, …)` in `main.ts`), once per turn; there is no
+  selection file, no `.active` marker and no fallback between definitions. Verified by
+  reading the wiring, not asserted from memory.
+- **2 — stated in `L3` above and in a `#### The operating model: one role, edited in place`
+  block in `README.md`**, in those terms: one role, edited in place, no runtime switch.
+- **3 — the rule chosen is the declared `name:`** (S11). Why: that is the loader's own
+  contract (`loadAgentDefinitions` keys a directory by what each file declares), it lets an
+  upload be named anything, and it makes a rename no change of selected role. The turn-time
+  check is the new part — the boot check does not run again, so an edited `name:` line would
+  otherwise be applied silently. What the operator sees: a startup error listing the
+  declared names (boot), or a warning naming both names plus a notice in the turn's output
+  (turn time), with the last valid text still applied. Body-only edits are pinned as
+  producing neither a warning nor a notice.

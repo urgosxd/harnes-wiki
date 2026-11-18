@@ -29,11 +29,12 @@
 # contract are the same, because a production stack that behaves differently from the
 # one that was tested is not the same product. Only the two service definitions change
 # their origin (image instead of build) and lose the source-tree bindings — including
-# the skills one. Production reads NOTHING from the host: skills live in a named volume
-# seeded from the image on first boot, so this file plus the two images is a complete
-# deployment. A bind to `./server/skills` would make the checkout a deployment
-# requirement and would start a stack carrying only this file with zero skills and no
-# error, which is the failure this arrangement exists to remove.
+# the skills and agents ones. Production reads NOTHING from the host: skills and agent
+# definitions both live in named volumes seeded from the image on first boot, so this file
+# plus the two images is a complete deployment. A bind to `./server/skills` or
+# `./server/agents` would make the checkout a deployment requirement and would start a
+# stack carrying only this file with zero skills — or zero definitions, which fails the
+# boot — and no error explaining it. That is the failure this arrangement exists to remove.
 services:
   postgres:
     image: postgres:16-alpine
@@ -95,12 +96,11 @@ services:
       AGENT_SKILLS: ${AGENT_SKILLS:-true}
       AGENT_BASH: ${AGENT_BASH:-false}
       AGENT_WRITES: ${AGENT_WRITES:-false}
-      # Agent definitions are read from the image here, never from a repo path: the
-      # deployment consumes an immutable artefact, and mounting a source directory would
-      # break the versioned-by-tag guarantee. Skills are a named volume (see `volumes`
-      # below) seeded from the image for the same reason: no host path is read. Only the
-      # settings that name the definition are deployment-specific; the directory is
-      # interpolated so an `.env` value is honored, with the baked path as the default.
+      # Agent definitions are a NAMED volume in production (see `volumes` below), never a
+      # repo path: the deployment consumes an immutable artefact, and a host bind would
+      # make the checkout a deployment requirement. The path and the selected definition
+      # stay interpolated so an `.env` value is honored; the default is the volume's own
+      # mount point, which is where the image's seed is copied on a first boot.
       PI_AGENTS_DIR: ${PI_AGENTS_DIR:-/home/node/.agents/agents}
       AGENT_DEFINITION: ${AGENT_DEFINITION:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -122,6 +122,21 @@ services:
       # their own skills in owns them. To refresh from a newer image, remove the volume
       # (`docker volume rm <project>_agentdoc-skills`) or copy over it.
       - agentdoc-skills:/data/workspace/.pi/skills
+      # Agent definitions, as a NAMED volume at the scope the server reads
+      # (`PI_AGENTS_DIR`, `$HOME/.agents/agents`), for the same reason the skills volume
+      # exists: production reads no host path. This used to be a baked copy at this exact
+      # path, which made "correct a bad role instruction" a rebuild and a release; now the
+      # mount is the source the server re-reads on EVERY turn (`src/pi/agent-role.ts`), so
+      # a fix is a `cp` into the volume and the next message uses it — no restart, no
+      # rebuild, no new tag.
+      #
+      # The volume starts empty and the image carries a seed at
+      # /opt/agentdocumentor/agents that `entrypoint.sh` copies in on a first boot, which
+      # is what keeps this file self-sufficient. A mount that already has content is never
+      # overwritten: an operator who corrected a role owns it. To refresh from a newer
+      # image, remove the volume (`docker volume rm <project>_agentdoc-agents`) or copy
+      # over it.
+      - agentdoc-agents:/home/node/.agents/agents
     healthcheck:
       test:
         - CMD
@@ -162,3 +177,6 @@ volumes:
   # Seeded from the image on the first boot of the server container (see
   # `server/entrypoint.sh`), then owned by whoever put content there.
   agentdoc-skills:
+  # The agent definitions: seeded the same way, and read PER TURN by the server, so a
+  # corrected role takes effect on the next message with no restart.
+  agentdoc-agents:

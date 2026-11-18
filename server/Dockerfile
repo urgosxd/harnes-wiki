@@ -65,12 +65,16 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 # skills and say nothing. Development does not use the seed — it bind-mounts
 # `server/skills` over the same path, and the mount wins over the seed step.
 COPY skills/ /opt/agentdocumentor/skills/
-# Agent definitions are product content for the same reason: baked here so the agent
-# scope is immutable and versioned with the tag. Production keeps this copy instead of
-# mounting a repository path, because a bind mount would let an edit on the host change
-# what a running deployment does, and the tag would then no longer describe it.
-COPY agents/ /home/node/.agents/agents/
-RUN chown -R node:node /home/node/.agents/agents
+# Agent definitions ship as a SEED for the agents volume, for exactly the reasons the
+# skills seed above exists. Production mounts a named volume at `$HOME/.agents/agents`, so
+# on a first boot that path is empty — zero definitions, and then `AGENT_DEFINITION=<name>`
+# fails the boot with "not found" on a deployment whose image carries the file. The copy
+# lands at `/opt/agentdocumentor/agents`, at neither discovery scope, so there is one copy
+# of each definition and not two; `entrypoint.sh` copies it into the volume once, and never
+# over a mount that already has content (an operator's corrected role wins).
+#
+# Development does not use the seed: it bind-mounts `server/agents` over the same path.
+COPY agents/ /opt/agentdocumentor/agents/
 
 # su-exec lets the entrypoint drop from root to `node` after taking ownership of
 # the data volume. Without it the process would have to run as root.

@@ -155,6 +155,20 @@ export function useChat({ client, onToolResult }: UseChatOptions) {
                   text: frame.notice,
                 });
               break;
+            case "role_notice":
+              // A fact about the TURN, not about a tool call: the agent role names tools
+              // this deployment did not provision, or its file could not be re-read. It
+              // is painted where the Stack notice is painted — one place for "something
+              // about this turn you should know" instead of a second vocabulary of
+              // warnings — and `tool` carries the owner of the fact ("agent-role") so the
+              // reducer's dedupe keeps two different facts two lines.
+              dispatch({
+                type: "stack_notice",
+                conversationId,
+                tool: "agent-role",
+                text: frame.text,
+              });
+              break;
             case "tool_result":
               // The payload is handed out, not rendered: this hook owns the
               // conversation's activity, not the data a tool happened to return.

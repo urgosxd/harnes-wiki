@@ -109,8 +109,11 @@ services:
       # `PathEscapeError: ... is outside the workspace`. Read-only because the agent
       # scope is product content, never something a turn may rewrite.
       - ./server/skills:/data/workspace/.pi/skills:ro
-      # Agent definitions stay at the user scope the server reads them from
-      # (`PI_AGENTS_DIR`). Development bind-mounts them; production bakes them.
+      # Agent definitions: this read-only bind IS the source, and the server re-reads the
+      # selected file on every turn (`src/pi/agent-role.ts`), so correcting a role here
+      # needs no restart and no rebuild — the next message uses the new text. Production
+      # turns this into a NAMED volume seeded from the image (docker-compose.prod.yml), so
+      # a deployment reads no host path and stays self-sufficient.
       - ./server/agents:/home/node/.agents/agents:ro
     healthcheck:
       # /health needs no credentials, so container health does not depend on a secret.
