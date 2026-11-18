@@ -56,7 +56,7 @@ array in `server/test/feature-doc.test.ts`.
 
 | ID | Task | Spec | Route | Commit |
 | --- | --- | --- | --- | --- |
-| T1 | Skills mounted into the workspace in both compose files, the baked copy removed from the image, the copied wiki role, `README.md`, the S8/S9 tests, this document and its census entry | S1-S10 | inline (no writer definition available in this session) | f25cf8f |
+| T1 | Skills mounted into the workspace in both compose files, the baked copy removed from the image, the copied wiki role, `README.md`, the S8/S9 tests, this document and its census entry | S1-S10 | inline (no writer definition available in this session) | `f25cf8f`, `a793ccf` |
 
 ## Log
 
@@ -189,3 +189,24 @@ L6 (delivery fix, supersedes the prod half of `S2`/`S3`):
   (chown to `node`, the copy landing in a real Docker volume) and the live claim "the
   model reads a seeded skill body in a deployed stack" are argued from the script and the
   rendered configuration, not measured.
+
+L7 (test-root fix, the second commit of `T1`):
+
+- **`a793ccf`** (`test(server): resolve the repo root the way the rest of the suite
+  does`), and the `T1` Commit cell now carries `f25cf8f`, `a793ccf` in that order.
+- **It repairs a defect this branch introduced in `f25cf8f`.**
+  `server/test/skills-volume.test.ts` resolved the repository from `import.meta.url`, two
+  levels above the test file, so it only found `server/agents` when the checkout sat at
+  that depth. Inside `server/Dockerfile`'s `test` stage — which copies `src`, `scripts`
+  and `tsconfig.json` but not `agents/` — its two agent-definition assertions resolved
+  `/app/agents` and failed on a checkout that does exist. The file now takes the root from
+  the `CI_REPO_ROOT ?? ../..` shape the rest of the suite uses, and a checkout-absence
+  skip names the missing directory instead of asserting on a path that is not there.
+- **The RED that proved it.** In an image-shaped layout (`src`, `scripts`,
+  `tsconfig.json`, `test/`, no `agents/`) the file failed 2 of 5. And `CI_REPO_ROOT` set
+  to a nonexistent path had previously made no difference at all, because the file
+  ignored the variable — that null result is what showed the resolution was the problem
+  and not the environment.
+- **The assertions still run in CI rather than skip.** `scripts/ci.sh` mounts the
+  checkout at `/repo` with `CI_REPO_ROOT=/repo`, so the agent-definition checks execute on
+  the real `server/agents` there; the skip covers only a run that has no checkout at all.
