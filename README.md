@@ -80,7 +80,7 @@ Never commit provider credentials.
 | `POSTGRES_PASSWORD` | Database password. Applied on the volume's first `initdb` only; see the note below. |
 | `PI_WORKSPACE_DIR` | Neutral workspace handed to the session as `cwd`. Never a real project path. |
 | `PI_AGENTS_DIR` | Directory holding agent definitions (`*.md`). Defaults to `$HOME/.agents/agents`; a missing directory is allowed. |
-| `AGENT_DEFINITION` | Name of the agent definition to apply, e.g. `documentor`. Empty (the default) uses the plain system prompt. |
+| `AGENT_DEFINITION` | Name of the agent definition to apply, e.g. `documentor` or `wiki-agentic-search`. Empty (the default) uses the plain system prompt. Read once at startup, so changing it needs a restart. |
 | `CHAT_PROVIDER` | Provider id for the chat model, e.g. `synthetic`. |
 | `CHAT_MODEL` | Model id inside that provider. |
 | `CHAT_THINKING_LEVEL` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
@@ -123,6 +123,83 @@ therefore loads and validates them itself at startup. Every file is read then,
 including when no definition is selected, and the boot fails with the file name when a
 definition cannot be parsed at all rather than serving a deployment that asked for a
 role and did not get it.
+
+### The wiki search role
+
+`server/agents/wiki-agentic-search.md` is a copy of a local pi-herdsman definition:
+agentic search over the wiki, choosing between page retrieval and knowledge-graph
+traversal in a bounded, self-stopping loop instead of relaying one composed answer. The
+body is copied verbatim; the frontmatter carries only `name` and `description`, because
+a selected definition carrying `model`, `thinking` or `tools` fails the boot, and a YAML
+block list (`  - item`) fails the parse for every file in the directory rather than
+loading silently.
+
+Select it with `AGENT_DEFINITION=wiki-agentic-search` and **restart the server**: agent
+definitions are read once at startup. The file does not set the model or the tools —
+those come from `CHAT_MODEL` and `CHAT_THINKING_LEVEL` in the environment, and from the
+MCP grant list in `server/scripts/provision-mcp.mjs`. Read what that list actually
+grants: the role's instructions name `query_wiki`, `search_pages` and `read_page`, and
+`read_page` is deliberately not among the granted tools.
+
+### Skills
+
+A skill is a `SKILL.md` document — `name` and `description` in its frontmatter, prose
+below — that the model may consult. This repository ships two in `server/skills/`
+(`llm-wiki-mcp` and `probe-skill`).
+
+Pi writes each skill's absolute `<location>` into the system prompt and expects the model
+to open it with `read`. That tool is confined to the workspace, so the only placement
+where the body is actually readable is **inside** it: `/data/workspace/.pi/skills`, which
+is where Pi discovers project skills. Mounted at `$HOME/.agents/skills` — the user
+scope — a skill is listed and then refuses to open with `PathEscapeError: … is outside
+the workspace`.
+
+Where that directory comes from differs by stack, and the difference is deliberate:
+
+| | Development | Production |
+|---|---|---|
+| Source | bind mount of `./server/skills`, read-only | named volume `agentdoc-skills`, seeded from the image |
+| Host path read | `server/skills` | **none** |
+| Refresh | edit the file in the repo | remove the volume, or copy over it |
+
+**Development** bind-mounts `./server/skills` read-only, so an edit to a `SKILL.md` is
+what the next turn sees.
+
+**Production** mounts the named volume `agentdoc-skills` at that path and reads no host
+path at all: `docker-compose.prod.yml` plus the two published images is a complete
+deployment, and a host that carries neither the repository nor a copy of `server/skills`
+still gets the skills.
+
+The image carries a **seed** copy at `/opt/agentdocumentor/skills`, and it sits at neither
+discovery scope on purpose: Pi discovers skills at `$HOME/.agents/skills` and
+`<cwd>/.pi/skills`, so a copy in either place would list every skill twice under the same
+name. `server/entrypoint.sh` copies that seed into the volume on a first boot, when the
+mount is missing or empty, and prints one line either way:
+
+```text
+skills-seed: /data/workspace/.pi/skills was empty, seeded from /opt/agentdocumentor/skills
+skills-seed: /data/workspace/.pi/skills already has content, left untouched
+```
+
+**An operator's own skills win.** A mount that has anything in it is never written to, so
+copying your skills into the volume — or editing a seeded one — survives every restart
+and every image upgrade. The other side of that rule: an image upgrade does not refresh
+the skills either. To pick up a newer seed, remove the volume and let the next boot
+re-seed it, or copy the new files over the old ones:
+
+```bash
+docker compose -f docker-compose.prod.yml rm -sf server
+docker volume rm agentdocumentor_agentdoc-skills   # the only operation that re-seeds
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --wait
+```
+
+A missing seed fails the boot instead of starting healthy with zero skills — an image
+built without `server/skills` is a broken image, and a stack that answers every turn
+while consulting no skill is the silent state this arrangement exists to remove.
+
+To see discovery work end to end, use `server/skills/probe-skill`: ask the agent whether
+product skills are loaded and it answers `PROBE-SKILL-LOADED` when it managed to read
+the file.
 
 ### `.env` for a deployment
 
@@ -649,6 +726,27 @@ the compose file pins `generate` — that is what lets the server write its own
 The images themselves come from **Building and publishing both architectures**
 above: `deploy.sh` pulls them and never builds them.
 
+### Skills in a deployed stack
+
+A deployed stack reads no host path. Skills are a named volume, `agentdoc-skills`,
+mounted at `/data/workspace/.pi/skills` — the one place the model's confined `read` can
+open a `SKILL.md` body. It starts empty and the image seeds it on the first boot:
+`server/entrypoint.sh` copies the image's seed (`/opt/agentdocumentor/skills`) into the
+volume only when the volume is missing or empty, chowns it to `node` when running as
+root, and logs which of the two happened. Details and the reasoning are under **Skills**
+above.
+
+Two consequences worth knowing before an upgrade:
+
+- **A non-empty volume is never overwritten.** Skills you copied in, or edited, are yours
+  and survive restarts and image upgrades. To re-seed, remove the volume:
+  `docker volume rm agentdocumentor_agentdoc-skills` (with the server container
+  removed first), then `up -d`.
+- **It is a volume, so `down` keeps it and `down -v` deletes it.** A plain `down` leaves
+  the seeded skills in place; `docker compose -f docker-compose.prod.yml down -v` removes
+  `agentdoc-skills` along with the database and the workspace, and the next boot seeds it
+  again from the image.
+
 ### Rollback
 
 `latest` is what runs, so a rollback is a digest operation, not a tag operation. Deploy
@@ -821,8 +919,14 @@ The user never sees development tooling: no terminal, no file browser, no settin
 That is a UI promise and it holds.
 
 The model is a different question. A support assistant has to read a document, so
-`read`, `grep`, `find` and `ls` are available to it, confined to the workspace, and
-skills can be consulted. None of that appears in the interface.
+`read`, `grep`, `find` and `ls` are available to it, and skills are mounted inside the
+workspace at `.pi/skills`, so the same `read` can open a skill body. Only `read` is
+confined to the workspace, and it refuses any path outside it. `ls`, `grep` and `find`
+are started in the workspace as their working directory but are **not** path-confined:
+given a path outside the workspace they read it. That is an open finding, recorded as
+`L3` in `odd/tasks/skills-volume-and-role.md`, and it is not fixed here. None of that
+appears in the interface. See **Skills** under **Agent definitions** for where the
+files come from.
 
 `bash` is **off by default**, and that is not caution for its own sake. Two things
 were measured on the real stack:

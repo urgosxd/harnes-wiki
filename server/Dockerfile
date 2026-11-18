@@ -53,9 +53,18 @@ COPY src ./src
 COPY scripts ./scripts
 COPY tsconfig.json ./
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-# Skills are product content: shipped in the image so the agent scope is immutable and versioned with the tag. Ownership is set here because the entrypoint only chowns /data.
-COPY skills/ /home/node/.agents/skills/
-RUN chown -R node:node /home/node/.agents/skills
+# Skills ship as a SEED for the workspace volume, NOT as the runtime source. The copy
+# below lands at `/opt/agentdocumentor/skills`, which is at neither of the two scopes Pi
+# discovers skills from — user scope, `$HOME/.agents/skills`, and project scope,
+# `<cwd>/.pi/skills` — because a copy at either would list every skill TWICE under the
+# same name. `entrypoint.sh` copies this seed into the workspace mount once, on a first
+# boot, and never over a mount that already has content.
+#
+# Why a seed at all: production mounts a named volume at `/data/workspace/.pi/skills`, so
+# a deployment carrying only this image and the compose file used to start with zero
+# skills and say nothing. Development does not use the seed — it bind-mounts
+# `server/skills` over the same path, and the mount wins over the seed step.
+COPY skills/ /opt/agentdocumentor/skills/
 # Agent definitions are product content for the same reason: baked here so the agent
 # scope is immutable and versioned with the tag. Production keeps this copy instead of
 # mounting a repository path, because a bind mount would let an edit on the host change
@@ -69,9 +78,11 @@ RUN apk add --no-cache su-exec && chmod +x /usr/local/bin/entrypoint.sh
 
 ENV NODE_ENV=production
 ENV PORT=8080
-# Pi resolves user-scope skills from $HOME/.agents/skills. `su-exec node` currently
-# rewrites HOME, but su-exec is installed unpinned, and a build where it does not would
-# silently find zero skills. Pinning HOME here makes discovery independent of it.
+# Pi resolves user-scope resources and the agent directory from $HOME: agent definitions
+# default to `$HOME/.agents/agents`. `su-exec node` currently rewrites HOME, but su-exec is
+# installed unpinned, and a build where it does not would silently find no definitions.
+# Pinning HOME here makes that independent of it. Skills no longer depend on it: they are
+# discovered from the workspace mount, not from `$HOME/.agents/skills`.
 ENV HOME=/home/node
 
 EXPOSE 8080

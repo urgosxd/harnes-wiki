@@ -1,7 +1,9 @@
-# Self-contained stack: no host directory is mounted into the agent server.
-# The container writes its own Pi model configuration from environment variables,
-# so it can be started on any machine that has a provider key, and the image never
-# carries credentials.
+# Self-contained stack: the only host directories mounted into the agent server are the
+# product's own content — `server/skills` (inside the workspace, so the model can open a
+# skill body with the confined `read`) and `server/agents`. Both are read-only. The
+# container writes its own Pi model configuration from environment variables, so it can
+# be started on any machine that has a provider key, and the image never carries
+# credentials.
 services:
   postgres:
     image: postgres:16-alpine
@@ -100,11 +102,15 @@ services:
       # The service's own data volume: generated config, session workspace. Nothing the
       # host owns is writable from inside the container.
       - agentdoc-workspace:/data/workspace
-      # Skills and agent definitions are read from the checkout, read-only on purpose:
-      # the agent scope is product content the model can consult, never something a
-      # turn may rewrite. Mounting them overrides the copy baked into the image, which
-      # is what makes local iteration possible without a rebuild.
-      - ./server/skills:/home/node/.agents/skills:ro
+      # Skills are read-only, and INSIDE the workspace on purpose. Pi discovers project
+      # skills at <cwd>/.pi/skills, and the model's `read` tool is confined to the
+      # workspace, so this is the only placement where the model can actually OPEN a
+      # skill body. Mounted at $HOME/.agents/skills it was indexed and unreadable:
+      # `PathEscapeError: ... is outside the workspace`. Read-only because the agent
+      # scope is product content, never something a turn may rewrite.
+      - ./server/skills:/data/workspace/.pi/skills:ro
+      # Agent definitions stay at the user scope the server reads them from
+      # (`PI_AGENTS_DIR`). Development bind-mounts them; production bakes them.
       - ./server/agents:/home/node/.agents/agents:ro
     healthcheck:
       # /health needs no credentials, so container health does not depend on a secret.

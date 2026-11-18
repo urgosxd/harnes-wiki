@@ -28,7 +28,12 @@
 # Nothing structural: the network, the volumes, the healthchecks and the environment
 # contract are the same, because a production stack that behaves differently from the
 # one that was tested is not the same product. Only the two service definitions change
-# their origin (image instead of build) and lose the source-tree bindings.
+# their origin (image instead of build) and lose the source-tree bindings — including
+# the skills one. Production reads NOTHING from the host: skills live in a named volume
+# seeded from the image on first boot, so this file plus the two images is a complete
+# deployment. A bind to `./server/skills` would make the checkout a deployment
+# requirement and would start a stack carrying only this file with zero skills and no
+# error, which is the failure this arrangement exists to remove.
 services:
   postgres:
     image: postgres:16-alpine
@@ -90,12 +95,12 @@ services:
       AGENT_SKILLS: ${AGENT_SKILLS:-true}
       AGENT_BASH: ${AGENT_BASH:-false}
       AGENT_WRITES: ${AGENT_WRITES:-false}
-      # Skills and agent definitions are read from the image here, never from a repo
-      # path: the deployment consumes an immutable artefact, and mounting a source
-      # directory would break the versioned-by-tag guarantee. Only the two settings
-      # that name the directory and the definition are deployment-specific; the
-      # directory is interpolated so an `.env` value is honored, with the baked path
-      # as the default.
+      # Agent definitions are read from the image here, never from a repo path: the
+      # deployment consumes an immutable artefact, and mounting a source directory would
+      # break the versioned-by-tag guarantee. Skills are a named volume (see `volumes`
+      # below) seeded from the image for the same reason: no host path is read. Only the
+      # settings that name the definition are deployment-specific; the directory is
+      # interpolated so an `.env` value is honored, with the baked path as the default.
       PI_AGENTS_DIR: ${PI_AGENTS_DIR:-/home/node/.agents/agents}
       AGENT_DEFINITION: ${AGENT_DEFINITION:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -103,6 +108,20 @@ services:
       NODE_ENV: production
     volumes:
       - agentdoc-workspace:/data/workspace
+      # Skills, as a NAMED volume — not a host bind. Inside the workspace on purpose: Pi
+      # discovers project skills at <cwd>/.pi/skills and the model's `read` tool is
+      # confined to the workspace, so anywhere else a skill is indexed and unreadable.
+      #
+      # The volume starts empty and the image carries a seed at
+      # /opt/agentdocumentor/skills that `entrypoint.sh` copies in on a first boot. That
+      # is what makes this file self-sufficient: a host that has the two images and this
+      # file gets the skills. The seed lives at neither discovery scope, so there is one
+      # copy of each skill, not two.
+      #
+      # A mount that already has content is never overwritten: an operator who copies
+      # their own skills in owns them. To refresh from a newer image, remove the volume
+      # (`docker volume rm <project>_agentdoc-skills`) or copy over it.
+      - agentdoc-skills:/data/workspace/.pi/skills
     healthcheck:
       test:
         - CMD
@@ -140,3 +159,6 @@ networks:
 volumes:
   agentdoc-pgdata:
   agentdoc-workspace:
+  # Seeded from the image on the first boot of the server container (see
+  # `server/entrypoint.sh`), then owned by whoever put content there.
+  agentdoc-skills:
