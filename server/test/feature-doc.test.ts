@@ -326,6 +326,7 @@ if (inCheckout) {
       // set, not the order the filesystem happens to return.
       evaluatedDocuments.sort(),
       [
+        "ingest-dimensions-array.md",
         "ingest-operator-controls.md",
         "multitenant-stackId.md",
         "stack-in-prompt.md",

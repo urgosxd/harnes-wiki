@@ -359,10 +359,41 @@ a retry — so the view is two columns and never one status.
 | `progress` is `null` or an exact pair — never a percentage | Indeterminate sweep plus the stage name, or "3 of 8" |
 | `attempts[].endedAt` absent = in flight; `error` = rolled back | One row per attempt, marked in flight / rolled back / done |
 | `404` ≠ `503` | "This job is no longer known" (expired) vs "the service does not track jobs" |
+| `dimensions[]` reports per-unit results with their own statuses | One row per dimension, each with **its own** badge |
 
 Polling backs off from 250 ms to 2 s and stops as soon as both dimensions settle;
 the service streams nothing. A `409 busy` is surfaced as a retry signal, not a
 failure.
+
+### Per-dimension results
+
+A job payload may also carry a `dimensions` array: the producer's own per-unit results,
+beside the two state machines.
+
+```json
+"compile": { "status": "succeeded", "message": "Compiled wiki and kg." },
+"dimensions": [
+  { "name": "wiki", "status": "succeeded", "summary": "wiki:created" },
+  { "name": "kg",   "status": "succeeded", "summary": "kg:N chunks, M entities" }
+]
+```
+
+When that array is there, the detail pane renders **one row per dimension**, in the
+producer's order, with that dimension's own name, status badge and summary. No name is
+special-cased, so a dimension called `kg` or `qa` renders exactly like `wiki`, and a
+dimension whose status differs from the job's overall status keeps its own badge — a
+failed `kg` is visibly failed even when the compile reads `succeeded`.
+
+| Payload | What the detail pane shows |
+|---|---|
+| `dimensions` is usable | One row per dimension, and the fixed `Ingest` / `Compile` columns are not drawn beside them |
+| Absent, empty, or with nothing in it readable | The fixed `Ingest` / `Compile` columns, exactly as before |
+
+The array is a **report**, not a lifecycle. It never decides when polling stops: a job
+ends only when **both** `ingest` and `compile` are terminal, so a dimension that finished
+first cannot end the poll, and a job whose dimensions all read finished while its compile
+is still running keeps polling. Whether the producer can settle a dimension before the
+overall status is unverified, and the poller does not assume either ordering.
 
 A source path is resolved on **the service's** filesystem, not in this container:
 a file that only exists here is not a valid source. Use a URL, a path the service
