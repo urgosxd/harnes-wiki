@@ -53,9 +53,13 @@ COPY src ./src
 COPY scripts ./scripts
 COPY tsconfig.json ./
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-# Skills are product content: shipped in the image so the agent scope is immutable and versioned with the tag. Ownership is set here because the entrypoint only chowns /data.
-COPY skills/ /home/node/.agents/skills/
-RUN chown -R node:node /home/node/.agents/skills
+# Skills are deliberately NOT baked into this image. Pi discovers skills at two scopes —
+# user scope, `$HOME/.agents/skills`, and project scope, `<cwd>/.pi/skills` — so an image
+# copy plus the workspace mount the compose files declare would list every skill TWICE
+# under the same name. The mount is the single source: `server/skills` is mounted
+# read-only at `/data/workspace/.pi/skills`, which is also the only placement the model's
+# workspace-confined `read` tool can open. Re-adding a COPY here makes the mount a
+# duplicate source rather than the source.
 # Agent definitions are product content for the same reason: baked here so the agent
 # scope is immutable and versioned with the tag. Production keeps this copy instead of
 # mounting a repository path, because a bind mount would let an edit on the host change
@@ -69,9 +73,11 @@ RUN apk add --no-cache su-exec && chmod +x /usr/local/bin/entrypoint.sh
 
 ENV NODE_ENV=production
 ENV PORT=8080
-# Pi resolves user-scope skills from $HOME/.agents/skills. `su-exec node` currently
-# rewrites HOME, but su-exec is installed unpinned, and a build where it does not would
-# silently find zero skills. Pinning HOME here makes discovery independent of it.
+# Pi resolves user-scope resources and the agent directory from $HOME: agent definitions
+# default to `$HOME/.agents/agents`. `su-exec node` currently rewrites HOME, but su-exec is
+# installed unpinned, and a build where it does not would silently find no definitions.
+# Pinning HOME here makes that independent of it. Skills no longer depend on it: they are
+# discovered from the workspace mount, not from `$HOME/.agents/skills`.
 ENV HOME=/home/node
 
 EXPOSE 8080

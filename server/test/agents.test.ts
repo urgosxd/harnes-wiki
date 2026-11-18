@@ -85,6 +85,35 @@ test("a line that is not key: value still fails the file", () => {
   );
 });
 
+test("a YAML block list fails the file instead of loading as a half-read definition", () => {
+  // A host pi-herdsman definition writes `tools` as a YAML block list, not as
+  // `key: value`. The parser has no YAML, so the `  - item` line is refused by name
+  // rather than dropped: a silently ignored block list would load a definition that
+  // looks like it carries tools, and this message is what tells the operator which
+  // line to rewrite. It fails the whole directory, not just the one file.
+  const source =
+    "---\nname: wiki-agentic-search\ndescription: Searches the wiki.\ntools:\n" +
+    "  - mcp__llmwiki__search_pages\n  - mcp__llmwiki__read_page\n---\n\nBody.";
+
+  assert.equal(
+    messageFrom(() => parseAgentDefinition(source, "wiki.md")),
+    'wiki.md: frontmatter line 5 is not "key: value": "- mcp__llmwiki__search_pages"',
+  );
+
+  const dir = mkdtempSync(join(tmpdir(), "agents-"));
+  try {
+    writeFileSync(join(dir, "a-wiki.md"), source);
+    writeFileSync(join(dir, "b-documentor.md"), doc("documentor", "Answers questions."));
+    // Named with the file, so the boot failure points at the line to fix.
+    assert.equal(
+      messageFrom(() => loadAgentDefinitions(dir)),
+      `${join(dir, "a-wiki.md")}: frontmatter line 5 is not "key: value": "- mcp__llmwiki__search_pages"`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a key this runtime cannot honor is reported instead of thrown", () => {
   // `model` is what a host pi-herdsman definition carries. Rejecting the file would
   // also reject every definition in a mounted pi-herdsman directory, so the parse

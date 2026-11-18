@@ -80,7 +80,7 @@ Never commit provider credentials.
 | `POSTGRES_PASSWORD` | Database password. Applied on the volume's first `initdb` only; see the note below. |
 | `PI_WORKSPACE_DIR` | Neutral workspace handed to the session as `cwd`. Never a real project path. |
 | `PI_AGENTS_DIR` | Directory holding agent definitions (`*.md`). Defaults to `$HOME/.agents/agents`; a missing directory is allowed. |
-| `AGENT_DEFINITION` | Name of the agent definition to apply, e.g. `documentor`. Empty (the default) uses the plain system prompt. |
+| `AGENT_DEFINITION` | Name of the agent definition to apply, e.g. `documentor` or `wiki-agentic-search`. Empty (the default) uses the plain system prompt. Read once at startup, so changing it needs a restart. |
 | `CHAT_PROVIDER` | Provider id for the chat model, e.g. `synthetic`. |
 | `CHAT_MODEL` | Model id inside that provider. |
 | `CHAT_THINKING_LEVEL` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
@@ -123,6 +123,47 @@ therefore loads and validates them itself at startup. Every file is read then,
 including when no definition is selected, and the boot fails with the file name when a
 definition cannot be parsed at all rather than serving a deployment that asked for a
 role and did not get it.
+
+### The wiki search role
+
+`server/agents/wiki-agentic-search.md` is a copy of a local pi-herdsman definition:
+agentic search over the wiki, choosing between page retrieval and knowledge-graph
+traversal in a bounded, self-stopping loop instead of relaying one composed answer. The
+body is copied verbatim; the frontmatter carries only `name` and `description`, because
+a selected definition carrying `model`, `thinking` or `tools` fails the boot, and a YAML
+block list (`  - item`) fails the parse for every file in the directory rather than
+loading silently.
+
+Select it with `AGENT_DEFINITION=wiki-agentic-search` and **restart the server**: agent
+definitions are read once at startup. The file does not set the model or the tools —
+those come from `CHAT_MODEL` and `CHAT_THINKING_LEVEL` in the environment, and from the
+MCP grant list in `server/scripts/provision-mcp.mjs`. Read what that list actually
+grants: the role's instructions name `query_wiki`, `search_pages` and `read_page`, and
+`read_page` is deliberately not among the granted tools.
+
+### Skills
+
+A skill is a `SKILL.md` document — `name` and `description` in its frontmatter, prose
+below — that the model may consult. This repository ships two in `server/skills/`
+(`llm-wiki-mcp` and `probe-skill`).
+
+Pi writes each skill's absolute `<location>` into the system prompt and expects the model
+to open it with `read`. That tool is confined to the workspace, so the only placement
+where the body is actually readable is **inside** it: both compose files mount
+`./server/skills` read-only at `/data/workspace/.pi/skills`, which is where Pi discovers
+project skills. Mounted at `$HOME/.agents/skills` — the user scope — a skill is listed
+and then refuses to open with `PathEscapeError: … is outside the workspace`.
+
+The server image bakes **no** copy of `server/skills`. Pi discovers skills at two
+scopes (`$HOME/.agents/skills` and `<cwd>/.pi/skills`), so an image copy alongside the
+mount would list every skill twice under the same name. The mount is the single source,
+and that has one deployment consequence: a production host needs the `server/skills`
+directory beside `docker-compose.prod.yml`. It is the only host path a deployed stack
+reads, and it is mounted read-only.
+
+To see discovery work end to end, use `server/skills/probe-skill`: ask the agent whether
+product skills are loaded and it answers `PROBE-SKILL-LOADED` when it managed to read
+the file.
 
 ### `.env` for a deployment
 
@@ -822,7 +863,9 @@ That is a UI promise and it holds.
 
 The model is a different question. A support assistant has to read a document, so
 `read`, `grep`, `find` and `ls` are available to it, confined to the workspace, and
-skills can be consulted. None of that appears in the interface.
+skills are mounted inside that workspace at `.pi/skills`, so the same `read` can open a
+skill body. None of that appears in the interface. See **Skills** under
+**Agent definitions** for where the files come from.
 
 `bash` is **off by default**, and that is not caution for its own sake. Two things
 were measured on the real stack:
