@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -137,10 +137,23 @@ test("a relative path into .pi/skills works from the workspace too", async () =>
  * runtime can actually apply. A selected definition carrying `model`, `thinking` or
  * `tools` fails the boot (`src/main.ts`), and a YAML block list fails the parse for
  * every file in the directory — so the shipped copy is checked here, not by hand.
+ *
+ * These last two tests read a repository file, so they resolve the root through
+ * `CI_REPO_ROOT` exactly as the rest of the suite does. `server/agents` is NOT copied
+ * into the test image (`server/Dockerfile` copies `src`, `scripts` and `tsconfig.json`
+ * only), so resolving it relative to this file would look for `/app/agents` there and
+ * fail on a checkout that exists — the mount at `CI_REPO_ROOT` is what points these
+ * assertions at the agents directory in CI.
  */
-const AGENTS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "agents");
+const REPO_ROOT =
+  process.env.CI_REPO_ROOT ?? join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+const AGENTS_DIR = join(REPO_ROOT, "server", "agents");
+const inCheckout = existsSync(AGENTS_DIR);
+const skip = inCheckout
+  ? false
+  : "needs the repository checkout (the test image mounts it at CI_REPO_ROOT)";
 
-test("the wiki role is a definition this runtime can apply", () => {
+test("the wiki role is a definition this runtime can apply", { skip }, () => {
   const source = readFileSync(join(AGENTS_DIR, "wiki-agentic-search.md"), "utf8");
   const { definition, unsupportedKeys } = parseAgentDefinition(source, "wiki-agentic-search.md");
 
@@ -160,7 +173,7 @@ test("the wiki role is a definition this runtime can apply", () => {
   assert.match(definition.body, /^# Wiki agentic search/);
 });
 
-test("every definition the repository ships loads, and none of them carries ignored keys", () => {
+test("every definition the repository ships loads, and none of them carries ignored keys", { skip }, () => {
   const loaded = loadAgentDefinitions(AGENTS_DIR);
 
   assert.ok(loaded.definitions.has("wiki-agentic-search"));
