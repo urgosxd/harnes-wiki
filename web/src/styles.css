@@ -864,6 +864,21 @@ body {
   color: var(--text-dim);
 }
 
+/*
+ * The row holding Delete, Retry and the sentence that sits beside them.
+ *
+ * A flex row rather than the block a bare <div> got: without it the two buttons stack
+ * under the hint and read as three unrelated lines instead of one control. `flex-wrap`
+ * lets the hint drop below the buttons on a narrow panel instead of squeezing their
+ * labels, which `white-space: nowrap` on `.button` would then overflow.
+ */
+.jobs-panel__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
 .job-list {
   list-style: none;
   margin: 0;

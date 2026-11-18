@@ -307,6 +307,52 @@ export class ApiClient {
   }
 
   /**
+   * Delete one ingest job.
+   *
+   * The Stack travels in the QUERY, exactly like the reads above, because these routes
+   * are scoped by Stack and a body would be a second place to get it wrong.
+   *
+   * Success is silent: the service may answer `200`, `202` or `204`, and a `204` has no
+   * body at all, so this deliberately does not parse one. `request` is used instead of
+   * `json` for that reason — `json` would try to read a body that is not there.
+   *
+   * A refusal is NOT softened here. `409 job_still_working` (the job is alive and will
+   * not be interrupted) and `409 job_changed` are the host's answers, so they arrive
+   * with its own code and words through `ingestErrorFrom`, the same mapping every other
+   * ingest call uses. There is no retry: one click is one request.
+   */
+  async deleteIngestJob(id: string, stackId?: string): Promise<void> {
+    await this.request("DELETE", `/ingest/jobs/${encodeURIComponent(id)}${stackQuery(stackId)}`, undefined, {
+      errorMapper: (response) => this.ingestErrorFrom(response),
+    });
+  }
+
+  /**
+   * Ask the service to ingest the same source again, as a NEW job.
+   *
+   * Returns the new job's id, or `null` when the body names none. Two field names are
+   * accepted (`jobId`, then `id`) because the contract allows either; picking one and
+   * guessing would leave the caller following an id that does not exist.
+   *
+   * Refusals are the host's: `job_still_working` and `job_changed` reach the caller as
+   * `ApiError` with the service's code and message, and are not retried here.
+   */
+  async retryIngestJob(id: string, stackId?: string): Promise<string | null> {
+    const response = await this.request(
+      "POST",
+      `/ingest/jobs/${encodeURIComponent(id)}/retry${stackQuery(stackId)}`,
+      undefined,
+      { errorMapper: (r) => this.ingestErrorFrom(r) },
+    );
+    // A 204 has no body, and a body that arrives unparsable still means the retry was
+    // ACCEPTED: reporting a successful retry as an error because its envelope was not
+    // JSON would be worse than not following the new id.
+    if (response.status === 204) return null;
+    const body: unknown = await response.json().catch(() => undefined);
+    return newJobIdFrom(body);
+  }
+
+  /**
    * Follow a job until both dimensions settle.
    *
    * Stops are outcomes, not exceptions: a 503 (host without job tracking) and a
@@ -478,6 +524,22 @@ export function newIdempotencyKey(): string {
 function stackQuery(stackId: string | undefined): string {
   const trimmed = stackId?.trim();
   return trimmed ? `?stackId=${encodeURIComponent(trimmed)}` : "";
+}
+
+/**
+ * The new job's id, from whichever field the body used.
+ *
+ * `jobId` first because that is the field the create route already answers with, then
+ * `id`. A blank or non-string value is no id at all: following `""` would poll a job
+ * nobody named.
+ */
+function newJobIdFrom(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const candidate = body as { jobId?: unknown; id?: unknown };
+  for (const value of [candidate.jobId, candidate.id]) {
+    if (typeof value === "string" && value.trim() !== "") return value.trim();
+  }
+  return null;
 }
 
 /** Derive a conversation title from its first message, as chat products do. */

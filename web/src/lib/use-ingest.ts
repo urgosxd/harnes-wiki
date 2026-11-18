@@ -181,6 +181,25 @@ export interface UseIngestResult {
   follow(id: string, options?: { stackId?: string | undefined }): void;
   stopFollowing(): void;
   refreshList(): Promise<void>;
+  /**
+   * Delete one job. A chosen `stackId` wins over the link's, like every other write.
+   *
+   * The service's refusal is the answer: a working job is not interrupted, it is
+   * refused with `409 job_still_working`, and that is what the user reads. Nothing
+   * repeats a rejected request.
+   */
+  deleteJob(id: string, options?: { stackId?: string | undefined }): Promise<void>;
+  /**
+   * Ask the service to ingest the same source again, as a NEW job, and follow it.
+   *
+   * Refusals travel the same way a delete's do; a retry that is refused leaves the
+   * job on screen exactly as it was.
+   */
+  retryJob(id: string, options?: { stackId?: string | undefined }): Promise<void>;
+  /** Ids with a DELETE in flight, so a row disables its own button and nothing else. */
+  deletingIds: ReadonlySet<string>;
+  /** Ids with a retry POST in flight, kept apart from `deletingIds` for the same reason. */
+  retryingIds: ReadonlySet<string>;
   clearPollNotice(): void;
 }
 
@@ -216,6 +235,19 @@ export function useIngest({
   // What the host says exists. Empty is a real answer — "no choices to offer" — and it
   // does not erase the link's Stack, which `mergeStackIds` keeps.
   const [knownStackIds, setKnownStackIds] = useState<string[]>([]);
+  // Per-id, per-control in-flight markers. Two sets rather than one boolean: the panel
+  // disables and labels the button that is actually out, and a retry on one job must
+  // not look like a delete on another.
+  const [deletingIds, setDeletingIds] = useState<ReadonlySet<string>>(new Set());
+  const [retryingIds, setRetryingIds] = useState<ReadonlySet<string>>(new Set());
+  /**
+   * The same ids, as a guard rather than as a render input.
+   *
+   * A second click on a button whose state has not re-rendered yet must not become a
+   * second request, and reading the state for that would make every callback depend on
+   * it. One key per control, so a delete and a retry of the same job stay independent.
+   */
+  const inFlight = useRef<Set<string>>(new Set());
 
   const abortRef = useRef<AbortController | null>(null);
 
@@ -445,6 +477,91 @@ export function useIngest({
     [client, follow, refreshList, resolvedStackId, starting],
   );
 
+  /**
+   * Delete one job.
+   *
+   * ## What the hook does NOT decide
+   *
+   * Whether a job is deletable. The service owns that: a working job is refused with
+   * `409 job_still_working`, and that refusal is the answer to show. Guessing from a
+   * status snapshot would refuse jobs the host would accept and accept jobs it will not.
+   *
+   * ## One click, one request
+   *
+   * A second click while the first request is out is dropped here rather than sent
+   * twice, and a rejection is never repeated. Only a successful delete stops the poll
+   * and clears the detail — doing it any earlier would close the view of a job that the
+   * host just told us still exists.
+   */
+  const deleteJob = useCallback(
+    async (id: string, options: { stackId?: string | undefined } = {}) => {
+      const targetStackId = effectiveStackId(options.stackId, resolvedStackId);
+      if (!targetStackId) {
+        setPollNotice(unresolvedStackIdNotice());
+        return;
+      }
+      const key = `delete:${id}`;
+      if (inFlight.current.has(key)) return;
+      inFlight.current.add(key);
+      setDeletingIds((current) => withId(current, id));
+      setPollNotice(null);
+      try {
+        await client.deleteIngestJob(id, targetStackId);
+      } catch (error) {
+        setPollNotice(noticeFor(error));
+        return;
+      } finally {
+        inFlight.current.delete(key);
+        setDeletingIds((current) => withoutId(current, id));
+      }
+      // The job is gone, so watching it is watching nothing: the poll ends and the
+      // detail pane is cleared when this was the job on screen. A different job being
+      // watched is left exactly as it was.
+      if (activeId === id) {
+        stopFollowing();
+        setActiveJob(null);
+        setActiveId(null);
+      }
+      void refreshList();
+    },
+    [activeId, client, refreshList, resolvedStackId, stopFollowing],
+  );
+
+  /**
+   * Retry one job: the service creates a NEW job from the same source.
+   *
+   * The follow moves to the id the answer carries (`jobId`, else `id`), because that is
+   * the job that will make progress — reading the old one would show a job the retry did
+   * not restart. No id in the answer means no new job to watch, and the refreshed list is
+   * then what the user has.
+   */
+  const retryJob = useCallback(
+    async (id: string, options: { stackId?: string | undefined } = {}) => {
+      const targetStackId = effectiveStackId(options.stackId, resolvedStackId);
+      if (!targetStackId) {
+        setPollNotice(unresolvedStackIdNotice());
+        return;
+      }
+      const key = `retry:${id}`;
+      if (inFlight.current.has(key)) return;
+      inFlight.current.add(key);
+      setRetryingIds((current) => withId(current, id));
+      setPollNotice(null);
+      try {
+        const newJobId = await client.retryIngestJob(id, targetStackId);
+        if (newJobId) follow(newJobId, { stackId: targetStackId });
+      } catch (error) {
+        setPollNotice(noticeFor(error));
+        return;
+      } finally {
+        inFlight.current.delete(key);
+        setRetryingIds((current) => withoutId(current, id));
+      }
+      void refreshList();
+    },
+    [client, follow, refreshList, resolvedStackId],
+  );
+
   return {
     stackId,
     resolvedStackId,
@@ -470,8 +587,46 @@ export function useIngest({
     follow,
     stopFollowing,
     refreshList,
+    deleteJob,
+    retryJob,
+    deletingIds,
+    retryingIds,
     clearPollNotice: () => setPollNotice(null),
   };
+}
+
+/** The same set with `id` added, as a new value so React sees the change. */
+function withId(ids: ReadonlySet<string>, id: string): ReadonlySet<string> {
+  const next = new Set(ids);
+  next.add(id);
+  return next;
+}
+
+/** The same set with `id` removed, as a new value. */
+function withoutId(ids: ReadonlySet<string>, id: string): ReadonlySet<string> {
+  const next = new Set(ids);
+  next.delete(id);
+  return next;
+}
+
+/**
+ * A refusal, in the words the service used.
+ *
+ * The code is prepended when the message does not already carry it, because
+ * `job_still_working` and `job_changed` are the two facts an operator distinguishes and
+ * the sentence alone may not name either. A body that said nothing at all is stated as
+ * the refusal it is, rather than as `request failed with 409` — that reads like a
+ * temporary network fault, and invites exactly the retry loop this surface refuses.
+ */
+function refusalMessage(error: ApiError): string {
+  const said = error.message.trim();
+  const heardNothing = said === "" || said === `request failed with ${error.status}`;
+  if (heardNothing) {
+    return error.code
+      ? `The host refused this request: ${error.code}.`
+      : `The ingest service refused this request (${error.status}).`;
+  }
+  return error.code && !said.includes(error.code) ? `${error.code}: ${said}` : said;
 }
 
 /** Map a stop reason to what the user can act on. */
@@ -506,6 +661,28 @@ export function noticeForOutcome(outcome: PollOutcome): IngestNotice {
 }
 
 /**
+ * The upstream job-control refusals: the two codes a delete or a retry can carry.
+ *
+ * These are an ALLOW-LIST on purpose. A `409` reaching this surface is one of two
+ * unrelated facts, and the only thing that separates them is the code the response
+ * carries — so the branch below has to name the codes that mean "the host answered
+ * about this job" rather than assume any code at all does. The concurrency lock that
+ * `start` hits also arrives with a code of its own (`busy`), and that one is not a
+ * job-control answer.
+ */
+const JOB_CONTROL_REFUSAL_CODES: ReadonlySet<string> = new Set(["job_still_working", "job_changed"]);
+
+/**
+ * What a `409` with no job-control code means: one ingest at a time, try again later.
+ *
+ * The exact sentence this surface has shown for the concurrency lock since before the
+ * operator controls existed. It is kept byte for byte: the host's own body for that lock
+ * says less than this, and the operator has to read "retry", not "failed".
+ */
+const INGEST_ALREADY_RUNNING_NOTICE =
+  "Another ingest is running. That is a retry signal, not a failure.";
+
+/**
  * Map an HTTP failure to a notice.
  *
  * The one distinction that matters: 503 means "not configured / not tracked",
@@ -527,10 +704,22 @@ export function noticeFor(error: unknown): IngestNotice {
       return { kind: "unknown", message: "This job is no longer known to the host." };
     }
     if (error.status === 409) {
-      return {
-        kind: "error",
-        message: "Another ingest is running. That is a retry signal, not a failure.",
-      };
+      // One status, two unrelated facts — and the response is the only thing that tells
+      // them apart, so nothing here is branched on that the caller cannot see.
+      //
+      // A job-control refusal (`job_still_working`, `job_changed`) is the host's ANSWER
+      // about one job: a working job is refused rather than interrupted, and a job that
+      // moved under us is refused too. One friendly sentence for both would erase the
+      // difference the user has to act on and would hide the code the service chose, so
+      // its own words reach the screen, once.
+      //
+      // Any other 409 on these routes is the concurrency lock — `start` hitting an ingest
+      // that is already running — and that is a retry signal, not a failure. It keeps the
+      // sentence this surface has always shown for it, unchanged.
+      if (error.code && JOB_CONTROL_REFUSAL_CODES.has(error.code)) {
+        return { kind: "error", message: refusalMessage(error) };
+      }
+      return { kind: "error", message: INGEST_ALREADY_RUNNING_NOTICE };
     }
     return { kind: "error", message: error.message };
   }
