@@ -1,12 +1,14 @@
 import {
   compileBlockedByIngestFailure,
   compileRetryable,
+  dimensionRows,
   isCompileSettled,
   isIngestSettled,
   stageLabel,
   type CompileDimension,
   type IngestDimension,
   type IngestJob,
+  type JobDimensionRow,
 } from "../lib/ingest.ts";
 
 export interface IngestJobViewProps {
@@ -31,9 +33,25 @@ export interface IngestJobViewProps {
  *  - It never hides an attempt. An attempt without `endedAt` is shown as in
  *    flight, and one with `error` is shown as rolled back.
  *  - It never renders an unknown stage as blank: the raw name is shown.
+ *
+ * ## The payload's own rows, with the fixed pair as the fallback
+ *
+ * When the job carries a usable `dimensions` array, the panel renders ONE row per
+ * dimension - its name, its own status badge and its summary - and the two hardcoded
+ * columns are NOT rendered beside them: the same job shown twice is worse than one
+ * rendering, because the reader cannot tell which copy to trust. A dimension's badge is
+ * always its OWN status, never the job's overall one, so a failed `kg` under a
+ * `succeeded` compile is visibly failed.
+ *
+ * Jobs with no usable array (absent, empty, or nothing in it renderable) fall back to the
+ * fixed `Ingest`/`Compile` columns, unchanged - those jobs are still on screen and the
+ * contract they were built for has not changed.
  */
 export function IngestJobView({ job }: IngestJobViewProps) {
   const blockedCompile = compileBlockedByIngestFailure(job);
+  // One decision, made once: `dimensionRows` has already dropped everything it could not
+  // read, so "nothing left" IS the fallback - whether the array was absent or unusable.
+  const dimensions = dimensionRows(job);
 
   return (
     <section className="job" aria-label={`Ingest job ${job.id}`}>
@@ -45,85 +63,132 @@ export function IngestJobView({ job }: IngestJobViewProps) {
       </header>
 
       <div className="job__dimensions">
-        <section
-          className="dimension"
-          aria-label="Ingest"
-          data-testid="dimension-ingest"
-        >
-          <h3 className="dimension__title">
-            Ingest
-            <StatusBadge status={job.ingest.status} settled={isIngestSettled(job.ingest)} />
-          </h3>
-          <StageRow stage={job.ingest.stage} status={job.ingest.status} />
-          {job.ingest.message && <p className="dimension__message">{job.ingest.message}</p>}
-          {job.ingest.error && (
-            <p className="dimension__error" role="alert">
-              {job.ingest.error}
-            </p>
-          )}
-          <AttemptList attempts={job.ingest.attempts} />
-        </section>
+        {dimensions.length > 0 ? (
+          dimensions.map((dimension, index) => (
+            // The producer's order is the pipeline's order; the index is only there so
+            // two dimensions that share a name cannot collide as keys.
+            <DimensionRow key={`${index}:${dimension.name}`} dimension={dimension} />
+          ))
+        ) : (
+          <>
+            <section
+              className="dimension"
+              aria-label="Ingest"
+              data-testid="dimension-ingest"
+            >
+              <h3 className="dimension__title">
+                Ingest
+                <StatusBadge status={job.ingest.status} settled={isIngestSettled(job.ingest)} />
+              </h3>
+              <StageRow stage={job.ingest.stage} status={job.ingest.status} />
+              {job.ingest.message && <p className="dimension__message">{job.ingest.message}</p>}
+              {job.ingest.error && (
+                <p className="dimension__error" role="alert">
+                  {job.ingest.error}
+                </p>
+              )}
+              <AttemptList attempts={job.ingest.attempts} />
+            </section>
 
-        <section
-          className="dimension"
-          aria-label="Compile"
-          data-testid="dimension-compile"
-        >
-          <h3 className="dimension__title">
-            Compile
-            {/*
-              `skipped` reads as success in the tone map, and usually it is. But a
-              compile that never started because the ingest failed is not a success,
-              and nothing about the status word says which one this is — only the
-              ingestion outcome does. Colour is a second channel saying "fine", so
-              leaving it green would contradict the words directly beneath it.
-            */}
-            <StatusBadge
-              status={job.compile.status}
-              settled={isCompileSettled(job.compile)}
-              tone={blockedCompile ? "idle" : undefined}
-            />
-          </h3>
-          <StageRow stage={job.compile.stage} status={job.compile.status} />
-          {/*
-            No progress indicator when the compile can never start: an animated
-            indeterminate bar reads as "working", and the ingest that feeds this stage
-            already failed. The absence of motion is the message.
-          */}
-          {blockedCompile ? (
-            <p className="dimension__hint" data-testid="compile-blocked">
-              The compile never started: the ingest it depends on failed. Saving the
-              source again is what clears this, not waiting.
-            </p>
-          ) : (
-            <ProgressIndicator compile={job.compile} />
-          )}
-          {/*
-            Counts that do not fit the ratio, shown as text beside it and NEVER
-            merged into it: `progress` is pages, `detail` is chunks and requests, and
-            adding them would be the invented progress this view refuses. Absent means
-            absent - a stage that never published chunks says nothing rather than "0".
-          */}
-          {detailLine(job.compile.detail) && (
-            <p className="dimension__hint" data-testid="compile-detail">
-              {detailLine(job.compile.detail)}
-            </p>
-          )}
-          {job.compile.message && <p className="dimension__message">{job.compile.message}</p>}
-          {job.compile.error && (
-            <p className="dimension__error" role="alert">
-              {job.compile.error}
-            </p>
-          )}
-          {compileRetryable(job) && (
-            <p className="dimension__hint">
-              {job.compile.status === "busy"
-                ? "The source is saved. Only the compile needs a retry."
-                : "The source is saved. Re-run the compile to finish the wiki."}
-            </p>
-          )}
-        </section>
+            <section
+              className="dimension"
+              aria-label="Compile"
+              data-testid="dimension-compile"
+            >
+              <h3 className="dimension__title">
+                Compile
+                {/*
+                  `skipped` reads as success in the tone map, and usually it is. But a
+                  compile that never started because the ingest failed is not a success,
+                  and nothing about the status word says which one this is — only the
+                  ingestion outcome does. Colour is a second channel saying "fine", so
+                  leaving it green would contradict the words directly beneath it.
+                */}
+                <StatusBadge
+                  status={job.compile.status}
+                  settled={isCompileSettled(job.compile)}
+                  tone={blockedCompile ? "idle" : undefined}
+                />
+              </h3>
+              <StageRow stage={job.compile.stage} status={job.compile.status} />
+              {/*
+                No progress indicator when the compile can never start: an animated
+                indeterminate bar reads as "working", and the ingest that feeds this stage
+                already failed. The absence of motion is the message.
+              */}
+              {blockedCompile ? (
+                <p className="dimension__hint" data-testid="compile-blocked">
+                  The compile never started: the ingest it depends on failed. Saving the
+                  source again is what clears this, not waiting.
+                </p>
+              ) : (
+                <ProgressIndicator compile={job.compile} />
+              )}
+              {/*
+                Counts that do not fit the ratio, shown as text beside it and NEVER
+                merged into it: `progress` is pages, `detail` is chunks and requests, and
+                adding them would be the invented progress this view refuses. Absent means
+                absent - a stage that never published chunks says nothing rather than "0".
+              */}
+              {detailLine(job.compile.detail) && (
+                <p className="dimension__hint" data-testid="compile-detail">
+                  {detailLine(job.compile.detail)}
+                </p>
+              )}
+              {job.compile.message && (
+                <p className="dimension__message">{job.compile.message}</p>
+              )}
+              {job.compile.error && (
+                <p className="dimension__error" role="alert">
+                  {job.compile.error}
+                </p>
+              )}
+              {compileRetryable(job) && (
+                <p className="dimension__hint">
+                  {job.compile.status === "busy"
+                    ? "The source is saved. Only the compile needs a retry."
+                    : "The source is saved. Re-run the compile to finish the wiki."}
+                </p>
+              )}
+            </section>
+          </>
+        )}
       </div>
+    </section>
+  );
+}
+
+/**
+ * One dimension the payload reported.
+ *
+ * Deliberately NOT the fixed column: no stage row, no progress bar, no attempt list,
+ * because the producer publishes none of those per dimension. Deriving them from the
+ * overall job would be the fabricated state the fixed columns already refuse to show.
+ *
+ * No `data-settled` either: that attribute says "this state machine is finished", and a
+ * dimension's vocabulary is the producer's, not the `ingest`/`compile` pair this module
+ * knows. A word this build does not recognise is shown as itself and claimed terminal by
+ * nobody - the same rule as an unknown stage.
+ */
+function DimensionRow({ dimension }: { dimension: JobDimensionRow }) {
+  return (
+    <section
+      className="dimension"
+      aria-label={dimension.name}
+      data-testid="dimension-row"
+      data-dimension={dimension.name}
+    >
+      <h3 className="dimension__title">
+        {dimension.name}
+        {/* This dimension's OWN status, never the job's overall one. */}
+        <StatusBadge status={dimension.status} />
+      </h3>
+      {/* Absent means absent: a dimension that published no summary says nothing. */}
+      {dimension.summary !== undefined && (
+        <p className="dimension__message" data-testid="dimension-summary">
+          {dimension.summary}
+        </p>
+      )}
     </section>
   );
 }
@@ -134,7 +199,14 @@ function StatusBadge({
   tone,
 }: {
   status: string;
-  settled: boolean;
+  /**
+   * Whether the state machine this status belongs to is finished.
+   *
+   * Omitted for a dimension row: the vocabulary there is the producer's, and calling a
+   * word terminal on a state machine this build does not know would be a guess wearing an
+   * attribute that reads like a fact.
+   */
+  settled?: boolean;
   /** Overrides the tone derived from the status alone, when the status is ambiguous. */
   tone?: string | undefined;
 }) {
@@ -142,7 +214,7 @@ function StatusBadge({
     <span
       className={`badge badge--${tone ?? badgeTone(status)}`}
       data-status={status}
-      data-settled={settled ? "true" : "false"}
+      {...(settled === undefined ? {} : { "data-settled": settled ? "true" : "false" })}
     >
       {status}
     </span>

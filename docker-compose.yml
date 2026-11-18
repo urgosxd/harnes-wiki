@@ -1,7 +1,9 @@
-# Self-contained stack: no host directory is mounted into the agent server.
-# The container writes its own Pi model configuration from environment variables,
-# so it can be started on any machine that has a provider key, and the image never
-# carries credentials.
+# Self-contained stack: the only host directories mounted into the agent server are the
+# product's own content — `server/skills` (inside the workspace, so the model can open a
+# skill body with the confined `read`) and `server/agents`. Both are read-only. The
+# container writes its own Pi model configuration from environment variables, so it can
+# be started on any machine that has a provider key, and the image never carries
+# credentials.
 services:
   postgres:
     image: postgres:16-alpine
@@ -63,7 +65,7 @@ services:
       # would name the wrong process. Empty keeps uploads working but disables
       # ingest-by-document, since there would be no URL to hand over.
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://server:8080}
-      # How the caller is identified. `open` (the default here) takes the name from
+      # How callers are identified. `open` (the default here) takes the name from
       # the request and treats it as the identity: `?user=alice` IS alice, with no
       # secret behind it, so anyone who can reach this server can act as any user.
       # That is a deliberate product decision, logged as a warning at startup.
@@ -72,6 +74,12 @@ services:
       # at least 16 characters) and is the only mode that resists impersonation.
       # `shared-token` accepts one token for everyone, which proves the caller was
       # given it and proves nothing about which user they are.
+      #
+      # The development default stays `open` on purpose: a clone has no `.chat-users`, and
+      # defaulting this stack to `roster` would fail every first `up` with a message about
+      # a file the developer never had. To try per-user tokens here, create `.chat-users`
+      # (one line, `id:token,id:token`) and set `AUTH_MODE=roster` in `.env` — the mount
+      # below is already in place.
       AUTH_MODE: ${AUTH_MODE:-open}
       # Only consulted when AUTH_MODE=roster (or as the inference fallback when
       # AUTH_MODE is unset). No `:?` here on purpose, for the same reason as
@@ -100,12 +108,30 @@ services:
       # The service's own data volume: generated config, session workspace. Nothing the
       # host owns is writable from inside the container.
       - agentdoc-workspace:/data/workspace
-      # Skills and agent definitions are read from the checkout, read-only on purpose:
-      # the agent scope is product content the model can consult, never something a
-      # turn may rewrite. Mounting them overrides the copy baked into the image, which
-      # is what makes local iteration possible without a rebuild.
-      - ./server/skills:/home/node/.agents/skills:ro
+      # Skills are read-only, and INSIDE the workspace on purpose. Pi discovers project
+      # skills at <cwd>/.pi/skills, and the model's `read` tool is confined to the
+      # workspace, so this is the only placement where the model can actually OPEN a
+      # skill body. Mounted at $HOME/.agents/skills it was indexed and unreadable:
+      # `PathEscapeError: ... is outside the workspace`. Read-only because the agent
+      # scope is product content, never something a turn may rewrite.
+      - ./server/skills:/data/workspace/.pi/skills:ro
+      # Agent definitions: this read-only bind IS the source, and the server re-reads the
+      # selected file on every turn (`src/pi/agent-role.ts`), so correcting a role here
+      # needs no restart and no rebuild — the next message uses the new text. Production
+      # turns this into a NAMED volume seeded from the image (docker-compose.prod.yml), so
+      # a deployment reads no host path and stays self-sufficient.
       - ./server/agents:/home/node/.agents/agents:ro
+      # The per-user roster, read-only, as a FILE mount and never as a value in this file
+      # or in `.env`: those are copied around and interpolated into every service, and a
+      # token is neither. `entrypoint.sh` reads this once at boot and exports `CHAT_USERS`
+      # from it, only when `CHAT_USERS` is not already set.
+      #
+      # Read-only because a turn must never be able to rewrite the roster; a file mount
+      # because the alternative, a directory of secrets, is a second thing to look after.
+      # A missing host file is created here as an EMPTY DIRECTORY by Docker, which the
+      # entrypoint reports as its own state instead of failing obscurely. With the default
+      # `AUTH_MODE=open` that is harmless; under `AUTH_MODE=roster` it stops the boot.
+      - ./.chat-users:/run/secrets/chat-users:ro
     healthcheck:
       # /health needs no credentials, so container health does not depend on a secret.
       test:

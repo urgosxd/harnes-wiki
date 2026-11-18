@@ -31,6 +31,16 @@ export type ParsedAgentDefinition = {
 export type LoadedAgentDefinitions = {
   definitions: Map<string, AgentDefinition>;
   unsupported: Array<{ file: string; keys: string[] }>;
+  /**
+   * Definition name to the FILE it was parsed from.
+   *
+   * The parsed text is not enough for a caller that has to re-read the definition later:
+   * the file name is not derivable from the declared name (the frontmatter decides it),
+   * and a directory can hold two files whose names say nothing about which definition
+   * each one declares. `server/src/main.ts` needs it to hand the selected definition's
+   * path to the per-turn role reader (`src/pi/agent-role.ts`).
+   */
+  files: Map<string, string>;
 };
 
 const SUPPORTED_KEYS = ["name", "description"];
@@ -120,6 +130,7 @@ export function loadAgentDefinitions(dir: string): LoadedAgentDefinitions {
   const definitions = new Map<string, AgentDefinition>();
   const unsupported: Array<{ file: string; keys: string[] }> = [];
   const byName = new Map<string, string[]>();
+  const files = new Map<string, string>();
 
   let names: string[];
   try {
@@ -128,7 +139,7 @@ export function loadAgentDefinitions(dir: string): LoadedAgentDefinitions {
       .map((entry) => entry.name)
       .sort();
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { definitions, unsupported };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { definitions, unsupported, files };
     throw error;
   }
 
@@ -142,6 +153,7 @@ export function loadAgentDefinitions(dir: string): LoadedAgentDefinitions {
     }
     origins.set(parsed.definition.name, file);
     definitions.set(parsed.definition.name, parsed.definition);
+    files.set(parsed.definition.name, file);
     if (parsed.unsupportedKeys.length > 0) {
       unsupported.push({ file, keys: parsed.unsupportedKeys });
       byName.set(parsed.definition.name, parsed.unsupportedKeys);
@@ -149,7 +161,7 @@ export function loadAgentDefinitions(dir: string): LoadedAgentDefinitions {
   }
 
   unsupportedByName.set(definitions, byName);
-  return { definitions, unsupported };
+  return { definitions, unsupported, files };
 }
 
 /**

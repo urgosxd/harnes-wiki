@@ -74,13 +74,13 @@ Never commit provider credentials.
 | Variable | Purpose |
 |---|---|
 | `PI_AGENT_DIR` | Pi agent directory holding `models.json` and, when needed, `auth.json`. Mounted read-only in containers. |
-| `AUTH_MODE` | `open` (default), `shared-token` or `roster`. Chooses how a caller is identified; see **Identity: the name in the link**. |
-| `CHAT_USERS` | `id:token,id:token`, only read when `AUTH_MODE=roster`. |
+| `AUTH_MODE` | `open` (the development default), `shared-token` or `roster` (the production default). Chooses how a caller is identified; see **Identity: the name in the link**. |
+| `CHAT_USERS` | `id:token,id:token`, only read when `AUTH_MODE=roster`. Normally **not set at all**: both compose files mount `.chat-users` read-only and the entrypoint exports this from it. |
 | `CHAT_API_KEY` | Provider key. The container generates its own `models.json` from it and never carries it in the image. |
 | `POSTGRES_PASSWORD` | Database password. Applied on the volume's first `initdb` only; see the note below. |
 | `PI_WORKSPACE_DIR` | Neutral workspace handed to the session as `cwd`. Never a real project path. |
-| `PI_AGENTS_DIR` | Directory holding agent definitions (`*.md`). Defaults to `$HOME/.agents/agents`; a missing directory is allowed. |
-| `AGENT_DEFINITION` | Name of the agent definition to apply, e.g. `documentor`. Empty (the default) uses the plain system prompt. |
+| `PI_AGENTS_DIR` | Directory holding agent definitions (`*.md`). Defaults to `$HOME/.agents/agents`; a missing directory is allowed. The selected definition's FILE is re-read on every turn. |
+| `AGENT_DEFINITION` | Name of the agent definition to apply, e.g. `documentor` or `wiki-agentic-search`. Empty (the default) uses the plain system prompt. The SELECTION is read once at startup, so changing it needs a restart; the selected file's TEXT is re-read on every turn, so editing it does not. |
 | `CHAT_PROVIDER` | Provider id for the chat model, e.g. `synthetic`. |
 | `CHAT_MODEL` | Model id inside that provider. |
 | `CHAT_THINKING_LEVEL` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. |
@@ -97,10 +97,84 @@ starts the server with zero credentials and every turn fails with
 ### Agent definitions
 
 An agent definition is a role for the agent: a `name`, a `description` and a body of
-text. `server/agents/documentor.md` is the example this repository ships, and in
-development that directory is bind-mounted read-only to `/home/node/.agents/agents`,
-so editing a file takes effect on the next restart instead of a rebuild. Production
-bakes the same files into the image.
+text. `server/agents/documentor.md` is the example this repository ships.
+
+**The file's text is read once per TURN, not once per process.** `AGENT_DEFINITION`
+selects which definition to apply and is still a startup fact — change it and you restart —
+but the selected file is re-read from disk on every turn and lands in that turn's leading
+system prompt. So correcting a role is an edit, not a release: the next message uses the
+new text, with no restart, no rebuild and no new tag. A `role_notice` sentence in the
+turn's own output says so when the text on disk cannot be used or names tools this
+deployment does not have (see **Correcting a role** below).
+
+#### The operating model: one role, edited in place
+
+Read this before inferring a hot-swap from the mechanism. There is ONE role per
+deployment:
+
+- `AGENT_DEFINITION=<name>` is set at deployment and stays. It selects which definition
+  is applied, and changing it needs a restart. With one role, you should never need to.
+- What changes at runtime is the CONTENT of that role's file: correct its text, save it
+  into the volume, and the next message uses it — no restart, no rebuild, no new tag.
+- Nothing switches roles at runtime. There is no `.active` marker, no stored selection, no
+  fallback from one definition to another. The server reads the one file the selection
+  names, once per turn, and applies it.
+
+#### Which definition is applied (the identity rule)
+
+The applied definition is the one whose frontmatter **declares** the selected name:
+
+```yaml
+---
+name: wiki-agentic-search     # THIS is the identity AGENT_DEFINITION matches
+description: Agentic search over the wiki
+---
+```
+
+The FILE NAME is not part of the identity. A file called `role-v2.md` that declares
+`name: wiki-agentic-search` is what `AGENT_DEFINITION=wiki-agentic-search` applies; a file
+called `wiki-agentic-search.md` that declares `name: something-else` is not. The reason is
+the loader's own contract: it keys a directory by what each file declares, so an uploaded
+role can be named anything and the identity stays one frontmatter line — which also means
+a rename is never a silent change of what is applied.
+
+A violation is never silent:
+
+| Where | What happens |
+|---|---|
+| at boot | `AGENT_DEFINITION` naming a declaration no file carries fails the start, with the names the directory does declare. |
+| at turn time | a file whose `name:` no longer matches the selection is REFUSED: the turn runs with the last valid text, the log warns naming both names, and the turn shows a notice saying the file declares a name this deployment did not select. |
+| two files declaring the same name | the load fails naming both paths: which one wins must not be a filesystem accident. |
+
+Editing only the BODY — the normal correction path — cannot disturb the selection: the
+frontmatter is untouched, so the identity the selection matches does not move.
+
+Where the directory comes from differs by stack, exactly as it does for skills:
+
+| | Development | Production |
+|---|---|---|
+| Source | bind mount of `./server/agents`, read-only | named volume `agentdoc-agents`, seeded from the image |
+| Host path read | `server/agents` | **none** |
+| A correction | edit the file in the repo | `docker cp`/`cp` into the volume, or edit it from a container |
+
+**Development** bind-mounts `./server/agents` read-only to `/home/node/.agents/agents`, so
+an edit to a `.md` is what the next turn sees.
+
+**Production** mounts the named volume `agentdoc-agents` at that path. The image carries a
+seed at `/opt/agentdocumentor/agents` — at neither discovery scope on purpose, so there is
+one copy of each definition — and `server/entrypoint.sh` copies it into the volume on a
+first boot, when the mount is missing or empty. It prints one line either way:
+
+```text
+agents-seed: /home/node/.agents/agents was empty, seeded from /opt/agentdocumentor/agents
+agents-seed: /home/node/.agents/agents already has content, left untouched
+```
+
+**An operator's own definitions win.** A mount with anything in it is never written to, so
+a corrected role survives every restart and every image upgrade — and an image upgrade does
+not overwrite it. To refresh from a newer seed, remove the volume (`docker volume rm
+agentdocumentor_agentdoc-agents`) or copy the new files over the old ones. A missing seed
+fails the boot rather than starting healthy with zero definitions.
 
 Frontmatter is delimited by `---` and read as `key: value` lines; only `name` and
 `description` are used. Host pi-herdsman definitions also carry `tools`, `model` and
@@ -108,13 +182,18 @@ Frontmatter is delimited by `---` and read as `key: value` lines; only `name` an
 warning naming the file, so a directory copied from an existing pi-herdsman setup still
 loads. The strictness is on the selection instead — `AGENT_DEFINITION=<name>` fails the
 boot when the chosen definition carries them, because a definition that is half-honored
-is worse than one that is refused, and that is the only one the prompt would apply.
+is worse than one that is refused, and that is the only one the prompt would apply. At
+turn time the same keys are refused more gently: the edit is ignored, the last valid text
+is kept, and a warning is logged.
 
 Selecting a definition with `AGENT_DEFINITION=<name>` appends it to the system prompt
-as `# Role: <name>`, followed by the description and the body. The base prompt stays
-first and unmodified, so a role adds to the product's behavior instead of replacing
-it. With `AGENT_DEFINITION` unset nothing changes in the prompt: the plain one is used,
-and definitions are still read so their problems are visible at startup.
+as `# Role: <name>`, followed by the description and the body, before the turn's Stack
+section. Because the role is appended per turn rather than composed at boot, it lands
+after Pi's own `<cwd>` block and before the Stack section, and its content is unchanged.
+The base prompt stays first and unmodified, so a role adds to the product's
+behavior instead of replacing it. With `AGENT_DEFINITION` unset nothing changes in the
+prompt: the plain one is used, and definitions are still read so their problems are
+visible at startup.
 
 **Why this loader is ours.** Pi 1.4.0 core has no agent-definition discovery: its
 `DefaultResourceLoader` is built with `noExtensions: true` and there is no
@@ -122,7 +201,127 @@ delegate/subagent tool, so no runtime path would ever read these files. The serv
 therefore loads and validates them itself at startup. Every file is read then,
 including when no definition is selected, and the boot fails with the file name when a
 definition cannot be parsed at all rather than serving a deployment that asked for a
-role and did not get it.
+role and did not get it. The per-turn read reuses that same parser
+(`src/pi/agent-role.ts`), so a file cannot be strict at boot and lenient later.
+
+#### Correcting a role
+
+In production the definition lives in a volume, so the fix is a file copy — the server
+picks it up on the next message:
+
+```bash
+docker cp fixed-role.md agentdoc-server:/home/node/.agents/agents/wiki-agentic-search.md
+```
+
+Overwrite the selected file in place. The `name:` line inside it is the identity, so the
+destination's file name is free — but leave that line alone unless you are also changing
+`AGENT_DEFINITION` and restarting, or the edit is refused (see **the identity rule**).
+
+Three rules make that safe to do in a hurry:
+
+- **A broken edit cannot leave the agent without a role.** If the file is missing,
+  unreadable or its frontmatter is refused at turn time, the turn runs with the last valid
+  text and logs a warning. Fix the file and the next turn uses it.
+- **The file grants nothing.** Tools, model and thinking level stay deployment concerns:
+  they come from the MCP provisioning and the `AGENT_READ_TOOLS`/`AGENT_BASH`/
+  `AGENT_WRITES`/`AGENT_SKILLS` flags, `CHAT_MODEL` and `CHAT_THINKING_LEVEL`. A `.md` that
+  could widen its own permissions would be a privilege question in a text file, which is
+  the opposite of what this product wants.
+- **A role that names an unprovisioned tool says so.** The tools the body mentions are
+  compared with the ones the session actually has; a name that is not there is logged and
+  shown as a notice in that turn, naming the tool. The turn proceeds — it is a report, not
+  a refusal.
+
+
+### The wiki search role
+
+`server/agents/wiki-agentic-search.md` is a copy of a local pi-herdsman definition:
+agentic search over the wiki, choosing between page retrieval and knowledge-graph
+traversal in a bounded, self-stopping loop instead of relaying one composed answer. The
+reasoning is the original's; the ONE thing rewritten is how it names its tools.
+
+The agent talks to a single MCP host, so the body names its tools the way the model is
+handed them — `search_pages`, `query_wiki`, `read_page`, `get_context_pack`,
+`list_stacks`, `query_stack` — and not as `mcp__<server>__<tool>`. The qualified form
+names a server, so it only works while the deployment keeps that server's name, and
+`tenant_mcp.exposed_tools` holds bare names: a prefixed spelling there would match
+nothing and quietly grant no capability. A second host (`llmwiki_kg`) is gone with it.
+The frontmatter carries only `name` and `description`, because a selected definition
+carrying `model`, `thinking` or `tools` fails the boot, and a YAML block list
+(`  - item`) fails the parse for every file in the directory rather than loading
+silently.
+
+Select it with `AGENT_DEFINITION=wiki-agentic-search`. That SELECTION is a startup fact, so
+setting it — or swapping to another definition — needs a restart; the file's text does not.
+The file does not set the model or the tools —
+those come from `CHAT_MODEL` and `CHAT_THINKING_LEVEL` in the environment, and from the
+MCP grant list in `server/scripts/provision-mcp.mjs`. The rule that list follows is
+**every read-only tool the shipped role names is granted**, so the role's instructions
+can always be followed: a role asking for a tool it does not have is the failure that
+matters here. What is not granted is the five tools that **write** to the wiki host —
+`ingest_source`, `compile_wiki`, `export_okf`, `import_okf`, `run_eval` — because this
+product never decided to expose them. `server/test/provision-mcp.test.ts` pins both
+halves: every tool the role names is covered, and no mutating tool is granted.
+
+### Skills
+
+A skill is a `SKILL.md` document — `name` and `description` in its frontmatter, prose
+below — that the model may consult. This repository ships two in `server/skills/`
+(`llm-wiki-mcp` and `probe-skill`).
+
+Pi writes each skill's absolute `<location>` into the system prompt and expects the model
+to open it with `read`. That tool is confined to the workspace, so the only placement
+where the body is actually readable is **inside** it: `/data/workspace/.pi/skills`, which
+is where Pi discovers project skills. Mounted at `$HOME/.agents/skills` — the user
+scope — a skill is listed and then refuses to open with `PathEscapeError: … is outside
+the workspace`.
+
+Where that directory comes from differs by stack, and the difference is deliberate:
+
+| | Development | Production |
+|---|---|---|
+| Source | bind mount of `./server/skills`, read-only | named volume `agentdoc-skills`, seeded from the image |
+| Host path read | `server/skills` | **none** |
+| Refresh | edit the file in the repo | remove the volume, or copy over it |
+
+**Development** bind-mounts `./server/skills` read-only, so an edit to a `SKILL.md` is
+what the next turn sees.
+
+**Production** mounts the named volume `agentdoc-skills` at that path and reads no host
+path at all: `docker-compose.prod.yml` plus the two published images is a complete
+deployment, and a host that carries neither the repository nor a copy of `server/skills`
+still gets the skills.
+
+The image carries a **seed** copy at `/opt/agentdocumentor/skills`, and it sits at neither
+discovery scope on purpose: Pi discovers skills at `$HOME/.agents/skills` and
+`<cwd>/.pi/skills`, so a copy in either place would list every skill twice under the same
+name. `server/entrypoint.sh` copies that seed into the volume on a first boot, when the
+mount is missing or empty, and prints one line either way:
+
+```text
+skills-seed: /data/workspace/.pi/skills was empty, seeded from /opt/agentdocumentor/skills
+skills-seed: /data/workspace/.pi/skills already has content, left untouched
+```
+
+**An operator's own skills win.** A mount that has anything in it is never written to, so
+copying your skills into the volume — or editing a seeded one — survives every restart
+and every image upgrade. The other side of that rule: an image upgrade does not refresh
+the skills either. To pick up a newer seed, remove the volume and let the next boot
+re-seed it, or copy the new files over the old ones:
+
+```bash
+docker compose -f docker-compose.prod.yml rm -sf server
+docker volume rm agentdocumentor_agentdoc-skills   # the only operation that re-seeds
+docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --wait
+```
+
+A missing seed fails the boot instead of starting healthy with zero skills — an image
+built without `server/skills` is a broken image, and a stack that answers every turn
+while consulting no skill is the silent state this arrangement exists to remove.
+
+To see discovery work end to end, use `server/skills/probe-skill`: ask the agent whether
+product skills are loaded and it answers `PROBE-SKILL-LOADED` when it managed to read
+the file.
 
 ### `.env` for a deployment
 
@@ -142,9 +341,10 @@ CHAT_API_KEY=sk-...
 POSTGRES_PASSWORD=<48 hex chars>
 
 # How callers are identified. `open` = the name in the link, no secret.
-# Use `roster` (with CHAT_USERS) to require per-user tokens.
+# Use `roster` to require per-user tokens. The tokens do NOT go here and do not go in
+# any compose file: they live in `.chat-users`, which both stacks mount read-only. See
+# "Three people, three tokens" below.
 AUTH_MODE=open
-# CHAT_USERS=ana:<24 hex>,luis:<24 hex>     # only read when AUTH_MODE=roster
 
 # External ingest service
 INGEST_API_BASE_URL=http://host.docker.internal:4240
@@ -174,13 +374,16 @@ Three notes that are easy to get wrong:
 
 ## Identity: the name in the link
 
-**There is no authentication.** The `user` in the link IS the identity:
+**There is no authentication** in the sense of a login: no password, no session, no
+sign-in form. In the development stack the `user` in the link IS the identity —
 
 ```
 http://localhost:8088/?user=alice
 ```
 
-That is the whole access model, and the consequence has to be stated plainly:
+— while a production deployment defaults to `AUTH_MODE=roster`, where the link also
+carries a per-user token that the server checks (see **Three people, three tokens**).
+The consequence of the first case has to be stated plainly:
 
 - **Anybody who can reach the server can act as any user.** Change `user=alice` to
   `user=bob` and you are bob.
@@ -191,9 +394,12 @@ That is the whole access model, and the consequence has to be stated plainly:
   enforced on every query; what is missing is any proof that the caller is entitled
   to the id they claim.
 
-There is no `users` table and no roster to maintain. Any name matching
+There is no `users` table and no account to create. Any name matching
 `[A-Za-z0-9._@-]{1,64}` is accepted, and it becomes a `user_id` the first time it
-creates a conversation.
+creates a conversation. What a roster deployment adds is one line in `.chat-users` per
+person — a secret, not a user record: nothing has to be migrated when someone leaves, only
+rotated. With `AUTH_MODE=open`, which is where the development stack starts, there is no
+roster to maintain at all.
 
 **The link is not a secret.** Send it however you like; what it grants is the name
 it contains, and everyone can type that name themselves.
@@ -218,6 +424,64 @@ A misspelled `AUTH_MODE` throws at startup instead of falling back to a weaker m
 With nothing configured at all, the server refuses every request: inference never
 falls forward into `open`.
 
+### Three people, three tokens: onboarding and rotating a user
+
+Each person gets a secret the others do not have, and the secrets live in ONE file:
+
+- `.chat-users`, in the deployment directory beside the compose file that mounts it, holds
+  **a single line**: `id:token,id:token,id:token`.
+- It is git-ignored (`.gitignore` names it) and should be `chmod 600`.
+- Both compose files mount it **read-only** at `/run/secrets/chat-users`, and
+  `server/entrypoint.sh` exports `CHAT_USERS` from it at boot — only when `CHAT_USERS` is
+  not already set, so a secret injected by an orchestrator still wins.
+- It is **never** in `.env` and never in a compose file: those are copied between hosts
+  and interpolated into every service that names a variable, and a token is not a setting.
+  A mounted file also has one place to rotate and one thing to protect.
+
+Production (`docker-compose.prod.yml`) defaults to `AUTH_MODE=roster`. The development
+stack stays `open` on purpose, so a fresh clone boots with no roster file at all; the mount
+is already in place there, so trying the real thing is `AUTH_MODE=roster` in `.env`.
+
+**Token shape.** 16 to 64 characters; 32 hex characters from the OS CSPRNG is what this
+repository generates. Shorter than 16 stops the boot (`CHAT_USERS token for "<id>" is too
+short`), and so does a misspelled `AUTH_MODE`, because a typo in a security setting is not
+a licence to fall back to a weaker mode.
+
+**Onboarding a person** — `dave`, from a checkout of the deployment:
+
+```bash
+# 1. a token: 32 hex characters, generated, never typed
+node -e 'process.stdout.write(require("node:crypto").randomBytes(16).toString("hex"))'
+
+# 2. add  dave:<that value>  to the single line in .chat-users, and lock the file down
+chmod 600 .chat-users
+
+# 3. restart the server so the entrypoint reads the file again
+docker compose restart server        # or: docker compose up -d server
+
+# 4. grant their MCP tools, or they chat with none — see the warning below
+cd server && USERS=dave \
+MCP_SERVER_URL=http://172.17.0.1:4173/mcp \
+DATABASE_URL=postgres://... \
+node scripts/provision-mcp.mjs       # also reads .chat-users when USERS is unset
+```
+
+**Rotating one token** is the same edit with a new value: replace `dave:<old>` with
+`dave:<new>` in `.chat-users`, restart, hand out the new link. The old link stops working
+at the restart. There is no revocation API and no expiry, so a rotation IS this edit —
+nothing else has to be told.
+
+**The link** is `?user=dave&token=<his value>`. The name must match the token's owner: a
+valid token that claims somebody else answers `401 unauthorized`, and so does a name with
+no token. On the API a token alone is enough to identify its owner; the browser needs the
+name as well, because the client turns `?user=` and `?token=` into headers and shows nothing
+at all without a name.
+
+**The silent state to watch for.** A roster user with no `tenant_mcp` rows chats normally
+and simply has **no MCP tools**: no error, no notice, no log line. Step 4 above is the fix.
+If a new user reports that the assistant cannot search the wiki or read a Stack, check the
+provisioning step before anything else — the identity worked, the grant is what is missing.
+
 ### Opening a link never asks for credentials
 
 There is no sign-in form on any path, because there is nothing to type that the link
@@ -236,8 +500,9 @@ still accepted, and the token is forwarded as `x-dev-token`, which is what keeps
 `AUTH_MODE=roster` and old links working.
 
 **Giving someone access** is just giving them the URL with their name. **Revoking**
-it is not possible without switching to `AUTH_MODE=roster`: a name has no secret to
-revoke.
+it is not possible without switching to `AUTH_MODE=roster` — where the procedure is
+**Three people, three tokens** above: a name has no secret of its own to revoke, and a
+roster entry does.
 
 ### Giving a user the wiki tools
 
@@ -254,7 +519,8 @@ node scripts/provision-mcp.mjs            # --dry-run to preview
 
 It is idempotent, and it does not create users — it grants tools to the names you
 list. A name that never appears there still opens the product; it simply has no
-tools.
+tools, and nothing says so: no error, no notice, no log line. That is the one silent
+state in a roster deployment, and it is why this step is part of onboarding.
 
 `MCP_DEFAULT_STACK_ID` is **deprecated and ignored**. The Stack comes from the
 request link (or an explicit tool argument), not from provisioning: setting the
@@ -359,14 +625,66 @@ a retry — so the view is two columns and never one status.
 | `progress` is `null` or an exact pair — never a percentage | Indeterminate sweep plus the stage name, or "3 of 8" |
 | `attempts[].endedAt` absent = in flight; `error` = rolled back | One row per attempt, marked in flight / rolled back / done |
 | `404` ≠ `503` | "This job is no longer known" (expired) vs "the service does not track jobs" |
+| `dimensions[]` reports per-unit results with their own statuses | One row per dimension, each with **its own** badge |
 
 Polling backs off from 250 ms to 2 s and stops as soon as both dimensions settle;
 the service streams nothing. A `409 busy` is surfaced as a retry signal, not a
 failure.
 
+### Per-dimension results
+
+A job payload may also carry a `dimensions` array: the producer's own per-unit results,
+beside the two state machines.
+
+```json
+"compile": { "status": "succeeded", "message": "Compiled wiki and kg." },
+"dimensions": [
+  { "name": "wiki", "status": "succeeded", "summary": "wiki:created" },
+  { "name": "kg",   "status": "succeeded", "summary": "kg:N chunks, M entities" }
+]
+```
+
+When that array is there, the detail pane renders **one row per dimension**, in the
+producer's order, with that dimension's own name, status badge and summary. No name is
+special-cased, so a dimension called `kg` or `qa` renders exactly like `wiki`, and a
+dimension whose status differs from the job's overall status keeps its own badge — a
+failed `kg` is visibly failed even when the compile reads `succeeded`.
+
+| Payload | What the detail pane shows |
+|---|---|
+| `dimensions` is usable | One row per dimension, and the fixed `Ingest` / `Compile` columns are not drawn beside them |
+| Absent, empty, or with nothing in it readable | The fixed `Ingest` / `Compile` columns, exactly as before |
+
+The array is a **report**, not a lifecycle. It never decides when polling stops: a job
+ends only when **both** `ingest` and `compile` are terminal, so a dimension that finished
+first cannot end the poll, and a job whose dimensions all read finished while its compile
+is still running keeps polling. Whether the producer can settle a dimension before the
+overall status is unverified, and the poller does not assume either ordering.
+
 A source path is resolved on **the service's** filesystem, not in this container:
 a file that only exists here is not a valid source. Use a URL, a path the service
 can see, or upload it.
+
+### Controls: delete and retry, and no cancel
+
+Two operator controls proxy the service's own operations. Both carry the same
+identity and the same optional `stackId` in the query as the reads beside them.
+
+| Route | What it does |
+|---|---|
+| `DELETE /ingest/jobs/:id?stackId=` | Deletes a liquidated job; `200`, `202` or `204` on success |
+| `POST /ingest/jobs/:id/retry?stackId=` | Re-executes it as a **new** job; the new id is in the body, as `jobId` or `id` |
+
+Both answer the service's refusals verbatim — `404 job_not_found`, `409
+job_still_working`, `409 job_changed` — because those are the host's own words for
+"this does not exist", "not while it is working" and "you read a stale row"; folding
+any of them into `502` would report an operator's answer as a deployment outage. A
+refusal is shown as a refusal and never retried automatically.
+
+There is no cancel, and none is invented here: the service has no such operation, and
+**delete does not interrupt a running job** — it refuses with `409 job_still_working`
+and the job keeps working. Delete and retry share that one guard, so a row can be
+re-executed exactly when it can be cleaned up.
 
 ### Uploading: why it takes two endpoints
 
@@ -455,10 +773,23 @@ Which tiers run where:
 |---|---|---|
 | Server unit tests, including the Postgres-gated ones | **yes** — `CI_REQUIRE_DATABASE=1` makes an unreachable database a failure, not a skip | **yes**, same image, same flag |
 | Web typecheck, tests and build | **yes** | **yes** |
-| Live-model tests (a real provider answering a real turn) | only if `~/.pi/agent/models.json` exists; `scripts/ci.sh` points `PI_AGENT_DIR` at a missing path so this tier **skips by decision** | **skipped**: CI has no Pi credentials and nothing here invents them |
+| Live-model tests (a real provider answering a real turn) | only if `PI_AGENT_DIR` holds credentials; otherwise this tier **skips by decision** | **skipped**: CI has no Pi credentials and nothing here invents them |
 
 A tier that skips is not proof: that is why the database tier is required rather than
 merely available, and why the table above names the one tier CI does not cover.
+
+How the skip is decided, because it used to be decided by the wrong thing. `scripts/ci.sh`
+creates an **empty directory it owns** with `mktemp -d`, passes it as `PI_AGENT_DIR` to the
+test container at the same path, and removes it in its `EXIT` trap. It does not name a
+missing absolute path: pi-coding-agent *creates* the directory it is handed, so a path the
+running user cannot write turned the skip into `EACCES` and four failing tests on any
+host running as itself, while staying green in the image because that stage runs as root.
+And the skip signal is the **content** of the auth file, not its existence —
+`AuthStorage` writes `{}` into the directory it is given, so existence alone read as
+"credentials" and the tier ran and failed instead of skipping. An absent, empty,
+whitespace-only or `{}` file means no credentials; any non-empty object means configured;
+a file that is present but unparseable counts as configured, so a broken credential file
+fails the tier loudly instead of quietly skipping it.
 
 The database needs no secret: `scripts/ci.sh` uses the credentials `docker-compose.yml`
 already declares for the dev stack, so there is nothing to store in a repository setting.
@@ -587,7 +918,7 @@ Every validation message names the variable and never its value.
 | `REGISTRY` | empty | **required to pull**: a deployment consumes registry images, so on a fresh host this is the variable that makes `pull` possible. Empty is allowed and selects local images, but then `agentdocumentor-server:latest` and `agentdocumentor-web:latest` must already exist on that host |
 | `INGEST_API_BASE_URL` | empty (allowed) | degrades: uploads keep working, ingest-by-document answers `503 ingest_not_configured` |
 | `PUBLIC_BASE_URL` | empty (allowed) | degrades: upload-backed ingests are disabled |
-| `AUTH_MODE` | `open` (the default) | degrades: the name in the link IS the identity, with no secret behind it |
+| `AUTH_MODE` | `open` in the development stack, `roster` in `docker-compose.prod.yml` | `open` degrades: the name in the link IS the identity, with no secret behind it. `roster` with no roster file **aborts** the boot |
 
 `PI_AGENT_CONFIG_MODE` is the one that looks optional and is not: `config.ts` aborts
 when the mode is anything but `generate` **and** `PI_AGENT_DIR` is empty, which is why
@@ -596,6 +927,27 @@ the compose file pins `generate` — that is what lets the server write its own
 
 The images themselves come from **Building and publishing both architectures**
 above: `deploy.sh` pulls them and never builds them.
+
+### Skills in a deployed stack
+
+A deployed stack reads no host path. Skills are a named volume, `agentdoc-skills`,
+mounted at `/data/workspace/.pi/skills` — the one place the model's confined `read` can
+open a `SKILL.md` body. It starts empty and the image seeds it on the first boot:
+`server/entrypoint.sh` copies the image's seed (`/opt/agentdocumentor/skills`) into the
+volume only when the volume is missing or empty, chowns it to `node` when running as
+root, and logs which of the two happened. Details and the reasoning are under **Skills**
+above.
+
+Two consequences worth knowing before an upgrade:
+
+- **A non-empty volume is never overwritten.** Skills you copied in, or edited, are yours
+  and survive restarts and image upgrades. To re-seed, remove the volume:
+  `docker volume rm agentdocumentor_agentdoc-skills` (with the server container
+  removed first), then `up -d`.
+- **It is a volume, so `down` keeps it and `down -v` deletes it.** A plain `down` leaves
+  the seeded skills in place; `docker compose -f docker-compose.prod.yml down -v` removes
+  `agentdoc-skills` along with the database and the workspace, and the next boot seeds it
+  again from the image.
 
 ### Rollback
 
@@ -705,10 +1057,9 @@ Installing Vite 8 fails on a peer conflict; do not paper over it with
 ## Acceptance: isolation and concurrency
 
 `server/test/isolation.test.ts` is the MVP's definition of done. It builds its
-server with an explicit shared token and sends a matching pair on every request, so
-it verifies **data-layer ownership under a test harness that does identify its
-callers** — not that the deployed mode can. See the note at the end of this section.
- It defaults to 2
+server with `AUTH_MODE=roster` and **one token per user**, so every request it makes
+carries that user's own secret: what it verifies is data-layer ownership under the
+deployed posture, not under a harness that trusts a header. It defaults to 2
 users (`ISOLATION_USERS=5` for the full run) and nothing in it is specific to that
 number:
 
@@ -724,14 +1075,14 @@ simultaneous turns on one conversation yield exactly one 200 and one 409, MCP
 connections are per tenant and do not grow with turns, each tenant's MCP tool runs
 against its own connection, and a business tool enforces only its tenant's scope.
 
-**What this file cannot tell you.** With the default `AUTH_MODE=open` there is no
-secret in the deployed product, so the isolation above is a property of the queries,
-not of the running system: `?user=alice` is alice for whoever holds the link. The
-suite is kept because the ownership predicates it exercises are still the thing that
-stops one *legitimate* user's data appearing in another's sidebar, and because
-removing it would make `AUTH_MODE=roster` unverifiable the day it is switched back
-on. `scripts/smoke.mjs` prints an explicit `SKIP` for the impersonation check, with
-that reason.
+**What this file cannot tell you.** The ownership predicates it exercises are what stop
+one *legitimate* user's data appearing in another's sidebar; they are tested here with
+two different secrets, which is as far as a test can go. What no test can settle is
+whether the operator kept the roster out of a chat message: under `AUTH_MODE=roster` a
+leaked link is a leaked account until that token is rotated, and under `open` there is no
+secret at all. `scripts/smoke.mjs` prints an explicit `SKIP` for the impersonation check,
+with that reason. The ownership tests need a reachable Postgres and skip without one —
+a skip is not a pass.
 
 Both properties were mutation-checked: removing the ownership predicate makes all
 seven tests fail, and rebuilding the tenant runtime per turn fails the process
@@ -769,8 +1120,18 @@ The user never sees development tooling: no terminal, no file browser, no settin
 That is a UI promise and it holds.
 
 The model is a different question. A support assistant has to read a document, so
-`read`, `grep`, `find` and `ls` are available to it, confined to the workspace, and
-skills can be consulted. None of that appears in the interface.
+`read`, `grep`, `find` and `ls` are available to it, and skills are mounted inside the
+workspace at `.pi/skills`, so the same `read` can open a skill body. **All of them are
+confined to the workspace**: `read` through its own read operations, and `grep`, `find`
+and `ls` — plus `write` and `edit` when `AGENT_WRITES` is on — by refusing a `path`
+argument that resolves outside the workspace, before the tool touches the disk. Absolute
+paths, `..` traversal, directory symlinks, a symlink whose name looks contained and a
+symlink pointing at a file that does not exist are each refused with the same vocabulary,
+and a refused `write` creates nothing. `bash` is **NOT** confined by any of this: a shell
+reaches whatever the process can reach, and enabling it re-opens the hole regardless of
+the checks above. It is off by default for that reason. None of the confined tools
+appears in the interface. See **Skills** under **Agent definitions** for where the files
+come from.
 
 `bash` is **off by default**, and that is not caution for its own sake. Two things
 were measured on the real stack:
@@ -844,9 +1205,19 @@ ignored**: still tolerated, still warned about once per run, never read. A store
 never consulted, so nothing needs cleaning up — and re-running this script neither
 resurrects nor destroys it.
 
-It exposes three tools — `list_stacks`, `ingest_jobs_list`, `ingest_job_status`.
-The other twelve the service offers are filesystem-scoped, and exposing them would
-allow operations this project never decided to permit.
+It grants eleven tools, all of them reads:
+
+- **Stack reads** — `list_stacks`, `query_stack`. Both take a `stackId` and read exactly
+  one Stack, so the scope gate knows they are Stack-scoped by name.
+- **Ingest jobs** — `ingest_jobs_list`, `ingest_job_status`. Status about work already
+  running, never a new job.
+- **Wiki reads** — `query_wiki`, `search_pages`, `read_page`, `get_context_pack`,
+  `wiki_status`, `lint_wiki`, `verify_artifact`.
+
+The five tools that **write** to the wiki host — `ingest_source`, `compile_wiki`,
+`export_okf`, `import_okf`, `run_eval` — stay out: exposing them would allow operations
+this project never decided to permit. The grant list is every read-only tool the shipped
+role names, so the role's own instructions always have the tools they ask for.
 
 Without this step the agent sees no Stack tools, and it cannot answer questions
 about Stacks.

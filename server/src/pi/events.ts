@@ -48,6 +48,15 @@ export type ChatFrame =
    * observation of one call, and a run that fails afterwards does not invalidate it.
    */
   | { type: "tool_result"; tool: string; text: string; isError: boolean }
+  /**
+   * Something about this TURN the person should know, already worded by the server.
+   *
+   * The first use is the agent role: a role file whose body names tools this deployment
+   * did not provision is a fact about the turn, and it belongs to no tool call, so it
+   * cannot ride `tool_finished`. Its own frame, one sentence, painted where the Stack
+   * notice is painted. Never a reason to fail the turn — it is a report, not a refusal.
+   */
+  | { type: "role_notice"; text: string }
   | { type: "run_finished"; outcome: RunOutcomeName; usage?: FrameUsage }
   | { type: "run_failed"; outcome: RunOutcomeName; message: string }
   | { type: "error"; message: string };

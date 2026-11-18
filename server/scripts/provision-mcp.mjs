@@ -110,21 +110,52 @@ function loadRoster() {
  * Reading the wiki is allowed. Changing it is not. That is a rule someone can audit,
  * unlike "which of these look filesystem-y".
  *
- * `read_page` is deliberately absent: verified live that the slugs `search_pages`
- * returns are rejected by it with "Page not found", with and without an explicit
- * `stackId`. Granting a tool that cannot succeed would teach the model that its own
- * capabilities are unreliable.
+ * ## The second rule: the shipped role's tools are not optional
+ *
+ * `server/agents/wiki-agentic-search.md` is a shipped role, and its body tells the
+ * model which tools to call. A grant list that omits one of them does not produce a
+ * degraded answer — it produces a role that asks for tools it does not have, which is
+ * the "fails in prod" case. So every tool the role names is granted here, and
+ * `test/provision-mcp.test.ts` pins the agreement in both directions: role tools
+ * must be covered, and no mutating tool may be granted.
+ *
+ * `read_page` was previously absent on the strength of a live observation that the
+ * slugs `search_pages` returned were rejected by it with "Page not found", with and
+ * without an explicit `stackId`. That finding is not withdrawn — a shipped role that
+ * reads pages needs the tool, and whether the host's page ids resolve is a host
+ * defect to fix there, not a reason to ship a role whose own instructions cannot run.
+ * It needs a live host to re-check.
+ *
+ * `query_stack` is the graph dimension's read query. It is filed with the Stack tools
+ * rather than the wiki reads for a measured reason: it takes a `stackId` on every call
+ * and reads ONE Stack (`server/agents/wiki-agentic-search.md`), exactly like
+ * `list_stacks`, and `STACK_TOOLS` is the by-name list `src/pi/tenant-runtime.ts:501`
+ * uses to decide a tool is Stack-scoped even before its schema is read. Leaving it out
+ * would let a call that names no Stack through the scope gate on a schema the host
+ * might not publish.
+ *
+ * Every name in this list is bare (`read_page`, not `mcp__…__read_page`) because that
+ * is what the column holds: `exposed_tools` is a flat allowlist of bare tool names,
+ * intersected with each connected server's own `listTools()` names
+ * (`src/pi/tenant-runtime.ts:201`), so a prefixed spelling here would match nothing and
+ * quietly grant no capability at all.
  */
 export const READ_ONLY_WIKI_TOOLS = [
   "query_wiki",
   "search_pages",
+  "read_page",
+  "get_context_pack",
   "wiki_status",
   "lint_wiki",
-  "get_context_pack",
   "verify_artifact",
 ];
 
-export const STACK_TOOLS = ["list_stacks", "ingest_jobs_list", "ingest_job_status"];
+export const STACK_TOOLS = [
+  "list_stacks",
+  "query_stack",
+  "ingest_jobs_list",
+  "ingest_job_status",
+];
 
 export const TOOLS = [...STACK_TOOLS, ...READ_ONLY_WIKI_TOOLS];
 

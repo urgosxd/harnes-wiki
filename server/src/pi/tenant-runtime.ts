@@ -13,6 +13,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "typebox";
 import { agentToolNames, createAgentTools, type AgentToolOptions } from "./agent-tools.ts";
 import { currentStackId } from "./stack-context.ts";
+import { rolePromptExtension } from "./agent-role.ts";
 import { stackPromptExtension } from "./stack-prompt.ts";
 import { Type } from "typebox";
 import type { ThinkingLevelName } from "../config.ts";
@@ -154,10 +155,12 @@ export class TenantRuntime {
       agentDir,
       noExtensions: true,
       // `noExtensions` disables discovery of extension FILES; an inline factory still
-      // loads, and this one carries the turn's Stack into the prompt (`stack-prompt.ts`).
-      // It is registered here because the loader is per tenant and the handler resolves
-      // the Stack per turn, from the request's own async chain — never from this object.
-      extensionFactories: [stackPromptExtension],
+      // loads. Two of them: the turn's role and the turn's Stack. Both resolve their value
+      // on the turn's own async chain rather than from this object, which is why the
+      // factories are registered here but the values are read inside the handlers.
+      // Order matters — Pi runs these handlers in sequence and each one appends to the
+      // prompt the previous one produced, so the role renders before the Stack section.
+      extensionFactories: [rolePromptExtension, stackPromptExtension],
       // Skills are documentation the model can consult; they are not a dev surface
       // and are not shown in the UI.
       noSkills: !capabilities.skills,

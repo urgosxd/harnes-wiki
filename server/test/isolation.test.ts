@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import type { Server } from "node:http";
 import type { Model } from "@earendil-works/pi-ai";
 import { createDatabase, type Database } from "../src/db/pool.ts";
@@ -14,12 +14,19 @@ import { TenantRuntime, type TenantDefinition } from "../src/pi/tenant-runtime.t
 import { TurnService } from "../src/api/turn-service.ts";
 import { createRouter } from "../src/http/router.ts";
 import { createAuthenticator } from "../src/http/auth.ts";
+import { parseRoster, resolveRosterUser } from "../src/http/users.ts";
 import { registerRoutes } from "../src/api/routes.ts";
 import { AGENT_DIR, MODEL_ID, PROVIDER, databaseReady, hasCredentials, makeWorkspace } from "./support/harness.ts";
 
 /**
  * The MVP's definition of done: independent users running conversations at the
  * same time, without crossing histories or reaching each other's data.
+ *
+ * It runs under `AUTH_MODE=roster` — the deployed posture — with ONE TOKEN PER USER.
+ * That distinction is the whole reason this file was converted instead of extended: with
+ * a single shared token, "bob cannot read alice's conversation" is a test about the
+ * `x-user-id` header, and a header is a claim. Under the roster each tenant presents a
+ * secret the others do not have, so the 404s and the 401s below are about credentials.
  *
  * User count is USER_COUNT. It runs with 2 because that is fast and already
  * exercises every path (concurrency, ownership, lock, MCP reuse); raise it to 5
@@ -42,8 +49,6 @@ const skip = skipDatabase;
 
 const fixtureDir = dirname(fileURLToPath(import.meta.url));
 const FAKE_MCP = join(fixtureDir, "fixtures", "fake-mcp-server.mjs");
-const DEV_TOKEN = "isolation-token";
-
 let server: Server;
 let baseUrl: string;
 let db: Database;
@@ -53,6 +58,16 @@ let pidFile: string;
 
 interface TenantSpec {
   userId: string;
+  /**
+   * This tenant's own credential, and the whole point of the file: each user holds a
+   * secret the others do not. Under the shared token every request below carried the
+   * same value, so "bob cannot read alice's conversation" was proved with a different
+   * HEADER, not with a different SECRET. 32 hex characters from a CSPRNG is inside the
+   * 16-64 range `parseRoster` enforces.
+   */
+  token: string;
+  /** A per-user secret the model is told to remember; it is how a crossed history
+   *  becomes visible instead of merely suspicious. */
   secret: string;
   scope: string[];
   label: string;
@@ -61,11 +76,20 @@ interface TenantSpec {
 const TENANTS: TenantSpec[] = Array.from({ length: USER_COUNT }, (_unused, index) => ({
   label: `user${index + 1}`,
   userId: `isolation-u${index + 1}-${randomUUID().slice(0, 8)}`,
-  // A per-user secret the model is told to remember; it is how a crossed history
-  // becomes visible instead of merely suspicious.
+  token: randomBytes(16).toString("hex"),
   secret: `${4000 + index * 111}`,
   scope: index % 2 === 0 ? ["orders:read"] : [],
 }));
+
+/**
+ * The roster the server runs with: one entry per tenant, each with its own token.
+ *
+ * `AUTH_MODE` is stated explicitly rather than inferred from the roster being present,
+ * because a deployment states it and a test that relies on inference stops testing the
+ * deployed posture the day the inference changes.
+ */
+const ROSTER = TENANTS.map((tenant) => `${tenant.userId}:${tenant.token}`).join(",");
+
 
 const runtimes = new Map<string, Promise<TenantRuntime>>();
 
@@ -123,7 +147,7 @@ before(async () => {
     thinkingLevel: "off",
   });
 
-  const router = createRouter({ authenticate: createAuthenticator({ devToken: DEV_TOKEN }) });
+  const router = createRouter({ authenticate: createAuthenticator({ mode: "roster", users: ROSTER }) });
   registerRoutes(router, { store, turns });
   server = await router.listen(0, "127.0.0.1");
   const address = server.address();
@@ -138,8 +162,15 @@ after(async () => {
   await db?.close();
 });
 
+/** The tenant's own token, never a shared one: that is what makes the 404s below a proof. */
+function tokenOf(userId: string): string {
+  const tenant = TENANTS.find((candidate) => candidate.userId === userId);
+  if (!tenant) throw new Error(`no roster entry for ${userId}`);
+  return tenant.token;
+}
+
 function headers(userId: string): Record<string, string> {
-  return { "x-dev-token": DEV_TOKEN, "x-user-id": userId, "content-type": "application/json" };
+  return { "x-dev-token": tokenOf(userId), "x-user-id": userId, "content-type": "application/json" };
 }
 
 async function createConversation(userId: string, title: string) {
@@ -253,8 +284,42 @@ test("each user keeps their own history when running at the same time", { skip: 
   }
 });
 
+test("a missing token, a wrong token and a borrowed token are all refused", { skip }, async () => {
+  const [alice, bob] = [TENANTS[0]!, TENANTS[1]!];
+  const conversation = await createConversation(alice.userId, "auth-proof");
+  const at = `${baseUrl}/conversations/${conversation.id}`;
+
+  // The name alone. This is the request a `?user=alice` link produces once the browser has
+  // turned the query into headers, and under roster mode it is no longer an identity.
+  const noToken = await fetch(at, { headers: { "x-user-id": alice.userId } });
+  assert.equal(noToken.status, 401);
+  assert.deepEqual(await noToken.json(), { error: "unauthorized" });
+
+  // A token nobody was given.
+  const wrongToken = await fetch(at, {
+    headers: { "x-dev-token": randomBytes(16).toString("hex"), "x-user-id": alice.userId },
+  });
+  assert.equal(wrongToken.status, 401);
+  assert.deepEqual(await wrongToken.json(), { error: "unauthorized" });
+
+  // bob's VALID token, claiming alice. Refused rather than served as bob: a client that
+  // sends the wrong pair learns it is wrong instead of silently acting as somebody else.
+  const borrowed = await fetch(at, { headers: { "x-dev-token": bob.token, "x-user-id": alice.userId } });
+  assert.equal(borrowed.status, 401);
+  assert.deepEqual(await borrowed.json(), { error: "unauthorized" });
+
+  // The token alone is enough, and it names its own owner: no `x-user-id` is sent here.
+  const alone = await fetch(at, { headers: { "x-dev-token": alice.token } });
+  assert.equal(alone.status, 200);
+  assert.equal(((await alone.json()) as { title: string }).title, "auth-proof");
+});
+
 test("a user cannot read, write to, rename or delete another user's conversation", { skip }, async () => {
   const [alice, bob] = [TENANTS[0]!, TENANTS[1]!];
+  // Two DIFFERENT secrets, not two header values. If these were equal every assertion
+  // below would be proving that a user id is respected, which was already true before
+  // the roster existed and is not the property being claimed.
+  assert.notEqual(alice.token, bob.token);
   const conversation = await createConversation(alice.userId, "private");
 
   const read = await fetch(`${baseUrl}/conversations/${conversation.id}`, { headers: headers(bob.userId) });
@@ -427,6 +492,27 @@ test("a business tool enforces the tenant's scope and nothing else", { skip: ski
       assert.match(JSON.stringify(result.content), /forbidden/);
     }
   }
+});
+
+/**
+ * The credentials this file runs with, checked without a database.
+ *
+ * The ownership tests below need Postgres and skip on a machine that has none — but the
+ * thing they REST on is that the roster this file hands the authenticator really carries
+ * one secret per tenant. If two tenants ever shared a token, every skipped assertion
+ * would be proving the wrong property the moment it ran, and the skip would hide it.
+ * So the wiring is asserted where it costs nothing: a parsed roster of USER_COUNT users,
+ * no two tokens equal, and bob's token refused against alice's claim.
+ */
+test("the roster set up here gives every tenant its own secret", () => {
+  const users = parseRoster(ROSTER);
+  assert.equal(users.length, TENANTS.length);
+  assert.equal(new Set(users.map((user) => user.token)).size, TENANTS.length, "two tenants share a token");
+
+  const [alice, bob] = [TENANTS[0]!, TENANTS[1]!];
+  assert.equal(resolveRosterUser({ users, token: bob.token, claimedUserId: bob.userId })?.id, bob.userId);
+  assert.equal(resolveRosterUser({ users, token: bob.token, claimedUserId: alice.userId }), undefined);
+  assert.equal(resolveRosterUser({ users, token: bob.token, claimedUserId: undefined })?.id, bob.userId);
 });
 
 export type { TenantDefinition };

@@ -19,11 +19,11 @@ import { createAuthenticator, parseAuthMode, resolveAuthMode } from "./http/auth
 import { registerRoutes } from "./api/routes.ts";
 import { SYSTEM_PROMPT } from "./pi/system-prompt.ts";
 import {
-  composeSystemPrompt,
   loadAgentDefinitions,
   unsupportedKeysFor,
   type AgentDefinition,
 } from "./pi/agents.ts";
+import { AgentRoleReader, type AgentRoleSource } from "./pi/agent-role.ts";
 import { registerIngestRoutes } from "./api/ingest-routes.ts";
 import { registerDocumentRoutes, capabilityPath } from "./api/document-routes.ts";
 import { DocumentStore } from "./db/document-store.ts";
@@ -92,9 +92,28 @@ async function main(): Promise<void> {
     ...(agentDefinition ? { selected: agentDefinition.name } : {}),
   });
 
-  const systemPrompt = agentDefinition
-    ? composeSystemPrompt(SYSTEM_PROMPT, agentDefinition)
-    : SYSTEM_PROMPT;
+  // Two different things, deliberately separated:
+  //
+  //  * the SELECTION is `AGENT_DEFINITION`, a boot-time fact. Changing it still needs a
+  //    restart, because it is deployment configuration (S8 of `role-by-volume.md`);
+  //  * the role's TEXT is read per turn from the file that definition was loaded from
+  //    (`AgentRoleReader`), so correcting a bad instruction is an edit and not a release.
+  //
+  // Boot keeps failing fast (S7) — the checks above already threw — and the per-turn path
+  // is the softer one: an unreadable file there keeps the last valid text and warns.
+  const roleReader = new AgentRoleReader({ log });
+  const roleFile = agentDefinition ? loaded.files.get(agentDefinition.name) : undefined;
+  if (agentDefinition && !roleFile) {
+    // Only reachable if the loader returned a definition without its origin, which would
+    // make the per-turn read impossible. Not a soft failure: a deployment that selected a
+    // role it cannot re-read would look healthy and behave like an older version.
+    throw new Error(
+      `AGENT_DEFINITION "${agentDefinition.name}" was loaded without its file path, so the ` +
+        "role could not be re-read on each turn; check the directory " + config.agentsDir,
+    );
+  }
+  const roleSource: AgentRoleSource | undefined =
+    agentDefinition && roleFile ? { name: agentDefinition.name, path: roleFile } : undefined;
 
   await mkdir(config.workspaceDir, { recursive: true });
 
@@ -182,7 +201,7 @@ async function main(): Promise<void> {
         tenant,
         agentDir: effectiveAgentDir,
         workspaceDir: config.workspaceDir,
-        systemPrompt,
+        systemPrompt: SYSTEM_PROMPT,
         capabilities: config.tools,
       });
     })();
@@ -219,6 +238,12 @@ async function main(): Promise<void> {
     agentDir: effectiveAgentDir,
     modelFor,
     thinkingLevel: config.thinkingLevel,
+    ...(roleSource
+      ? {
+          roleForTurn: (runtime) =>
+            roleReader.resolve(roleSource, runtime.exposedToolNames),
+        }
+      : {}),
   });
 
   const authConfig = {

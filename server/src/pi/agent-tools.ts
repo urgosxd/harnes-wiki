@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { TSchema } from "typebox";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { confinedReadOperations } from "./sandbox.ts";
+import { assertPathInsideRoot, PathEscapeError, confinedReadOperations } from "./sandbox.ts";
 
 /**
  * Which coding tools a chat session may use.
@@ -36,6 +36,41 @@ export interface AgentToolOptions {
 
 const READ_ONLY = ["read", "grep", "find", "ls"] as const;
 
+/**
+ * Confine a coding tool that takes its target as a `path` argument.
+ *
+ * `read` is confined from the inside, by `confinedReadOperations`. The others are
+ * not: `grep`, `find`, `ls`, `write` and `edit` take a `path` argument (grep: pattern
+ * + path, find: glob + path, the rest: path alone) and hand it to ripgrep, fd,
+ * `readdir` or `fs.writeFile`. Measured with the tools as they were mounted here,
+ * `ls ../agent` listed the directory holding the provider credential, `grep
+ * ../agent/models.json` printed it, and `write ../agent/pwned.txt` created a file in
+ * it.
+ *
+ * Their operations seam cannot carry this: `find` swaps fd for a custom `glob()` the
+ * moment one is supplied, and grep rewrites a thrown `isDirectory()` into
+ * "Path not found". So the argument is checked here, before the tool runs at all, and
+ * refused with `PathEscapeError` — the same words `read` refuses with, before any
+ * filesystem access, with no cooperation needed from the model.
+ */
+function confinePathArgument(
+  tool: AgentTool<TSchema, unknown>,
+  root: string,
+): AgentTool<TSchema, unknown> {
+  return {
+    ...tool,
+    execute: async (toolCallId, params, signal, onUpdate) => {
+      const requested = (params as { path?: unknown } | undefined)?.path;
+      if (requested !== undefined && typeof requested !== "string") {
+        // Only a string can be shown to be inside; fail closed without touching the disk.
+        throw new PathEscapeError(JSON.stringify(requested), root);
+      }
+      await assertPathInsideRoot(requested ?? ".", root);
+      return tool.execute(toolCallId, params, signal, onUpdate);
+    },
+  };
+}
+
 /** The tool instances a session should mount, already confined to the workspace. */
 export function createAgentTools(options: AgentToolOptions): AgentTool<TSchema, unknown>[] {
   const { workspaceDir, enableBash = false, enableWrites = false } = options;
@@ -45,9 +80,10 @@ export function createAgentTools(options: AgentToolOptions): AgentTool<TSchema, 
   const tools: AgentTool<TSchema, unknown>[] = [
     // `read` gets confined operations: it refuses anything outside the workspace.
     createReadTool(workspaceDir, { operations: confinedReadOperations(workspaceDir) }) as AgentTool<TSchema, unknown>,
-    createGrepTool(workspaceDir) as AgentTool<TSchema, unknown>,
-    createFindTool(workspaceDir) as AgentTool<TSchema, unknown>,
-    createLsTool(workspaceDir) as AgentTool<TSchema, unknown>,
+    // The rest take a path argument, so they are confined at the argument instead.
+    confinePathArgument(createGrepTool(workspaceDir) as AgentTool<TSchema, unknown>, workspaceDir),
+    confinePathArgument(createFindTool(workspaceDir) as AgentTool<TSchema, unknown>, workspaceDir),
+    confinePathArgument(createLsTool(workspaceDir) as AgentTool<TSchema, unknown>, workspaceDir),
   ];
 
   if (enableBash) {
@@ -55,8 +91,11 @@ export function createAgentTools(options: AgentToolOptions): AgentTool<TSchema, 
   }
   if (enableWrites) {
     tools.push(
-      createWriteTool(workspaceDir) as AgentTool<TSchema, unknown>,
-      createEditTool(workspaceDir) as AgentTool<TSchema, unknown>,
+      // Writes take the same `path` argument, so they are confined the same way: the
+      // leaf of a write may not exist yet, which is why the check resolves the real
+      // directory it would be created in (see `assertPathInsideRoot`).
+      confinePathArgument(createWriteTool(workspaceDir) as AgentTool<TSchema, unknown>, workspaceDir),
+      confinePathArgument(createEditTool(workspaceDir) as AgentTool<TSchema, unknown>, workspaceDir),
     );
   }
 

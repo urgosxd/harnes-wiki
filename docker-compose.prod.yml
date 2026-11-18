@@ -28,7 +28,13 @@
 # Nothing structural: the network, the volumes, the healthchecks and the environment
 # contract are the same, because a production stack that behaves differently from the
 # one that was tested is not the same product. Only the two service definitions change
-# their origin (image instead of build) and lose the source-tree bindings.
+# their origin (image instead of build) and lose the source-tree bindings — including
+# the skills and agents ones. Production reads NOTHING from the host: skills and agent
+# definitions both live in named volumes seeded from the image on first boot, so this file
+# plus the two images is a complete deployment. A bind to `./server/skills` or
+# `./server/agents` would make the checkout a deployment requirement and would start a
+# stack carrying only this file with zero skills — or zero definitions, which fails the
+# boot — and no error explaining it. That is the failure this arrangement exists to remove.
 services:
   postgres:
     image: postgres:16-alpine
@@ -78,10 +84,20 @@ services:
       CHAT_THINKING_LEVEL: ${CHAT_THINKING_LEVEL:-medium}
       PI_WORKSPACE_DIR: /data/workspace
       DATABASE_URL: postgres://agentdocumentor:${POSTGRES_PASSWORD}@postgres:5432/agentdocumentor
-      # How callers are identified. `open` means the name in the link IS the
-      # identity and there is no secret behind it. See the README before exposing
-      # this to anyone.
-      AUTH_MODE: ${AUTH_MODE:-open}
+      # How callers are identified. `roster` is the default HERE, unlike the development
+      # stack: production is the one place where "the name in the link IS the identity" is
+      # a decision somebody has to take on purpose, and a deployment that boots open by
+      # accident is exactly what this default prevents. Each user gets a secret of their
+      # own, a claimed id that disagrees with the token is refused with `401`, and tokens
+      # shorter than 16 characters stop the boot.
+      #
+      # Still overridable, because `open` behind a private network is a legitimate choice
+      # and a compose file that refused the operator's decision would be a second product.
+      # The roster itself is NOT here and NOT in `.env`: it is mounted below.
+      AUTH_MODE: ${AUTH_MODE:-roster}
+      # Empty is the normal state: the roster arrives through the mount below. This
+      # variable exists so an orchestrator secret can OVERRIDE that file, and the
+      # entrypoint gives it precedence.
       CHAT_USERS: ${CHAT_USERS:-}
       INGEST_API_BASE_URL: ${INGEST_API_BASE_URL:-}
       INGEST_API_TIMEOUT_MS: ${INGEST_API_TIMEOUT_MS:-10000}
@@ -90,12 +106,11 @@ services:
       AGENT_SKILLS: ${AGENT_SKILLS:-true}
       AGENT_BASH: ${AGENT_BASH:-false}
       AGENT_WRITES: ${AGENT_WRITES:-false}
-      # Skills and agent definitions are read from the image here, never from a repo
-      # path: the deployment consumes an immutable artefact, and mounting a source
-      # directory would break the versioned-by-tag guarantee. Only the two settings
-      # that name the directory and the definition are deployment-specific; the
-      # directory is interpolated so an `.env` value is honored, with the baked path
-      # as the default.
+      # Agent definitions are a NAMED volume in production (see `volumes` below), never a
+      # repo path: the deployment consumes an immutable artefact, and a host bind would
+      # make the checkout a deployment requirement. The path and the selected definition
+      # stay interpolated so an `.env` value is honored; the default is the volume's own
+      # mount point, which is where the image's seed is copied on a first boot.
       PI_AGENTS_DIR: ${PI_AGENTS_DIR:-/home/node/.agents/agents}
       AGENT_DEFINITION: ${AGENT_DEFINITION:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -103,6 +118,52 @@ services:
       NODE_ENV: production
     volumes:
       - agentdoc-workspace:/data/workspace
+      # Skills, as a NAMED volume — not a host bind. Inside the workspace on purpose: Pi
+      # discovers project skills at <cwd>/.pi/skills and the model's `read` tool is
+      # confined to the workspace, so anywhere else a skill is indexed and unreadable.
+      #
+      # The volume starts empty and the image carries a seed at
+      # /opt/agentdocumentor/skills that `entrypoint.sh` copies in on a first boot. That
+      # is what makes this file self-sufficient: a host that has the two images and this
+      # file gets the skills. The seed lives at neither discovery scope, so there is one
+      # copy of each skill, not two.
+      #
+      # A mount that already has content is never overwritten: an operator who copies
+      # their own skills in owns them. To refresh from a newer image, remove the volume
+      # (`docker volume rm <project>_agentdoc-skills`) or copy over it.
+      - agentdoc-skills:/data/workspace/.pi/skills
+      # Agent definitions, as a NAMED volume at the scope the server reads
+      # (`PI_AGENTS_DIR`, `$HOME/.agents/agents`), for the same reason the skills volume
+      # exists: production reads no host path. This used to be a baked copy at this exact
+      # path, which made "correct a bad role instruction" a rebuild and a release; now the
+      # mount is the source the server re-reads on EVERY turn (`src/pi/agent-role.ts`), so
+      # a fix is a `cp` into the volume and the next message uses it — no restart, no
+      # rebuild, no new tag.
+      #
+      # The volume starts empty and the image carries a seed at
+      # /opt/agentdocumentor/agents that `entrypoint.sh` copies in on a first boot, which
+      # is what keeps this file self-sufficient. A mount that already has content is never
+      # overwritten: an operator who corrected a role owns it. To refresh from a newer
+      # image, remove the volume (`docker volume rm <project>_agentdoc-agents`) or copy
+      # over it.
+      - agentdoc-agents:/home/node/.agents/agents
+      # The per-user roster: the ONE host path this file reads, and it is read-only.
+      #
+      # Everything else here is a named volume because a deployment should need no source
+      # tree, and this is the deliberate exception. The alternative was `.env`, which
+      # Compose interpolates into every service that names the variable and which an
+      # operator copies between hosts by hand — a token does not belong in a file that
+      # also carries sixteen other settings.
+      #
+      # So: one line of secrets, in one file, at a path the operator owns (`chmod 600`,
+      # git-ignored), mounted read-only and read once at boot by `entrypoint.sh`, which
+      # exports `CHAT_USERS` from it. Rotating a user is editing this file and restarting
+      # the server container; nothing is baked into an image and nothing is committed.
+      #
+      # A missing host file is created here as an EMPTY DIRECTORY by Docker; with
+      # `AUTH_MODE=roster` as the default the entrypoint then STOPS the boot and says so,
+      # rather than starting a server that refuses every request.
+      - ./.chat-users:/run/secrets/chat-users:ro
     healthcheck:
       test:
         - CMD
@@ -168,3 +229,9 @@ networks:
 volumes:
   agentdoc-pgdata:
   agentdoc-workspace:
+  # Seeded from the image on the first boot of the server container (see
+  # `server/entrypoint.sh`), then owned by whoever put content there.
+  agentdoc-skills:
+  # The agent definitions: seeded the same way, and read PER TURN by the server, so a
+  # corrected role takes effect on the next message with no restart.
+  agentdoc-agents:

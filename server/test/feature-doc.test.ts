@@ -325,7 +325,18 @@ if (inCheckout) {
       // Sorted because readdir order is not alphabetical and this comparison is about the
       // set, not the order the filesystem happens to return.
       evaluatedDocuments.sort(),
-      ["multitenant-stackId.md", "stack-in-prompt.md", "ui-improve.md", "urlparam-stackId.md"],
+      [
+        "ingest-dimensions-array.md",
+        "ingest-operator-controls.md",
+        "multitenant-stackId.md",
+        "prod-hardening.md",
+        "role-by-volume.md",
+        "skills-volume-and-role.md",
+        "stack-in-prompt.md",
+        "ui-improve.md",
+        "urlparam-stackId.md",
+        "users-with-tokens.md",
+      ],
       "the documents that carry task rows are declared here, never inferred; a new one " +
         "must be added deliberately so a task table cannot slip in unread",
     );

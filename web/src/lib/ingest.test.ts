@@ -9,6 +9,7 @@ import {
   pollJob,
   compileRetryable,
   compileBlockedByIngestFailure,
+  dimensionRows,
   POLL_INITIAL_MS,
   POLL_MAX_MS,
   stageLabel,
@@ -507,5 +508,155 @@ describe("compileBlockedByIngestFailure", () => {
       compile: { status: "queued" as const, progress: null },
     };
     expect(compileBlockedByIngestFailure(job)).toBe(false);
+  });
+});
+
+/**
+ * The payload's `dimensions` array, and the settle rule that must NOT move onto it.
+ *
+ * The producer publishes per-dimension results beside the two state machines. Reading
+ * them is a rendering concern; the job's lifecycle stays the `ingest`/`compile` pair
+ * (S7), because nothing here observes whether a dimension can settle FIRST — and a
+ * settle rule built on that guess either freezes the screen on live work or polls a
+ * dead job forever.
+ */
+describe("dimensionRows", () => {
+  const withDimensions = (dimensions: unknown) => job({ dimensions });
+
+  it("reads name, status and summary in the producer's order", () => {
+    const rows = dimensionRows(
+      withDimensions([
+        { name: "wiki", status: "succeeded", summary: "wiki:created" },
+        { name: "kg", status: "succeeded", summary: "kg:12 chunks, 3 entities" },
+      ]),
+    );
+
+    expect(rows).toEqual([
+      { name: "wiki", status: "succeeded", summary: "wiki:created" },
+      { name: "kg", status: "succeeded", summary: "kg:12 chunks, 3 entities" },
+    ]);
+  });
+
+  it("trims the fields it reads, so a padded payload is still one clean row", () => {
+    // A badge whose text is " succeeded " and a row keyed on " wiki " are the same
+    // fact printed confusingly; trimming is reading, not inventing.
+    expect(
+      dimensionRows(withDimensions([{ name: " wiki ", status: " succeeded ", summary: " x " }])),
+    ).toEqual([{ name: "wiki", status: "succeeded", summary: "x" }]);
+  });
+
+  it("keeps duplicate names, because two rows really can report the same unit", () => {
+    // Collapsing by name would delete a reported result. Order and repetition are the
+    // payload's, and the reader is not a set.
+    expect(
+      dimensionRows(withDimensions([{ name: "kg", status: "failed" }, { name: "kg", status: "succeeded" }])),
+    ).toEqual([
+      { name: "kg", status: "failed" },
+      { name: "kg", status: "succeeded" },
+    ]);
+  });
+
+  it("returns no rows, rather than throwing, for every unusable shape", () => {
+    for (const unusable of [
+      undefined,
+      null,
+      7,
+      "wiki",
+      { name: "wiki", status: "succeeded" },
+      [],
+      [42, null, "wiki", true],
+      [{ status: "succeeded" }],
+      [{ name: 42, status: "succeeded" }],
+      [{ name: "   ", status: "succeeded" }],
+      [{ name: "wiki" }],
+      [{ name: "wiki", status: 200 }],
+      [{ name: "wiki", status: "" }],
+    ]) {
+      expect(dimensionRows(withDimensions(unusable))).toEqual([]);
+    }
+  });
+
+  it("drops a non-string summary and keeps the row", () => {
+    expect(
+      dimensionRows(
+        withDimensions([
+          { name: "wiki", status: "succeeded", summary: 42 },
+          { name: "kg", status: "succeeded", summary: "   " },
+        ]),
+      ),
+    ).toEqual([
+      { name: "wiki", status: "succeeded" },
+      { name: "kg", status: "succeeded" },
+    ]);
+  });
+});
+
+describe("the settle rule stays on ingest/compile (S7)", () => {
+  const settledPair = {
+    ingest: { status: "succeeded" as const, attempts: [] },
+    compile: { status: "succeeded" as const, progress: null },
+  };
+
+  it("settles a job that carries no dimensions at all", () => {
+    expect(isJobSettled(job(settledPair))).toBe(true);
+  });
+
+  it("does NOT settle on dimensions alone when the compile is still running", async () => {
+    // The pin on the decision: every dimension already reads terminal, and the compile
+    // has not finished. Stopping the poll here would freeze the screen on work that is
+    // still happening — and the ordering that would justify it is unverified.
+    const running = job({
+      ...settledPair,
+      compile: { status: "running", stage: "page_generation", progress: null },
+      dimensions: [
+        { name: "wiki", status: "succeeded", summary: "wiki:created" },
+        { name: "kg", status: "succeeded", summary: "kg:12 chunks, 3 entities" },
+      ],
+    });
+    const done = job({ ...settledPair, dimensions: running.dimensions });
+
+    expect(isJobSettled(running)).toBe(false);
+
+    const snapshots = [running, done];
+    let index = 0;
+    const fetchMock = vi.fn(async () => jsonResponse(snapshots[Math.min(index++, 1)]));
+    const { delays, sleep } = recordingSleep();
+
+    const outcome = await pollJob("ing_1", {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      headers: () => ({}),
+      onUpdate: () => {},
+      sleep,
+    });
+
+    // Two reads and one wait: the finished dimensions did not end the poll, the
+    // terminal compile did.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(delays).toEqual([250]);
+    expect(outcome.reason).toBe("settled");
+  });
+
+  it("settles a settled pair that ALSO carries dimensions", async () => {
+    const settled = job({
+      ...settledPair,
+      dimensions: [{ name: "wiki", status: "succeeded", summary: "wiki:created" }],
+    });
+    const fetchMock = vi.fn(async () => jsonResponse(settled));
+    const { delays, sleep } = recordingSleep();
+
+    const outcome = await pollJob("ing_1", {
+      fetchImpl: fetchMock as unknown as typeof fetch,
+      headers: () => ({}),
+      onUpdate: () => {},
+      sleep,
+    });
+
+    expect(outcome.reason).toBe("settled");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(delays).toEqual([]);
+    // And the array survives the read untouched, for the panel to render.
+    expect(outcome.job?.dimensions).toEqual([
+      { name: "wiki", status: "succeeded", summary: "wiki:created" },
+    ]);
   });
 });

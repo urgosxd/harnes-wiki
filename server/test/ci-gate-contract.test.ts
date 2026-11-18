@@ -1,8 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { hasCredentials } from "./support/env.ts";
 
 /**
  * The CI gate's own contract, asserted as text.
@@ -83,6 +85,68 @@ test("the database tier is required, and the suite is mounted rather than baked"
   // The image deliberately carries no tests, so a test that only ever runs from the
   // image would prove nothing about the checked-out suite.
   assert.match(readFileSync(join(REPO_ROOT, "server", ".dockerignore"), "utf8"), /^test$/m);
+});
+
+/**
+ * An agent directory holding exactly the files named, as content.
+ *
+ * The credential-less tier is decided by what a directory CONTAINS, so the cases below
+ * are files, not names: this is what makes the difference between a directory the
+ * credential store has touched and one that holds something to authenticate with.
+ */
+const agentDirWith = (files: Record<string, string>): string => {
+  const dir = mkdtempSync(join(tmpdir(), "ci-gate-agentdir-"));
+  for (const [name, content] of Object.entries(files)) writeFileSync(join(dir, name), content, "utf8");
+  return dir;
+};
+
+test("the credential-less tier points PI_AGENT_DIR at a directory the script owns", { skip }, () => {
+  const configured = configuration(script);
+
+  // Naming a path the running user cannot create is not a decision, it is a privilege
+  // assumption. pi-coding-agent CREATES the directory it is handed, so as a non-root user
+  // that path failed the tier with `EACCES: permission denied` and four failing tests,
+  // while the same script was green in the image because the test stage runs as root.
+  assert.doesNotMatch(configured, /nonexistent-no-pi-credentials-on-purpose/);
+
+  // The mechanism, as wiring rather than prose: a directory this script creates empty,
+  // mounted at the same path so the container user owns a writable one whatever uid it
+  // runs as, passed as PI_AGENT_DIR, and removed on the way out.
+  assert.match(configured, /^PI_AGENT_DIR_EMPTY="\$\(mktemp -d\)"$/m);
+  assert.match(configured, /-v "\$PI_AGENT_DIR_EMPTY:\$PI_AGENT_DIR_EMPTY"/);
+  assert.match(configured, /-e PI_AGENT_DIR="\$PI_AGENT_DIR_EMPTY"/);
+  assert.match(configured, /rm -rf "\$PI_AGENT_DIR_EMPTY"/);
+
+  // The skip itself must survive that change: the tier still skips on this host.
+  assert.equal(hasCredentials(agentDirWith({})), false, "an empty agent dir has no credentials");
+});
+
+test("an agent dir the credential store has touched still counts as having no credentials", { skip }, () => {
+  // Measured: `AuthStorage`'s constructor writes `{}` into the `PI_AGENT_DIR` it is given,
+  // so an empty directory stops looking empty to every test process that starts after it.
+  // Existence was the signal, so those processes ran the live tier and failed instead of
+  // skipping: 4 failures, and `skipped` fell from 43 to 55-to-49 depending on the race.
+  assert.equal(hasCredentials(agentDirWith({ "auth.json": "{}" })), false, "`{}` is not a credential");
+  assert.equal(hasCredentials(agentDirWith({ "models.json": "{}" })), false, "`{}` is not a credential");
+  assert.equal(hasCredentials(agentDirWith({ "auth.json": "" })), false, "an empty file is not a credential");
+  assert.equal(hasCredentials(agentDirWith({ "auth.json": "  \n\t" })), false, "whitespace is not a credential");
+  assert.equal(hasCredentials(agentDirWith({ "auth.json": "{}", "models.json": "{}" })), false);
+});
+
+test("a real credential still runs the live tier", { skip }, () => {
+  // The other direction, so the rule cannot get looser: anything a deployment would treat
+  // as credentials must keep the tier RUNNING. A one-directional test is how "skip on an
+  // empty directory" quietly becomes "skip on a machine with credentials".
+  assert.equal(
+    hasCredentials(agentDirWith({ "auth.json": JSON.stringify({ synthetic: { type: "api_key", key: "sk-test" } }) })),
+    true,
+    "a provider entry in auth.json is a credential",
+  );
+  assert.equal(
+    hasCredentials(agentDirWith({ "models.json": JSON.stringify({ providers: { synthetic: {} } }) })),
+    true,
+    "a configured provider in models.json is a credential",
+  );
 });
 
 test("neither image has its test stage as the default target", { skip }, () => {
