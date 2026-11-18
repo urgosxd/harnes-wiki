@@ -329,6 +329,7 @@ if (inCheckout) {
         "ingest-dimensions-array.md",
         "ingest-operator-controls.md",
         "multitenant-stackId.md",
+        "prod-hardening.md",
         "skills-volume-and-role.md",
         "stack-in-prompt.md",
         "ui-improve.md",
