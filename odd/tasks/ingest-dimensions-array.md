@@ -7,7 +7,7 @@ blindly, and rendered two hardcoded sections, so `wiki:created` and
 `succeeded` overall status was indistinguishable from success. Scope: the web job
 contract and view, one server passthrough pin, `README.md`, this document.
 
-Status: in progress
+Status: complete
 Branch: feature/ingest-dimensions-array
 Created: 2026-11-18
 Requester: the repo owner
@@ -67,7 +67,7 @@ census array in `server/test/feature-doc.test.ts`.
 
 | ID | Task | Spec | Route | Commit |
 | --- | --- | --- | --- | --- |
-| T1 | Tolerant reader for `dimensions` + the rendered rows, the passthrough pin, `README.md` and this document | S1-S10 | inline | pending |
+| T1 | Tolerant reader for `dimensions` + the rendered rows, the passthrough pin, `README.md` and this document | S1-S10 | inline | 1d6cd75 |
 
 ## Log
 
@@ -108,3 +108,19 @@ the commit that closes T1 and cannot name that commit's SHA — a commit cannot 
 hash. The Commit cell therefore reads `pending` and the header stays `Status: in progress`,
 which is what `server/test/feature-doc.test.ts` requires of a pending row; the SHA is reported
 in the handoff and a one-line `docs(odd)` follow-up would record it if the owner asks for one.
+
+L5 (closing, the SHA L4 could not carry): T1 landed as `1d6cd75`, which is now the Commit
+cell and the header reads `Status: complete`; this entry is the `docs(odd)` follow-up L4
+anticipated. The review workload is worth naming because the raw figure misleads: one commit
+of 1026 changed lines (947 insertions, 79 deletions), and most of it is new test text —
+`ingest-dimensions.test.tsx` (276), `ingest.test.ts` (151) and
+`ingest-dimensions-passthrough.test.ts` (151). `git diff -w` over the same commit reports 871
+insertions and 3 deletions, and ~76 of the difference in `IngestJobView.tsx` (151 added
+becomes 75) is pure re-indentation of the fallback block, moved inside the new branch without
+a character changed. The substantive additions are therefore roughly 293 lines — the reader,
+the rows, the passthrough pin and the `README.md` section — not a thousand. One interface
+change rode along: `StatusBadge`'s `settled` prop became optional so a dimension row can omit
+a word it cannot honestly claim (S6, and the comment at the badge says why), while both fixed
+call sites — `ingest` and `compile` — still pass it and `ingest-jobs.test.tsx` still asserts
+`data-settled` on those two columns, which is what keeps S3's "renders exactly as it does
+today" honest.
