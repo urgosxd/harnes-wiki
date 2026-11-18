@@ -1,19 +1,19 @@
-import { existsSync, mkdtempSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createDatabase } from "../../src/db/pool.ts";
 import { databaseAvailable } from "./db.ts";
 
-export const AGENT_DIR = process.env.PI_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
+// `AGENT_DIR` and the credential-less skip decision are defined ONCE, in `env.ts`, and
+// re-exported here: this file used to carry its own copy of `hasCredentials`, and a rule
+// that decides whether the live tier runs or skips must not exist twice.
+export { AGENT_DIR, hasCredentials } from "./env.ts";
+
 export const PROVIDER = process.env.CHAT_PROVIDER ?? "synthetic";
 export const MODEL_ID = process.env.CHAT_MODEL ?? "syn:large:text";
 export const DATABASE_URL =
   process.env.DATABASE_URL ?? "postgres://agentdocumentor:agentdocumentor@127.0.0.1:5432/agentdocumentor";
-
-export function hasCredentials(): boolean {
-  return existsSync(join(AGENT_DIR, "models.json")) || existsSync(join(AGENT_DIR, "auth.json"));
-}
 
 /**
  * Whether the database tier can run, decided by a QUERY.

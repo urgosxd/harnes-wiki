@@ -19,8 +19,9 @@
 # ## What it does NOT prove
 #
 # The live-model tier needs real Pi credentials, which CI does not have and must not
-# fake: those tests skip, and `PI_AGENT_DIR` is pointed at a path that does not exist so
-# the skip is a decision rather than an accident of the runner. Everything that only
+# fake: those tests skip, and `PI_AGENT_DIR` is pointed at an empty directory this script
+# creates and owns, so the skip is a decision rather than an accident of the runner (or of
+# the uid the gate happens to run as). Everything that only
 # needs Postgres does run, and a missing database FAILS this script instead of quietly
 # skipping the tier — that is what `CI_REQUIRE_DATABASE=1` is for.
 #
@@ -93,7 +94,25 @@ docker compose up -d postgres || fail "could not start postgres"
 # stale volume password both used to surface as "no database answered", which sends a
 # reader looking in the wrong place.
 LAST_DB_ERROR="$(mktemp)"
-trap 'rm -f "$LAST_DB_ERROR"' EXIT
+
+# The directory that makes the live-model tier skip, built here for the reason the tier
+# exists at all: a skip must be a DECISION, not a privilege. pi-coding-agent CREATES the
+# directory it is handed, so naming an absolute path the running user cannot write turned
+# that skip into `EACCES: permission denied` and four failing tests for anyone running this
+# gate as themselves -- while the same script stayed green in the image, because its test
+# stage runs as root. `mktemp -d` gives the run a directory it owns and can write to, empty
+# of `models.json` and `auth.json`, which is exactly what "no Pi credentials here" means to
+# the tests. `chmod 0777` is for the container user, whatever uid that is: the mount below
+# hands the same directory to a process this script cannot see the identity of. The trap
+# removes it, so a run leaves no writable agent directory behind.
+PI_AGENT_DIR_EMPTY="$(mktemp -d)"
+chmod 0777 "$PI_AGENT_DIR_EMPTY"
+
+cleanup_temp() {
+  rm -f "$LAST_DB_ERROR"
+  rm -rf "$PI_AGENT_DIR_EMPTY"
+}
+trap cleanup_temp EXIT
 
 can_query_database() {
   docker run --rm --network "$COMPOSE_NETWORK" -e DATABASE_URL="$TEST_DATABASE_URL" agentdoc-server-test \
@@ -113,17 +132,20 @@ printf 'database answered a query\n'
 
 step "server: typecheck, then the suite with the database tier REQUIRED"
 # `CI_REQUIRE_DATABASE` turns an unreachable database into a failure instead of a skip;
-# `PI_AGENT_DIR` names a path that does not exist so the live-model tier skips by
-# decision, and the summary says so.
+# `PI_AGENT_DIR` names an empty directory this script owns (created above) so the
+# live-model tier skips by decision, and the summary says so. It is mounted at the same
+# path the variable names, so the directory exists inside the container too and no
+# process has to create it.
 # `test/` is excluded from every image on purpose (see the Dockerfile), so it is mounted
 # read-only from the working tree: the tests that run are the checked-out ones.
 docker run --rm --network "$COMPOSE_NETWORK" \
   -v "$ROOT/server/test:/app/test:ro" \
   -v "$ROOT:/repo:ro" \
+  -v "$PI_AGENT_DIR_EMPTY:$PI_AGENT_DIR_EMPTY" \
   -e CI_REPO_ROOT=/repo \
   -e DATABASE_URL="$TEST_DATABASE_URL" \
   -e CI_REQUIRE_DATABASE=1 \
-  -e PI_AGENT_DIR=/nonexistent-no-pi-credentials-on-purpose \
+  -e PI_AGENT_DIR="$PI_AGENT_DIR_EMPTY" \
   agentdoc-server-test sh -c 'npx tsc --noEmit && npm test' \
   || fail "server typecheck or tests failed"
 
