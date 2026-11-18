@@ -200,14 +200,27 @@ export async function runTurn(options: {
     });
   });
 
+  // A throw from the awaited work — the model call, or any step before the settlement —
+  // is this turn's cause of failure. It is captured here, never returned past the
+  // `finally`: a `return` inside `finally` discards the very exception that explains the
+  // failure, and the caller then reports a failed turn with no reason at all.
+  let failure: unknown;
+  let appended: readonly SessionEntry[] = [];
+  let transcriptOutcome: RunOutcome = "error";
+  let transcriptUsage: TurnUsage | undefined;
+  let transcriptErrorMessage: string | undefined;
+  let transcriptText: string | undefined;
+
   try {
     await session.prompt(message);
     await settled;
+  } catch (error) {
+    failure = error;
   } finally {
-    // Read the transcript before disposing: the in-memory manager is the only
-    // record of what this turn appended.
+    // The settlement duties run on both paths. Read the transcript before disposing: the
+    // in-memory manager is the only record of what this turn appended.
     const after = sessionManager.getEntries();
-    const appended = after.slice(before.length);
+    appended = after.slice(before.length);
     session.dispose();
 
     if (appended.length > 0) {
@@ -221,20 +234,40 @@ export async function runTurn(options: {
           entry.type === "message" && entry.message.role === "assistant",
       );
 
-    const outcome = toOutcome(lastAssistant?.message);
-    const usage = toUsage(lastAssistant?.message);
-    const errorMessage =
+    transcriptOutcome = toOutcome(lastAssistant?.message);
+    transcriptUsage = toUsage(lastAssistant?.message);
+    transcriptErrorMessage =
       lastAssistant?.message.role === "assistant" ? lastAssistant.message.errorMessage : undefined;
-
-    return {
-      outcome,
-      text: streamed || lastAssistantText(lastAssistant?.message) || "",
-      errorMessage,
-      appended,
-      usage,
-      durationMs: Date.now() - startedAt,
-    };
+    transcriptText = lastAssistantText(lastAssistant?.message);
   }
+
+  // A thrown cause outranks whatever the transcript happens to hold: the turn did not
+  // answer, so it is an error turn (never `ok`), and the cause the user needs is the
+  // one that was thrown. The transcript's own message is the fallback for the case where
+  // nothing was thrown at all.
+  const thrownMessage = failure === undefined ? undefined : failureText(failure);
+  const errorMessage = thrownMessage ?? transcriptErrorMessage;
+
+  return {
+    outcome: failure === undefined ? transcriptOutcome : "error",
+    text: streamed || transcriptText || "",
+    errorMessage,
+    appended,
+    usage: transcriptUsage,
+    durationMs: Date.now() - startedAt,
+  };
+}
+
+/**
+ * The reason a thrown value carries, in the same shape the transport uses elsewhere.
+ *
+ * Never guesses: an `Error` contributes its message, anything else its `String()`, and a
+ * blank result is no reason at all (`undefined`), so the caller can fall back instead of
+ * showing an empty cause.
+ */
+function failureText(error: unknown): string | undefined {
+  const text = error instanceof Error ? error.message : String(error);
+  return text.trim().length > 0 ? text : undefined;
 }
 
 /**

@@ -11,6 +11,14 @@ Branch: feature/skills-volume-and-role
 Created: 2026-11-18
 Requester: the repo owner
 
+**Amended by a later feature (read this before trusting `S5` or `L3` as current state).**
+The tool boundary this document froze is no longer the boundary the repo ships. The role's
+tool list and the workspace confinement were closed in
+`odd/tasks/prod-hardening.md`, commits `df51ed6` (every read-only tool the role names is
+granted) and `7264a1f` (`grep`, `find`, `ls`, and `write`/`edit` under `AGENT_WRITES`, now
+refuse any path outside the workspace). `S5` is a historical requirement of THIS feature
+and stays as written; the current rule is in `README.md` and in `L8` below.
+
 ## Specs
 
 S1 (verbatim, the request):
@@ -112,10 +120,12 @@ L4 (what stays unverified):
 - **A prod deployment must now carry `server/skills` beside the compose file**, because
   the mount names a host path. That is a deployment requirement this feature introduces,
   documented in `README.md`, and not exercised on a real target host.
-- **The role names tools this deployment does not grant.** Its body speaks of
-  `mcp__llmwiki__read_page`, and `server/scripts/provision-mcp.mjs` deliberately leaves
-  `read_page` out of the grant list. The body is kept verbatim (S4); the mismatch is
-  recorded, not papered over.
+- **The role names tools this deployment does not grant** — CORRECTED, see `L8`: this was
+  true when written and is no longer. Its body speaks of `mcp__llmwiki__read_page` and
+  `query_stack`, and `server/scripts/provision-mcp.mjs` then left both out of the grant
+  list. The body was kept verbatim (`S4`); the mismatch was recorded rather than papered
+  over, and it was closed in `df51ed6`. The bullet is kept here, marked, because the
+  finding is what motivated the fix; the current state is `L8`.
 
 L5 (closing record, appended by `docs(odd)`):
 
@@ -210,3 +220,35 @@ L7 (test-root fix, the second commit of `T1`):
 - **The assertions still run in CI rather than skip.** `scripts/ci.sh` mounts the
   checkout at `/repo` with `CI_REPO_ROOT=/repo`, so the agent-definition checks execute on
   the real `server/agents` there; the skip covers only a run that has no checkout at all.
+
+L8 (the two findings above are now closed, appended by `prod-hardening`):
+
+Appended, never rewriting `L3` or `L5`: this repo's logs record what was true when it was
+written. Both entries stay exactly as they are, and this entry says what changed.
+
+- **The confinement gap in `L3` — and the sentence in `L5` that repeats it — is CLOSED by
+  `7264a1f`** (`fix(server): confine the coding tools to the workspace`), `T3` of
+  `odd/tasks/prod-hardening.md`. `grep`, `find` and `ls`, and `write` and `edit` when
+  `AGENT_WRITES` is on, now refuse any path that resolves outside the workspace, with the
+  same `PathEscapeError` vocabulary `read` already used and before the tool touches the
+  disk. The paragraph in `README.md` that named the gap and pointed at `L3` has been
+  rewritten to state the current boundary.
+- **What is still NOT confined is `bash`, and this document never claimed otherwise.**
+  A shell reaches whatever the process can, so no path check in a tool can bound it. It is
+  off by default (`enableBash` is false unless `AGENT_BASH` is set), and enabling it
+  re-opens the hole regardless of the per-tool checks. Reported, not fixed.
+- **The `L4` role/provisioning bullet is the one place this document's text was corrected
+  in place**, marked and pointed here rather than silently edited, because a reader who
+  found `read_page` "deliberately absent" would act on a false premise. It is closed by
+  `df51ed6` (`fix(mcp): grant the read-only tools the shipped role names`, `T2` of
+  `prod-hardening`): every read-only tool the shipped role names — including `read_page`
+  and `query_stack` — is provisioned, eleven tools in total, and the five mutating ones
+  stay out.
+- **Evidence.** `server/test/sandbox-tools.test.ts` (driving the tool instances
+  `createAgentTools` really mounts) and `server/test/provision-mcp.test.ts` (the role file
+  parsed for both tool spellings, plus a no-mutating-tool assertion). Whole server suite
+  after both commits: 371 tests, 328 pass, 0 fail, 43 skipped. All 43 skips are
+  database-gated — this host has no Postgres — and they are: 20 in
+  `conversation-store.test.ts` "Postgres is not reachable", 11 in `http-api.test.ts`, 7 in
+  `isolation.test.ts` (those also need Pi credentials), 4 in `mcp-http-seam.test.ts` and 1
+  in `stack-turn-context.test.ts` "no reachable dev database".

@@ -8,10 +8,18 @@
  * `allowJs` for the whole server, which would silently widen the type-checked surface
  * for every script in the repository.
  *
- * Keep this in step with the script: it describes exactly two exports, and a third
- * would need a line here to be usable from a test.
+ * Keep this in step with the script: it describes the exports a test or the server
+ * reads, and a new one would need a line here to be usable.
  */
 export function deprecatedDefaultStack(env?: NodeJS.ProcessEnv): string | null;
+
+/**
+ * Exactly what provisioning writes into `tenant_mcp.exposed_tools`.
+ *
+ * A test compares the shipped role's tool names against this, so the comparison is
+ * against what is really granted rather than against a copy that could drift.
+ */
+export const TOOLS: readonly string[];
 
 /**
  * The tools that read one Stack, as this repository already maintains them.

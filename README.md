@@ -137,9 +137,13 @@ loading silently.
 Select it with `AGENT_DEFINITION=wiki-agentic-search` and **restart the server**: agent
 definitions are read once at startup. The file does not set the model or the tools —
 those come from `CHAT_MODEL` and `CHAT_THINKING_LEVEL` in the environment, and from the
-MCP grant list in `server/scripts/provision-mcp.mjs`. Read what that list actually
-grants: the role's instructions name `query_wiki`, `search_pages` and `read_page`, and
-`read_page` is deliberately not among the granted tools.
+MCP grant list in `server/scripts/provision-mcp.mjs`. The rule that list follows is
+**every read-only tool the shipped role names is granted**, so the role's instructions
+can always be followed: a role asking for a tool it does not have is the failure that
+matters here. What is not granted is the five tools that **write** to the wiki host —
+`ingest_source`, `compile_wiki`, `export_okf`, `import_okf`, `run_eval` — because this
+product never decided to expose them. `server/test/provision-mcp.test.ts` pins both
+halves: every tool the role names is covered, and no mutating tool is granted.
 
 ### Skills
 
@@ -584,10 +588,23 @@ Which tiers run where:
 |---|---|---|
 | Server unit tests, including the Postgres-gated ones | **yes** — `CI_REQUIRE_DATABASE=1` makes an unreachable database a failure, not a skip | **yes**, same image, same flag |
 | Web typecheck, tests and build | **yes** | **yes** |
-| Live-model tests (a real provider answering a real turn) | only if `~/.pi/agent/models.json` exists; `scripts/ci.sh` points `PI_AGENT_DIR` at a missing path so this tier **skips by decision** | **skipped**: CI has no Pi credentials and nothing here invents them |
+| Live-model tests (a real provider answering a real turn) | only if `PI_AGENT_DIR` holds credentials; otherwise this tier **skips by decision** | **skipped**: CI has no Pi credentials and nothing here invents them |
 
 A tier that skips is not proof: that is why the database tier is required rather than
 merely available, and why the table above names the one tier CI does not cover.
+
+How the skip is decided, because it used to be decided by the wrong thing. `scripts/ci.sh`
+creates an **empty directory it owns** with `mktemp -d`, passes it as `PI_AGENT_DIR` to the
+test container at the same path, and removes it in its `EXIT` trap. It does not name a
+missing absolute path: pi-coding-agent *creates* the directory it is handed, so a path the
+running user cannot write turned the skip into `EACCES` and four failing tests on any
+host running as itself, while staying green in the image because that stage runs as root.
+And the skip signal is the **content** of the auth file, not its existence —
+`AuthStorage` writes `{}` into the directory it is given, so existence alone read as
+"credentials" and the tier ran and failed instead of skipping. An absent, empty,
+whitespace-only or `{}` file means no credentials; any non-empty object means configured;
+a file that is present but unparseable counts as configured, so a broken credential file
+fails the tier loudly instead of quietly skipping it.
 
 The database needs no secret: `scripts/ci.sh` uses the credentials `docker-compose.yml`
 already declares for the dev stack, so there is nothing to store in a repository setting.
@@ -920,13 +937,17 @@ That is a UI promise and it holds.
 
 The model is a different question. A support assistant has to read a document, so
 `read`, `grep`, `find` and `ls` are available to it, and skills are mounted inside the
-workspace at `.pi/skills`, so the same `read` can open a skill body. Only `read` is
-confined to the workspace, and it refuses any path outside it. `ls`, `grep` and `find`
-are started in the workspace as their working directory but are **not** path-confined:
-given a path outside the workspace they read it. That is an open finding, recorded as
-`L3` in `odd/tasks/skills-volume-and-role.md`, and it is not fixed here. None of that
-appears in the interface. See **Skills** under **Agent definitions** for where the
-files come from.
+workspace at `.pi/skills`, so the same `read` can open a skill body. **All of them are
+confined to the workspace**: `read` through its own read operations, and `grep`, `find`
+and `ls` — plus `write` and `edit` when `AGENT_WRITES` is on — by refusing a `path`
+argument that resolves outside the workspace, before the tool touches the disk. Absolute
+paths, `..` traversal, directory symlinks, a symlink whose name looks contained and a
+symlink pointing at a file that does not exist are each refused with the same vocabulary,
+and a refused `write` creates nothing. `bash` is **NOT** confined by any of this: a shell
+reaches whatever the process can reach, and enabling it re-opens the hole regardless of
+the checks above. It is off by default for that reason. None of the confined tools
+appears in the interface. See **Skills** under **Agent definitions** for where the files
+come from.
 
 `bash` is **off by default**, and that is not caution for its own sake. Two things
 were measured on the real stack:
@@ -1000,9 +1021,19 @@ ignored**: still tolerated, still warned about once per run, never read. A store
 never consulted, so nothing needs cleaning up — and re-running this script neither
 resurrects nor destroys it.
 
-It exposes three tools — `list_stacks`, `ingest_jobs_list`, `ingest_job_status`.
-The other twelve the service offers are filesystem-scoped, and exposing them would
-allow operations this project never decided to permit.
+It grants eleven tools, all of them reads:
+
+- **Stack reads** — `list_stacks`, `query_stack`. Both take a `stackId` and read exactly
+  one Stack, so the scope gate knows they are Stack-scoped by name.
+- **Ingest jobs** — `ingest_jobs_list`, `ingest_job_status`. Status about work already
+  running, never a new job.
+- **Wiki reads** — `query_wiki`, `search_pages`, `read_page`, `get_context_pack`,
+  `wiki_status`, `lint_wiki`, `verify_artifact`.
+
+The five tools that **write** to the wiki host — `ingest_source`, `compile_wiki`,
+`export_okf`, `import_okf`, `run_eval` — stay out: exposing them would allow operations
+this project never decided to permit. The grant list is every read-only tool the shipped
+role names, so the role's own instructions always have the tools they ask for.
 
 Without this step the agent sees no Stack tools, and it cannot answer questions
 about Stacks.
