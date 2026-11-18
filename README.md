@@ -672,7 +672,7 @@ failed `kg` is visibly failed even when the compile reads `succeeded`.
 
 | Payload | What the detail pane shows |
 |---|---|
-| `dimensions` is usable | One row per dimension, and the fixed `Ingest` / `Compile` columns are not drawn beside them |
+| `dimensions` is usable | The fixed `Ingest` / `Compile` columns, always, plus one row per dimension beside them. The one row not drawn twice is a dimension that merely repeats a fixed section's name (`ingest` / `compile`), which the fixed column already carries |
 | Absent, empty, or with nothing in it readable | The fixed `Ingest` / `Compile` columns, exactly as before |
 
 The array is a **report**, not a lifecycle. It never decides when polling stops: a job
