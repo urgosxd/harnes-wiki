@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAgentTools } from "../src/pi/agent-tools.ts";
@@ -460,5 +460,297 @@ test("write and edit are absent unless writes are enabled", () => {
     assert.deepEqual(enabled, ["read", "grep", "find", "ls", "write", "edit"]);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+/* --------------------------------------------- symlinked root, cycles, affordances */
+
+/**
+ * A workspace whose `WORKSPACE_DIR` is a symlink to the real tree — macOS `/tmp` and
+ * `/var`, and any bind mount, look like this. The containment has to compare
+ * real-to-real: resolving the target against the *textual* root refused every absolute
+ * path into the real tree, and made `read` refuse everything at all.
+ */
+function symlinkedFixture() {
+  const root = mkdtempSync(join(tmpdir(), "sandbox-link-"));
+  const real = join(root, "real-workspace");
+  mkdirSync(join(real, "sub"), { recursive: true });
+  writeFileSync(join(real, "sub", "f.txt"), "inside sub line\n");
+  const link = join(root, "workspace");
+  symlinkSync(real, link, "dir");
+  const agent = join(root, "agent");
+  mkdirSync(agent, { recursive: true });
+  writeFileSync(join(agent, "models.json"), SECRET_FILE);
+  return { root, real, link, agent };
+}
+
+/** Every confined tool refuses with the shared vocabulary, and the decoy is untouched. */
+async function assertRefusedEverywhere(
+  workspaceDir: string,
+  decoyFile: string,
+  path: string,
+  what: string,
+): Promise<void> {
+  const decoy = readFileSync(decoyFile);
+  for (const name of ALL_TOOLS) {
+    await assertRefusedOn(confinedTool(workspaceDir, name), escapeAttempt(name, path), `${what} (${name})`);
+  }
+  assert.deepEqual(readFileSync(decoyFile), decoy, "the decoy must be byte-identical afterwards");
+}
+
+const ALL_TOOLS = ["read", "grep", "find", "ls", "write", "edit"] as const;
+
+/** The tool as mounted: `write` and `edit` only exist with writes enabled. */
+function confinedTool(workspaceDir: string, name: string): ToolLike {
+  return name === "write" || name === "edit" ? mutatingTool(workspaceDir, name) : tool(workspaceDir, name);
+}
+
+/** The parameters that would reach the decoy if the path argument were not checked. */
+function escapeAttempt(name: string, path: string): Record<string, unknown> {
+  switch (name) {
+    case "grep":
+      return { pattern: "syn_secret", path };
+    case "find":
+      return { pattern: "*.json", path };
+    case "write":
+      return { path, content: "pwned\n" };
+    case "edit":
+      return { path, edits: [{ oldText: "syn_secret", newText: "pwned" }] };
+    default:
+      return { path };
+  }
+}
+
+test("a workspace mounted through a symlink stays usable: relative and absolute paths", async () => {
+  const { root, real, link } = symlinkedFixture();
+  try {
+    const call = (name: string, params: unknown) =>
+      confinedTool(link, name).execute("call", params, undefined, undefined, undefined);
+
+    // `read` has to survive a symlinked root too, or the agent cannot open anything.
+    for (const target of ["sub/f.txt", join(link, "sub/f.txt"), join(real, "sub/f.txt")]) {
+      assert.equal(textOf(await call("read", { path: target })), "inside sub line\n", `read must open ${target}`);
+    }
+
+    // Relative, absolute through the link, and absolute into the real tree.
+    for (const target of ["sub", join(link, "sub"), join(real, "sub")]) {
+      assert.match(
+        textOf(await call("grep", { pattern: "inside", path: target })),
+        /^f\.txt:1: inside sub line$/m,
+        `grep must reach ${target}`,
+      );
+      assert.match(textOf(await call("find", { pattern: "*.txt", path: target })), /^f\.txt$/m, `find must reach ${target}`);
+    }
+    assert.match(textOf(await call("ls", { path: real })), /^sub\/$/m, "ls must list the real tree");
+    assert.match(textOf(await call("ls", { path: link })), /^sub\/$/m, "ls must list the declared root");
+
+    // And a write into the real tree is a write inside the workspace.
+    const written = join(real, "sub", "new.txt");
+    await call("write", { path: join(real, "sub", "new.txt"), content: "written inside\n" });
+    assert.equal(readFileSync(written, "utf8"), "written inside\n");
+
+    // `edit` resolves the same way: the target is reached through the real tree.
+    await call("edit", { path: join(real, "sub", "new.txt"), edits: [{ oldText: "written", newText: "edited" }] });
+    assert.equal(readFileSync(written, "utf8"), "edited inside\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a path outside the workspace is still refused when the root is a symlink", async () => {
+  const { root, link, agent } = symlinkedFixture();
+  try {
+    // The sibling holding the credential is outside the declared root and stays outside
+    // the real tree; resolving the root must not widen the boundary.
+    await assertRefusedEverywhere(
+      link,
+      join(agent, "models.json"),
+      join(link, "..", "agent", "models.json"),
+      "the credential beside a symlinked root",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a symlink cycle is refused, not passed through to the tool", async () => {
+  const { agent, workspace } = fixture();
+  try {
+    // Nothing resolves here: before the fix the check returned "unknown" and the tool
+    // ran, surfacing a raw ELOOP (or "Path not found") instead of the refusal.
+    symlinkSync(join(workspace, "loopB"), join(workspace, "loopA"));
+    symlinkSync(join(workspace, "loopA"), join(workspace, "loopB"));
+    await assertRefusedEverywhere(workspace, join(agent, "models.json"), join(workspace, "loopA"), "an unresolvable symlink cycle");
+    assert.deepEqual(readdirSync(agent).sort(), ["models.json"], "the refused calls must leave the sibling untouched");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a symlink cycle below the path is refused too", async () => {
+  const { workspace } = fixture();
+  try {
+    symlinkSync(join(workspace, "loopB"), join(workspace, "loopA"));
+    symlinkSync(join(workspace, "loopA"), join(workspace, "loopB"));
+    // The cycle is not the leaf: the leaf would be created through it.
+    await assertRefusedOn(mutatingTool(workspace, "write"), escapeAttempt("write", join(workspace, "loopA", "x.txt")), "a cycle above the leaf");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("~, @ and file:// escapes out of the workspace are refused with the decoy intact", async () => {
+  const { agent, workspace } = fixture();
+  const previousHome = process.env.HOME;
+  // `~` must expand to the decoy directory, not to the real HOME of whoever runs this.
+  process.env.HOME = agent;
+  try {
+    const decoy = join(agent, "models.json");
+    for (const attempt of ["~/models.json", "@../agent/models.json", `file://${decoy}`]) {
+      const before = readFileSync(decoy);
+      for (const name of ALL_TOOLS) {
+        await assertRefusedOn(confinedTool(workspace, name), escapeAttempt(name, attempt), `${attempt} (${name})`);
+      }
+      assert.deepEqual(readFileSync(decoy), before, `${attempt} must leave the decoy byte-identical`);
+    }
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("a caller-supplied ctx.cwd cannot redirect a tool outside the workspace", async () => {
+  const { agent, workspace } = fixture();
+  try {
+    writeFileSync(join(agent, "outside-only.txt"), "OUTSIDE TOP-SECRET\n");
+    // The wrapper forwards the documented arguments only, so a second base directory
+    // never reaches the SDK tool's own path resolution.
+    const result = await tool(workspace, "grep").execute(
+      "call",
+      { pattern: "TOP-SECRET", path: "." },
+      undefined,
+      undefined,
+      { cwd: agent },
+    );
+    assert.equal(textOf(result), "No matches found", "ctx.cwd must not become a second workspace");
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+/* -------------------------------------------- the three probes that survived review */
+
+/**
+ * Three properties a reviewer re-measured on the real-to-real fix, kept here so a
+ * regression fails a test instead of needing another review: a symlinked root must reach
+ * exactly the content a real root reaches, for every tool; it must still refuse every
+ * escape shape a real root refuses; and a root that cannot be resolved at all must refuse
+ * every call, including the innocent ones, because an unjudgeable request is not
+ * permission.
+ */
+
+test("a symlinked root reaches the same content a real root reaches, for every tool", async () => {
+  const { root, real, link } = symlinkedFixture();
+  try {
+    const call = (workspaceDir: string, name: string, params: unknown) =>
+      confinedTool(workspaceDir, name).execute("call", params, undefined, undefined, undefined);
+
+    // The reading tools answer byte-identical text; asserting it is non-empty keeps the
+    // comparison from passing vacuously on two empty answers.
+    const reading: Array<[string, Record<string, unknown>]> = [
+      ["read", { path: "sub/f.txt" }],
+      ["grep", { pattern: "inside", path: "sub" }],
+      ["find", { pattern: "*.txt", path: "sub" }],
+      ["ls", { path: "sub" }],
+    ];
+    for (const [name, params] of reading) {
+      const viaReal = await call(real, name, params);
+      const viaLink = await call(link, name, params);
+      assert.equal(viaReal.isError, undefined, `${name} must answer through the real root: ${textOf(viaReal)}`);
+      assert.equal(viaLink.isError, undefined, `${name} must answer through the symlinked root: ${textOf(viaLink)}`);
+      assert.notEqual(textOf(viaReal), "", `${name} must have answered something, or the comparison is vacuous`);
+      assert.equal(textOf(viaLink), textOf(viaReal), `${name} must answer the same text through either root`);
+    }
+
+    // The mutating tools land on the same bytes and report the same words. The target is
+    // the real tree addressed absolutely, so only a real-to-real comparison accepts it.
+    const target = join(real, "sub", "probe.txt");
+    const write = { path: target, content: "written through either root\n" };
+    const writeReal = await call(real, "write", write);
+    const writtenBytes = readFileSync(target, "utf8");
+    const writeLink = await call(link, "write", write);
+    assert.equal(writeReal.isError, undefined, `write must succeed through the real root: ${textOf(writeReal)}`);
+    assert.equal(writeLink.isError, undefined, `write must succeed through the symlinked root: ${textOf(writeLink)}`);
+    assert.equal(writtenBytes, "written through either root\n");
+    assert.equal(textOf(writeLink), textOf(writeReal), "write must report the same words through either root");
+    assert.equal(readFileSync(target, "utf8"), writtenBytes, "write must land on the same bytes through either root");
+
+    const edit = { path: target, edits: [{ oldText: "through either root", newText: "via both roots" }] };
+    const editReal = await call(real, "edit", edit);
+    const editedBytes = readFileSync(target, "utf8");
+    // Same starting content for the second run, so the two edits are the same request.
+    writeFileSync(target, "written through either root\n");
+    const editLink = await call(link, "edit", edit);
+    assert.equal(editReal.isError, undefined, `edit must succeed through the real root: ${textOf(editReal)}`);
+    assert.equal(editLink.isError, undefined, `edit must succeed through the symlinked root: ${textOf(editLink)}`);
+    assert.equal(editedBytes, "written via both roots\n");
+    assert.equal(textOf(editLink), textOf(editReal), "edit must report the same words through either root");
+    assert.equal(readFileSync(target, "utf8"), editedBytes, "edit must land on the same bytes through either root");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a symlinked root refuses every escape shape for all six tools", async () => {
+  const { root, real, link, agent } = symlinkedFixture();
+  const previousHome = process.env.HOME;
+  try {
+    // Names inside the real tree that land outside it: resolving the root must not launder
+    // them, because the comparison is on where the request lands and these land in `agent`.
+    symlinkSync(join(agent, "models.json"), join(real, "out-link.json"));
+    symlinkSync(agent, join(real, "out-dir"), "dir");
+    symlinkSync(join(agent, "nowhere.json"), join(real, "dangle.json"));
+    // `~` has to expand to the decoy directory, not to the runner's real HOME.
+    process.env.HOME = agent;
+
+    const decoy = join(agent, "models.json");
+    const shapes: Array<[string, string]> = [
+      ["an absolute path beside the root", decoy],
+      ["a `..` traversal out of the declared root", join(link, "..", "agent", "models.json")],
+      ["the sibling directory itself", agent],
+      ["a symlink inside the real tree pointing out", join(real, "out-link.json")],
+      ["a directory symlink inside the real tree", join(real, "out-dir")],
+      ["a dangling symlink inside the real tree", join(real, "dangle.json")],
+      ["an outside path that does not exist", join(agent, "nope.json")],
+      ["`~` expansion", "~/models.json"],
+      ["an `@`-prefixed traversal", "@../agent/models.json"],
+      ["a file:// URL", `file://${decoy}`],
+    ];
+    for (const [what, path] of shapes) {
+      await assertRefusedEverywhere(link, decoy, path, what);
+    }
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a root that cannot be resolved refuses every call, including the innocent ones", async () => {
+  const { root, agent } = symlinkedFixture();
+  try {
+    // The root itself is the cycle, so nothing below it resolves either: every request is
+    // unjudgeable, and unjudgeable is refused rather than allowed.
+    const rootLink = join(root, "cycle-a");
+    symlinkSync(join(root, "cycle-b"), rootLink);
+    symlinkSync(rootLink, join(root, "cycle-b"));
+
+    const decoy = join(agent, "models.json");
+    for (const path of [".", "sub/f.txt", join(rootLink, "sub/f.txt")]) {
+      await assertRefusedEverywhere(rootLink, decoy, path, `a call through a root that cannot be resolved (${path})`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

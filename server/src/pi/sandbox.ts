@@ -19,6 +19,20 @@ import type { ReadOperations } from "@earendil-works/pi-coding-agent";
  *  - A request that leaves the root is refused with an error the model can read,
  *    rather than silently returning an empty file.
  *
+ * Two properties the rules above need spelled out:
+ *  - Every comparison is real-to-real: the root is resolved at check time, on every
+ *    assertion, with no caching, because `WORKSPACE_DIR` is often a symlink itself
+ *    (macOS `/tmp`, `/var`, a mount) and a textual comparison then refuses the real tree
+ *    it points at.
+ *  - The check is fail-closed: a landing that cannot be resolved at all — a symlink
+ *    cycle, a chain longer than the hop budget — is refused, not waved through.
+ *
+ * What this is not: the check and the tool's own syscall are separate awaits, so a
+ * process able to swap a link in between can still move the landing. Closing that
+ * window needs `openat`-style resolution the SDK tools do not expose; this is a
+ * boundary against the model's arguments, not against a concurrent writer that
+ * already has filesystem access.
+ *
  * This is a real boundary for file reads. It is NOT a sandbox for `bash`: a shell
  * can reach anything the process can, so shell access is a separate decision
  * (see `agent-tools.ts`).
@@ -43,18 +57,17 @@ export function isInsideRoot(absolutePath: string, root: string): boolean {
 /**
  * Read operations that refuse anything outside `root`.
  *
- * `realpath` is applied to an existing target so a symlink pointing outward is
- * rejected on its real location, not its name.
+ * The target and the root are both resolved to their real location, so a symlink
+ * pointing outward is rejected on where it lands and a workspace that is itself a
+ * symlink stays readable. A landing nobody can resolve is refused.
  */
 export function confinedReadOperations(root: string): ReadOperations {
   async function assertInside(absolutePath: string): Promise<void> {
     const resolved = resolve(absolutePath);
-    if (!isInsideRoot(resolved, root)) throw new PathEscapeError(resolved, root);
-
-    // A symlink can point outside the root while its name looks contained.
-    const real = await realpath(resolved).catch(() => undefined);
-    if (real !== undefined && !isInsideRoot(real, root)) {
-      throw new PathEscapeError(real, root);
+    const landing = await realLandingPath(resolved);
+    if (landing === undefined) throw new PathEscapeError(resolved, root);
+    if (!isInsideRoot(landing, await resolveRealRoot(root))) {
+      throw new PathEscapeError(landing, root);
     }
   }
 
@@ -109,18 +122,23 @@ export function resolveRequestedPath(requested: string, root: string): string {
  * This resolves the request the same way those tools do, then refuses it with the
  * vocabulary `read` already uses, before the tool touches the filesystem.
  *
- * The root is resolved too: a workspace reached through a symlink (macOS `/var`, or
- * a bind mount) must not make every path inside it look like an escape.
+ * Containment is decided real-to-real: the request's landing and the root are both
+ * resolved, so a symlinked `WORKSPACE_DIR` accepts absolute paths into the tree it
+ * points at while a sibling of that tree stays outside. An unresolvable landing — a
+ * symlink cycle, an exhausted hop budget — is refused rather than treated as unknown.
  */
 export async function assertPathInsideRoot(requested: string, root: string): Promise<void> {
   const resolved = resolveRequestedPath(requested, root);
-  if (!isInsideRoot(resolved, root)) throw new PathEscapeError(resolved, root);
-
-  const realRoot = await realpath(resolve(root)).catch(() => resolve(root));
   const landing = await realLandingPath(resolved);
-  if (landing !== undefined && !isInsideRoot(landing, realRoot)) {
+  if (landing === undefined) throw new PathEscapeError(resolved, root);
+  if (!isInsideRoot(landing, await resolveRealRoot(root))) {
     throw new PathEscapeError(landing, root);
   }
+}
+
+/** The real location of the workspace root, or its textual one when it cannot be resolved. */
+async function resolveRealRoot(root: string): Promise<string> {
+  return (await realLandingPath(resolve(root))) ?? resolve(root);
 }
 
 /**
@@ -134,7 +152,14 @@ export async function assertPathInsideRoot(requested: string, root: string): Pro
  *
  * So the deepest existing prefix is resolved for real, the not-yet-existing tail is
  * appended to it, and a symlink whose target does not exist is followed by reading the
- * link itself. The hop budget keeps a link cycle from looping.
+ * link itself. `undefined` means the landing could not be resolved at all — a link
+ * cycle, or a chain longer than the hop budget. The two call sites that judge a request,
+ * `assertInside` in `confinedReadOperations` and `assertPathInsideRoot`, refuse an
+ * `undefined` landing instead of reading it as permission. The one place that does not
+ * refuse is `resolveRealRoot`, which falls back to the textual root when the root itself
+ * cannot be resolved: that cannot widen access, because a root nobody can resolve makes
+ * every lexical descendant unresolvable too, so those requests are refused on their own
+ * landing before any comparison happens.
  */
 async function realLandingPath(absolutePath: string): Promise<string | undefined> {
   const missing: string[] = [];
