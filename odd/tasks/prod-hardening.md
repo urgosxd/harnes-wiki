@@ -211,3 +211,38 @@ L6 (closing record, appended by this `docs` commit):
   rewritten: `L3` (the sandbox gap) and `L5`'s restatement of it stand as written, the
   confinement closure is a new appended `L8` there, and that document's header carries a
   note so a reader cannot take its `S5` for current state.
+
+L7 (independent re-verification of the confinement fix, and the three advisories it left):
+
+- **273 of the 273 probes the reviewer wrote pass on the fix, and 19 of them FAIL against
+  the base commit.** Those 19 failures are the defects the fix closes: a symlinked
+  `WORKSPACE_DIR` refusing everything, `read` of the workspace's own files included, and an
+  unresolvable landing read as permission so the tool ran anyway. The probe set is the
+  reviewer's, not this document's, which is what makes it evidence rather than a
+  restatement of what the fix claims.
+- **Both mutations fail the suite, which is how the probes were proven non-vacuous.**
+  Reverting the real-to-real comparison — judging the landing against the textual root
+  instead of the resolved one — breaks 8 of them; allowing an unresolvable landing to pass
+  breaks 2. No escape and no weakened containment was found in either direction. The three
+  durable probes now live in `sandbox-tools.test.ts`, so the next regression fails a test
+  instead of needing another review.
+- **Two docstring overclaims were corrected, and the code was not** (`9e2fb32`). A comment
+  claiming safety the code does not have is a defect: "the root is resolved once" is false,
+  because `resolveRealRoot` runs on every assertion with no caching; and "every caller
+  treats that as a refusal rather than as permission" is inexact, because `resolveRealRoot`
+  falls back to the textual root. The first now says the root is resolved at check time and
+  every comparison is real-to-real; the second names the two call sites that refuse and
+  states the one exception with the argument for why it cannot widen access — an
+  unresolvable root makes every lexical descendant unresolvable too, so those requests are
+  refused on their own landing before any comparison happens.
+- **One deviation is ACCEPTED and recorded, not fixed.** A dangling `WORKSPACE_DIR` refused
+  everything at base; it now lets `write path:"."` succeed at the link's own target. It is
+  reachable only with a misconfigured root, it is not an escape, and `main.ts` creates the
+  workspace before any runtime exists — so the behaviour stands as measured and `S8-S12`
+  are not rewritten for it.
+- **What stays open, and is nobody's task in this feature:** `read` of an image returns raw
+  bytes because `confinedReadOperations` omits `detectImageMimeType` (pre-existing, not
+  introduced here); `bash` is unconfined by design (`L5`); and the TOCTOU window between
+  the check and the tool's own syscall is documented in `sandbox.ts` rather than closed.
+- **The commit that holds the fix is `9e2fb32`**, the fifth on this branch. This entry is
+  the sixth commit and cannot name its own SHA for the reason `L6` records.
