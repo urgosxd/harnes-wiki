@@ -664,11 +664,15 @@ beside the two state machines.
 ]
 ```
 
-When that array is there, the detail pane renders **one row per dimension**, in the
-producer's order, with that dimension's own name, status badge and summary. No name is
-special-cased, so a dimension called `kg` or `qa` renders exactly like `wiki`, and a
-dimension whose status differs from the job's overall status keeps its own badge — a
-failed `kg` is visibly failed even when the compile reads `succeeded`.
+When that array is there, the detail pane renders the fixed `Ingest` / `Compile` columns
+and **one row per dimension** beside them, in the producer's order, with that dimension's
+own name, status badge and summary. One case is not drawn again: a dimension whose name
+merely repeats a fixed section's (`ingest` / `compile`, trimmed and case-insensitive) gets
+no row of its own, because that fixed column already carries it. Every other name is the
+payload's — repetition among dimensions included — so a dimension called `kg` or `qa`
+renders exactly like `wiki`, and a dimension whose status differs from the job's overall
+status keeps its own badge — a failed `kg` is visibly failed even when the compile reads
+`succeeded`.
 
 | Payload | What the detail pane shows |
 |---|---|

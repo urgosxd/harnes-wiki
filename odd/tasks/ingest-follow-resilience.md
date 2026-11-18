@@ -56,7 +56,7 @@ S10. The feature document and its census entry record the change.
 | T1 | Keep following through a transient read failure, bounded by the stall window | S1-S4, S9 | inline | 32aadee |
 | T2 | Refresh the list on an interval while the panel is open | S5, S9 | inline | a3d2ab4 |
 | T3 | Re-attach to the most recently updated running job on mount, once | S6-S8 | inline | 48109dc |
-| T4 | README, this document and the census entry | S10 | inline | carries this document |
+| T4 | README, this document and the census entry | S10 | inline | carries this document: 616e94b, d8e8208 |
 
 ## Log
 
@@ -128,3 +128,32 @@ outcome, with the `404`/`503` guards unchanged). One more file moved by a single
 `web/src/components/ingest-panel-controls.test.tsx` gained `setListLive: () => {}` in its
 `UseIngestResult` double, which is a compile fix for the new required member of that type
 and not a behaviour change. No other file was touched.
+
+L7 (the record corrected: a wrong trailer, the SHAs this row was missing, and a skip count that
+does not add up). Three facts, none of them smoothed:
+
+1. **The docs commit `616e94b` carries a wrong trailer, and it was dictated that way.** It reads
+   `Spec: odd/tasks/ingest-follow-resilience.md, T5, S8`. This document has tasks `T1`-`T4`: there
+   is no `T5`, and `S8` is the untouched-behaviour spec, not the README. The correction `616e94b`
+   actually holds — the `dimensions` union row in `README.md` — belongs to `T4` / `S10`. The
+   history KEEPS the wrong trailer, because rewriting a commit on `main` is worse than a recorded
+   correction, so the correct mapping is stated here and nowhere else: `616e94b` is `T4`, `S10`.
+   The commit that records this entry cites `T4, S10` for the same reason — it is the true pair.
+2. **`T4`'s row named neither `616e94b` nor the merge commit `d8e8208`.** Its Commit cell read
+   `carries this document`, which is a description and not a commit, so the row could not be
+   followed to the work it recorded. It now carries both SHAs, comma-separated as the other
+   documents write them, with that description left as it was.
+3. **A counting discrepancy, reported rather than smoothed.** A full `test/*.test.ts` run prints
+   43 root-level `# SKIP <reason>` lines — 47 in total, counting the four indented subtest skips —
+   while the runner's own summary says `# skipped 44` (and `# fail 0`, `# todo 0`, exit 0). It is a
+   counting convention, not a reason that went missing, and the arithmetic closes in both
+   directions: three of those printed lines are `documents.test.ts`'s three `type: 'suite'`
+   skips, counted in `# suites 13` and not in `# skipped`, and none of the three is an empty
+   suite — each `describe` declares its tests and is skipped as a group for lack of Postgres; the
+   four indented skips are `mcp-http-seam.test.ts` subtests, which are counted. So `44 = 40
+   root-level test skips + 4 subtest skips`. Nothing is both skipped and passing, because
+   `# pass 388` + `# skipped 44` = `# tests 432`. Every one of them is the same missing
+   dependency, in five wordings: `Postgres is not reachable (docker compose up -d postgres)` ×20,
+   `needs a reachable Postgres` ×11, `needs a reachable Postgres and Pi credentials` ×8,
+   `needs Postgres` ×7, and `no reachable dev database` ×1. So the 44 are 44 tests, and a reader
+   who counts printed lines should not conclude that a skip reason went missing.
