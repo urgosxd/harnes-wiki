@@ -1190,7 +1190,7 @@ cd server
 USERS=alice,bob \
 MCP_SERVER_URL=http://172.17.0.1:4173/mcp \
 DATABASE_URL=postgres://... \
-node scripts/provision-mcp.mjs            # add --dry-run to preview
+node scripts/provision-mcp.mjs            # --dry-run previews, --skip-drift-check skips the host check
 ```
 
 It takes the ids from `USERS` (or `CHAT_USERS=id:token,...`, or a legacy
@@ -1199,20 +1199,65 @@ the same as running it once, and a corrected `MCP_SERVER_URL` replaces the old
 address instead of adding a second server. It grants tools; it does not create
 users, because with `AUTH_MODE=open` a user is just a name.
 
+Before touching a row it asks the host `tools/list` and refuses to write a list the
+host cannot honour:
+
+```
+3 user(s)  provisioned with 12 tool(s).
+Host publishes 17; all 12 granted tool(s) exist. 5 left ungranted
+(compile_wiki, export_okf, ingest_job_delete, ingest_source, run_eval).
+```
+
+A granted name the host does not publish is an **error, before any write**: the
+runtime intersects `exposed_tools` with each server's own tool names, so such a row
+reads as granted in the database and grants nothing — the "provisioned 11 tool(s)"
+line that used to be printed was counting a capability that did not exist. Tools
+left ungranted are reported as a count, not a failure: withholding writes is the
+point of the list. `--skip-drift-check` exists for an unreachable host and says so
+on stderr when used.
+
+**The script ships inside the server image** (`server/Dockerfile`: `COPY scripts
+./scripts`), because a deployed host has no source tree. That copy is a fork: an
+image built before the grant list changed keeps the old list, and running it writes
+grants for tools the host no longer publishes. It cannot say so — the copy predates
+the check. So, in order of preference:
+
+1. **Run the one from the checkout.** It is the source of truth, and Postgres is
+   published on loopback for exactly this (see `docker-compose.prod.yml`).
+2. **Copy it into the running container** when there is no checkout on the host:
+   `docker cp server/scripts/provision-mcp.mjs agentdoc-server:/app/scripts/ && docker exec
+   -e USERS=… -e MCP_SERVER_URL=… agentdoc-server node /app/scripts/provision-mcp.mjs`.
+   This survives nothing: the next `up --force-recreate` or `pull` restores the
+   baked copy.
+3. **Rebuild and republish the image**, which is the only permanent fix for the baked
+   copy. See *Building and publishing both architectures*.
+
+Nothing runs the script automatically — not `entrypoint.sh`, not the compose file —
+so a stale copy only causes damage when a person runs it. That is the reason this is
+a documentation problem until the image is rebuilt, and a silent-write problem when
+it is not.
+
 `MCP_DEFAULT_STACK_ID` no longer appears in that command. It is **deprecated and
 ignored**: still tolerated, still warned about once per run, never read. A stored
 `tenant_mcp.default_stack_id` from an earlier run is left exactly as it is and is
 never consulted, so nothing needs cleaning up — and re-running this script neither
 resurrects nor destroys it.
 
-It grants eleven tools, all of them reads:
+It grants twelve tools, all of them reads:
 
-- **Stack reads** — `list_stacks`, `query_stack`. Both take a `stackId` and read exactly
-  one Stack, so the scope gate knows they are Stack-scoped by name.
+- **Stack reads** — `list_stacks`, `query_stack`, `traverse_stack`, `get_entities`.
+  All take a `stackId` and read exactly one Stack, so the scope gate knows they are
+  Stack-scoped by name. The last three are the graph dimension: entity lookup by
+  description, neighborhood traversal from a named entity, and inventory.
 - **Ingest jobs** — `ingest_jobs_list`, `ingest_job_status`. Status about work already
   running, never a new job.
 - **Wiki reads** — `query_wiki`, `search_pages`, `read_page`, `get_context_pack`,
-  `wiki_status`, `lint_wiki`, `verify_artifact`.
+  `wiki_status`, `lint_wiki`.
+
+`verify_artifact` used to be granted and no longer is: the host stopped publishing it
+(the 2026-11-18 build lists seventeen tools and that is not one of them), and a grant
+for a tool that does not exist is silently dropped by the intersection — granted in the
+database, nothing granted in practice.
 
 The five tools that **write** to the wiki host — `ingest_source`, `compile_wiki`,
 `export_okf`, `import_okf`, `run_eval` — stay out: exposing them would allow operations

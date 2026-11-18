@@ -34,3 +34,39 @@ export function warnDeprecatedDefaultStack(
   env?: NodeJS.ProcessEnv,
   write?: (line: string) => void,
 ): string | null;
+
+/**
+ * The tool names out of one `tools/list` answer, streamed or plain.
+ *
+ * Throws rather than returning an empty list: an unreadable or refused answer is not a
+ * host that publishes nothing, and the difference decides which side the operator is
+ * told to fix.
+ */
+export function parseToolsList(payload: string | object): {
+  tools: string[];
+  nextCursor: string | undefined;
+};
+
+/**
+ * Every tool name the host at `url` publishes, cursors followed.
+ *
+ * `fetchImpl` exists so a test can drive it without a server; the default is the global
+ * `fetch`. Throws when the host cannot be reached, naming `--skip-drift-check`.
+ */
+export function fetchHostTools(
+  url: string,
+  options?: {
+    fetchImpl?: typeof fetch;
+    headers?: Record<string, string>;
+    timeoutMs?: number;
+  },
+): Promise<string[]>;
+
+/**
+ * Refuse a grant list the host cannot honour. Throws naming every granted-but-absent
+ * tool; returns the counts otherwise, including the tools deliberately left ungranted.
+ */
+export function checkHostGrants(
+  published: readonly string[],
+  options?: { url?: string; granted?: readonly string[] },
+): { published: number; granted: number; dropped: string[] };

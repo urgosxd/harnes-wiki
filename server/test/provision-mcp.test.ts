@@ -4,7 +4,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  checkHostGrants,
   deprecatedDefaultStack,
+  fetchHostTools,
+  parseToolsList,
   TOOLS,
   warnDeprecatedDefaultStack,
 } from "../scripts/provision-mcp.mjs";
@@ -71,10 +74,13 @@ test("the parser trims, so a copied id is not a different one", () => {
  * The shipped role is a copy of a definition written against a host that had the wiki
  * tools, and its body names the tools it will call. The grant list lives in a
  * different file, in a different language, maintained by a different person's
- * attention — so the two drifted: `server/agents/wiki-agentic-search.md` instructs the
- * model to call `read_page` and `query_stack`, and neither was provisioned. A role
- * that asks for tools the agent does not have is the failure these tests exist to
- * make impossible to ship.
+ * attention — so the two drifted: `server/agents/wiki-agentic-search.md` instructed the
+ * model to call `read_page` and it was not provisioned. A role that asks for tools the
+ * agent does not have is the failure these tests exist to make impossible to ship.
+ *
+ * The role speaks in two dimensions, page reads and graph reads, and the guard below
+ * demands one name from each: a body that stopped naming either half would otherwise
+ * pass a subset check while pinning nothing.
  *
  * The comparison is a SUBSET, deliberately, not equality. The role needing six tools
  * says what the role must be able to do; it does not say the deployment may expose
@@ -192,4 +198,117 @@ test("no mutating tool is provisioned", () => {
     [],
     `these tools write to the wiki host and must not be granted: ${granted.join(", ")}`,
   );
+});
+
+test("the grant list has no duplicate names", () => {
+  // The reported count is `TOOLS.length`, and a duplicate would inflate it: ten distinct
+  // capabilities would read as eleven, which is the same lie the drift check exists to
+  // stop telling.
+  assert.deepEqual(
+    TOOLS.filter((name, index) => TOOLS.indexOf(name) !== index),
+    [],
+    "a name appears twice, so the reported tool count overstates what is granted",
+  );
+});
+
+/**
+ * WHY THESE EXIST
+ *
+ * The grant list is copied into the server image (`server/Dockerfile`: `COPY scripts
+ * ./scripts`), because a deployed host has no source tree. That copy is a fork in
+ * practice: the published image of 2026-11-18 still ships the eleven-name list with
+ * `verify_artifact`, and running it writes a grant for a tool the host does not publish.
+ * The runtime intersects `exposed_tools` with the host's own names, so the row is
+ * silently narrowed to nothing — "provisioned 11 tool(s)" with ten working tools, and no
+ * error anywhere.
+ *
+ * The fix is to stop guessing: ask the host what it publishes and refuse to write a list
+ * it cannot honour. The tests below pin the three ways that can go wrong — an SSE body
+ * read as "no tools", a refused `tools/list` read as "no tools", and a stale list written
+ * over a correct one.
+ */
+
+test("tools/list is read out of an SSE body and out of plain JSON", () => {
+  const sse = [
+    "event: message",
+    'data: {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"search_pages"},{"name":"query_stack"}]}}',
+    "",
+  ].join("\n");
+  assert.deepEqual(parseToolsList(sse), { tools: ["search_pages", "query_stack"], nextCursor: undefined });
+
+  const plain = JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: [{ name: "read_page" }] } });
+  assert.deepEqual(parseToolsList(plain), { tools: ["read_page"], nextCursor: undefined });
+});
+
+test("an error answer is raised, never read as a host with no tools", () => {
+  // A JSON-RPC error means the host refused. Calling that an empty tool set would blame
+  // the grant list for a host problem, and the operator would "fix" the wrong thing.
+  assert.throws(
+    () => parseToolsList('data: {"jsonrpc":"2.0","id":1,"error":{"message":"unauthorized"}}'),
+    /unauthorized/,
+  );
+  assert.throws(() => parseToolsList("data: not json at all"), /result\.tools/);
+});
+
+test("the host is asked with the headers the transport requires, and pages are followed", async () => {
+  const requests: Array<{ url: unknown; init: any }> = [];
+  const answers = [
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      result: { tools: [{ name: "search_pages" }], nextCursor: "page-2" },
+    },
+    { jsonrpc: "2.0", id: 2, result: { tools: [{ name: "query_stack" }, { name: "search_pages" }] } },
+  ];
+  const fetchImpl = async (url: unknown, init: any) => {
+    requests.push({ url, init });
+    return new Response(`event: message\ndata: ${JSON.stringify(answers[requests.length - 1])}\n\n`);
+  };
+
+  const names = await fetchHostTools("http://hub.test/mcp", { fetchImpl });
+
+  assert.deepEqual(names, ["search_pages", "query_stack"], "pages are merged and de-duplicated");
+  assert.equal(requests.length, 2, "a nextCursor must be followed, not dropped");
+  const first = requests[0]!.init;
+  assert.equal(first.method, "POST");
+  assert.match(String(first.headers.accept), /text\/event-stream/, "406 without it");
+  assert.equal(JSON.parse(first.body).method, "tools/list");
+  assert.deepEqual(JSON.parse(requests[1]!.init.body).params, { cursor: "page-2" });
+});
+
+test("an unreachable host names the escape hatch instead of throwing a fetch error", async () => {
+  const fetchImpl = async () => {
+    throw new Error("getaddrinfo ENOTFOUND hub.test");
+  };
+  await assert.rejects(
+    () => fetchHostTools("http://hub.test/mcp", { fetchImpl }),
+    (error: Error) => /ENOTFOUND/.test(error.message) && /--skip-drift-check/.test(error.message),
+  );
+});
+
+test("the stale-image list is refused, naming the tool that does not exist", () => {
+  // The exact measurement that motivated this check: the host publishes seventeen tools
+  // and none of them is `verify_artifact`; the baked script still grants it.
+  const stale = [...TOOLS, "verify_artifact"];
+
+  assert.throws(
+    () => checkHostGrants(TOOLS, { url: "http://hub.test/mcp", granted: stale }),
+    (error: Error) => {
+      assert.match(error.message, /does not publish verify_artifact/);
+      assert.match(error.message, /Nothing was written/);
+      assert.match(error.message, /baked into an older server image/);
+      return true;
+    },
+  );
+});
+
+test("the current list passes, and tools left ungranted are reported rather than failed", () => {
+  const published = [...TOOLS, "ingest_source", "compile_wiki", "run_eval"];
+  const report = checkHostGrants(published, { url: "http://hub.test/mcp" });
+
+  assert.equal(report.published, published.length);
+  assert.equal(report.granted, TOOLS.length);
+  // Writes are deliberately withheld. Reporting them is audit; failing on them would
+  // make the product's own read-only rule look like drift.
+  assert.deepEqual(report.dropped, ["compile_wiki", "ingest_source", "run_eval"]);
 });

@@ -33,6 +33,7 @@
  *   node scripts/provision-mcp.mjs
  *
  *   Add --dry-run to see what would change without writing.
+ *   Add --skip-drift-check only when the host is unreachable and the list is known current.
  */
 
 import { readFileSync } from "node:fs";
@@ -147,12 +148,23 @@ export const READ_ONLY_WIKI_TOOLS = [
   "get_context_pack",
   "wiki_status",
   "lint_wiki",
-  "verify_artifact",
+  // `verify_artifact` was granted here until the host stopped publishing it: the
+  // 2026-11-18 build lists 17 tools and none of them is that one. A grant for a tool the
+  // host does not expose is silently dropped by the intersection below, so it reads as
+  // "granted" in the database and grants nothing — the one state this list exists to keep
+  // out.
 ];
 
 export const STACK_TOOLS = [
   "list_stacks",
+  // The graph dimension's three reads. They are filed here rather than with the wiki
+  // reads for the same measured reason `query_stack` always was: each takes a `stackId`
+  // on every call and reads exactly one Stack, and this by-name list is what
+  // `src/pi/tenant-runtime.ts` consults to decide a tool is Stack-scoped before its
+  // schema is read.
   "query_stack",
+  "traverse_stack",
+  "get_entities",
   "ingest_jobs_list",
   "ingest_job_status",
 ];
@@ -166,6 +178,173 @@ export const TOOLS = [...STACK_TOOLS, ...READ_ONLY_WIKI_TOOLS];
  * not optional decoration.
  */
 export const HEADERS = { accept: "application/json, text/event-stream" };
+
+/**
+ * How long the drift check waits for the host before giving up.
+ *
+ * Short on purpose: this is a single `tools/list` round trip to a host on the same
+ * network, and a provisioning run that hangs for minutes on an unresponsive endpoint is
+ * worse than one that says it could not verify.
+ */
+export const TOOLS_LIST_TIMEOUT_MS = 10_000;
+
+/**
+ * The tool names out of one `tools/list` answer.
+ *
+ * ## Why this parses SSE by hand
+ *
+ * Streamable HTTP answers MCP over `text/event-stream`: the JSON-RPC body arrives after
+ * `data:` on its own line, sometimes after an `event: message` line, sometimes as plain
+ * JSON when the client did not ask for the stream. Both happen against the same server
+ * depending on the `Accept` header, so the parser accepts both rather than betting on
+ * one — and `HEADERS` above is what forces the stream, so the SSE branch is the one this
+ * script actually takes.
+ *
+ * An `error` member is raised, not swallowed: a `tools/list` that answers with an error
+ * object is a host refusing, and reporting "zero tools published" for it would produce
+ * exactly the wrong diagnosis.
+ */
+export function parseToolsList(payload) {
+  const text = typeof payload === "string" ? payload : JSON.stringify(payload);
+  const candidates = [];
+  if (/^(event|data):/m.test(text)) {
+    for (const line of text.split(/\r?\n/)) {
+      if (line.startsWith("data:")) candidates.push(line.slice("data:".length).trim());
+    }
+  } else {
+    candidates.push(text.trim());
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    let message;
+    try {
+      message = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (message?.error) {
+      throw new Error(
+        `tools/list answered with an error: ${message.error.message ?? JSON.stringify(message.error)}`,
+      );
+    }
+    const tools = message?.result?.tools;
+    if (Array.isArray(tools)) {
+      return {
+        tools: tools.map((tool) => tool?.name).filter((name) => typeof name === "string"),
+        nextCursor:
+          typeof message.result.nextCursor === "string" ? message.result.nextCursor : undefined,
+      };
+    }
+  }
+
+  throw new Error("tools/list answered without a result.tools array");
+}
+
+/**
+ * Every tool name the host publishes right now.
+ *
+ * This is the measurement the grant list has to be compared against. It exists because
+ * the alternative — trusting a list written months ago in a different repository — failed
+ * in production: the copy of this script baked into an older server image still granted
+ * `verify_artifact`, wrote eleven names, and the runtime's intersection dropped one of
+ * them without a word. The rows said "granted", the model had nothing.
+ *
+ * Cursors are followed because `tools/list` is paginated in the protocol, and a
+ * first-page-only read would report a truncated host as if it were the whole one. The
+ * bound is ten pages: a host that needs more than that is not something this script can
+ * verify honestly, and silently reading a fraction of it is the failure this whole
+ * function is here to prevent.
+ */
+export async function fetchHostTools(url, options = {}) {
+  const {
+    fetchImpl = fetch,
+    headers = HEADERS,
+    timeoutMs = TOOLS_LIST_TIMEOUT_MS,
+  } = options;
+
+  const names = [];
+  let cursor;
+  for (let page = 0; page < 10; page += 1) {
+    const request = { jsonrpc: "2.0", id: page + 1, method: "tools/list" };
+    if (cursor !== undefined) request.params = { cursor };
+
+    let response;
+    try {
+      response = await fetchImpl(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify(request),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (error) {
+      throw new Error(
+        `could not reach ${url} to verify the grant list: ${error instanceof Error ? error.message : String(error)}. ` +
+          "Pass --skip-drift-check only if you know the list is current.",
+      );
+    }
+
+    const body = await response.text();
+    if (!response.ok) {
+      throw new Error(`tools/list at ${url} answered HTTP ${response.status}: ${body.slice(0, 200)}`);
+    }
+
+    const parsed = parseToolsList(body);
+    names.push(...parsed.tools);
+    cursor = parsed.nextCursor;
+    if (cursor === undefined) break;
+  }
+
+  return [...new Set(names)];
+}
+
+/**
+ * Refuse a grant list the host cannot honour, and report the rest.
+ *
+ * ## Why this fails instead of warning
+ *
+ * `exposed_tools` is intersected with each connected server's own tool names
+ * (`src/pi/tenant-runtime.ts`). A granted name the host does not publish is therefore not
+ * a degraded capability — it is a row that claims a capability and grants nothing, and
+ * the operator sees a green "provisioned 11 tool(s)". The only honest state is: nothing
+ * was written, and here is what does not exist.
+ *
+ * ## Why the tools left ungranted are reported separately
+ *
+ * Dropping `ingest_source` or `compile_wiki` is a DECISION, not drift: the allowlist
+ * exists to leave writes out. Only the granted-but-absent direction is an error, so the
+ * other direction is printed as a count and a name list, for audit — never as a failure.
+ *
+ * ## The two causes, both named in the message
+ *
+ * A stale grant list is almost always a stale SCRIPT: `server/Dockerfile` ships
+ * `scripts/` into the image, so an image built before the list changed keeps pointing at
+ * the old one. Running that baked copy is what this check catches. The other cause is a
+ * host that changed under the list, which needs re-measuring, not retrying.
+ */
+export function checkHostGrants(published, options = {}) {
+  const { url = process.env.MCP_SERVER_URL, granted = TOOLS } = options;
+  const available = new Set(published);
+  const missing = granted.filter((name) => !available.has(name)).sort();
+
+  if (missing.length > 0) {
+    throw new Error(
+      `the MCP server at ${url ?? "(unknown url)"} does not publish ${missing.join(", ")}. ` +
+        "A grant for a tool the host does not expose is dropped silently when the tools are " +
+        "intersected, so writing it would record a capability nothing grants. Nothing was " +
+        "written. Either this grant list is stale — the copy baked into an older server image " +
+        "is the usual cause, so run provision-mcp.mjs from the checkout — or the host changed " +
+        "and TOOLS needs re-measuring against its tools/list.",
+    );
+  }
+
+  return {
+    published: available.size,
+    granted: granted.length,
+    dropped: [...available].filter((name) => !granted.includes(name)).sort(),
+  };
+}
+
 
 /**
  * The Stack every MCP call used to name.
@@ -216,6 +395,7 @@ export function warnDeprecatedDefaultStack(
 
 async function main() {
   const dryRun = process.argv.includes("--dry-run");
+  const skipDriftCheck = process.argv.includes("--skip-drift-check");
   const url = process.env.MCP_SERVER_URL?.trim();
   if (!url) {
     throw new Error(
@@ -231,6 +411,19 @@ async function main() {
   const users = loadRoster();
   // One deprecation line per run, before any row is touched, and never an error.
   warnDeprecatedDefaultStack();
+
+  // Measure the host BEFORE connecting to the database: a stale list must not overwrite
+  // rows that are currently correct, and `--dry-run` should refuse the same way a write
+  // would. The check is skipped only on request, and never silently.
+  let drift = null;
+  if (skipDriftCheck) {
+    process.stderr.write(
+      "provision-mcp: --skip-drift-check: the grant list is NOT being verified against the host.\n",
+    );
+  } else {
+    drift = checkHostGrants(await fetchHostTools(url), { url });
+  }
+
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
 
@@ -266,6 +459,16 @@ async function main() {
     process.stdout.write(
       `\n${users.length} user(s) ${dryRun ? "would be" : ""} provisioned with ${TOOLS.length} tool(s).\n`,
     );
+    if (drift) {
+      // The count alone was the misleading part of the old output: "11 tool(s)" looked
+      // like eleven capabilities when one of them did not exist. Say what was measured.
+      const dropped = drift.dropped.length
+        ? ` ${drift.dropped.length} left ungranted (${drift.dropped.join(", ")}).`
+        : " Nothing left ungranted.";
+      process.stdout.write(
+        `Host publishes ${drift.published}; all ${drift.granted} granted tool(s) exist.${dropped}\n`,
+      );
+    }
   } finally {
     await client.end();
   }
