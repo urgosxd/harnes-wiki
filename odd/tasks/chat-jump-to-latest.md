@@ -39,7 +39,7 @@ sidebar, and the existing `role_notice`/stack-notice rendering stay as they are.
 | --- | --- | --- | --- | --- |
 | T0 | Feature document and the census line it needs | S1-S7 | inline | `7fcd6d0` |
 | T1 | Jump to the last message when a conversation opens, per conversation | S2 | inline | `d608ae8` |
-| T2 | A jump control while scrolled up, hidden while at the bottom | S3-S4 | inline | `9b17046` |
+| T2 | A jump control while scrolled up, hidden while at the bottom | S3-S4 | inline | `9b17046`, `4dec3a7` |
 | T3 | Arriving content marks news for a scrolled-up reader and keeps following for a pinned one | S5-S6 | inline | `9b17046` |
 | T4 | Nothing else in the chat surface changes | S7 | inline | see L5 |
 
@@ -107,9 +107,14 @@ the reader's position when they scrolled away from the streaming answer" and "ho
 scrolled-up reader when the answer finishes". All three keep their names and assertions and
 are green; only their host changed (L5). One assertion inside the first was relaxed on
 purpose: it used to require EXACTLY one `scrollIntoView` call on mount, which is now two —
-opening the conversation and following the open stream both ask for the end — so it asserts
-that the end was requested, and the exact-count assertion after it (one request per streamed
-token) is untouched. `web/src/components/jump-to-latest.test.tsx` adds its own S6 case
+opening the conversation and following the open stream both ask for the end — and `4dec3a7`
+re-pinned it at the count that implies: `toHaveBeenCalledTimes(2)`, with
+`toHaveBeenNthCalledWith(1, { block: "end" })` and
+`toHaveBeenNthCalledWith(2, { block: "end" })` fixing which request is which — the open jump
+first, the follow second — so one missing or one extra request fails instead of passing as
+"the end was requested" (proven by mutation: removing the open jump reports
+`expected 2, got 1`). The exact-count assertion after it (one request per streamed token) is
+untouched. `web/src/components/jump-to-latest.test.tsx` adds its own S6 case
 ("keeps following the answer while the reader is at the bottom, with no control"), so the
 guard now exists in both files.
 
