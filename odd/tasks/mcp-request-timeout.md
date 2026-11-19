@@ -4,7 +4,7 @@ Every MCP tool call is killed at 30 s by a default nobody chose: the client libr
 `query_wiki` on a large Stack hit exactly that. The deadline becomes ours, configurable, and
 120 s by default.
 
-Status: in progress
+Status: complete
 Branch: fix/mcp-request-timeout
 Created: 2026-11-18
 Requester: the repo owner
@@ -60,12 +60,12 @@ thing), and every chat behaviour stay exactly as they are.
 
 | ID | Task | Spec | Route | Commit |
 | --- | --- | --- | --- | --- |
-| T0 | Feature document, plus the census line in `server/test/feature-doc.test.ts` | S1-S6 | inline | pending |
-| T1 | `MCP_REQUEST_TIMEOUT_MS` in `server/src/config.ts`: 120 s default, invalid fails the boot | S1, S3 | inline | pending |
-| T2 | `TenantRuntime.create` passes `requestTimeoutMs` to every `McpClient` | S2, S6 | inline | pending |
-| T3 | `server/src/main.ts` passes the value and logs the effective one once | S2, S4 | inline | pending |
-| T4 | `server/test/mcp-request-timeout.test.ts`: config, boot log, the slow/fast wiring pair, the tool error | S1-S5 | inline | pending |
-| T5 | `README.md`, `deploy/env.prod.example` and both compose files pass the variable through | S1, S4 | inline | pending |
+| T0 | Feature document, plus the census line in `server/test/feature-doc.test.ts` | S1-S6 | inline | `0df9549` |
+| T1 | `MCP_REQUEST_TIMEOUT_MS` in `server/src/config.ts`: 120 s default, invalid fails the boot | S1, S3 | inline | `b23ee58` |
+| T2 | `TenantRuntime.create` passes `requestTimeoutMs` to every `McpClient` | S2, S6 | inline | `b23ee58` |
+| T3 | `server/src/main.ts` passes the value and logs the effective one once | S2, S4 | inline | `b23ee58` |
+| T4 | `server/test/mcp-request-timeout.test.ts`: config, boot log, the slow/fast wiring pair, the tool error | S1-S5 | inline | `b23ee58` |
+| T5 | `README.md`, `deploy/env.prod.example` and both compose files pass the variable through | S1, S4 | inline | `55c2e50` |
 
 ## Log
 
@@ -104,3 +104,23 @@ that a timeout surfaces as a tool error; it does not prove how a particular prod
 behaves under a long query. Per-tool timeouts (a different deadline for `query_wiki` than
 for `list_stacks`) are OUT OF SCOPE and named as such: one deadline for one runtime is the
 request, and a per-tool table would be a policy nobody asked for.
+
+L5 (evidence, GREEN). `cd server && node --experimental-strip-types --test
+test/mcp-request-timeout.test.ts` → 11 tests, 11 pass, 0 fail, 0 skipped: config default
+and variable, blank means unset, six invalid values refused, the boot log reporting 120000
+and 45000 once each, the invalid boot exiting 1 with the fatal line and NO timeout line, the
+runtime reporting the effective deadline (explicit and default), the slow tool timing out at
+250 ms with `MCP request timed out after 250ms` and `isError: true`, and the same call
+succeeding at 10 s. The boot cases spawn `src/main.ts` with no `DATABASE_URL`, so a real
+startup reports configuration and stops at the first check that fails — no container, no
+Postgres, no model. Full server suite: 447 tests, 403 pass, 0 fail, 44 skipped (every skip
+is Postgres-gated: "needs a reachable Postgres" and its variants, unchanged by this work).
+`npm run typecheck` clean; `web` suite 358 pass, 0 fail; `feature-doc.test.ts` 44 pass.
+
+L6 (slice boundary, and what the RED was). The feature arrived in four slices: the document
+plus its census line, the behaviour with its tests, the operator-facing docs, and this
+closing record. The RED was observed on the behaviour slice before any source changed: 10
+of the 11 tests failed against `main`'s code. The eleventh — "the same slow tool succeeds
+when the deadline is longer" — passes before the fix by accident, because the library's own
+30 s covers a 1.5 s call; it is the control half of the pair, and it is the pair together
+that proves the number reaches `callTool`, not either half alone.
