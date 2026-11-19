@@ -41,6 +41,15 @@ export interface Config {
   /** `undefined` when this deployment consumes no external ingest service. */
   ingestApi: ExternalApiConfig | undefined;
   /**
+   * Deadline for ONE MCP tool request, in milliseconds.
+   *
+   * Ours, not the MCP client library's: its default is 30 s
+   * (`pi-mcp/dist/client.js:3`), which measured too short for `query_wiki` on a large
+   * Stack. Kept next to `ingestApi` because it is the same kind of fact — a deadline for
+   * one call to another service — even though the two values are unrelated.
+   */
+  mcpRequestTimeoutMs: number;
+  /**
    * Absolute origin THIS server is reachable at FROM the ingest service, e.g.
    * `http://server:8080`.
    *
@@ -74,6 +83,38 @@ const THINKING_LEVELS: readonly ThinkingLevelName[] = [
 ];
 
 export class ConfigError extends Error {}
+
+/**
+ * The MCP request deadline when nothing is configured.
+ *
+ * 120 s, and a DEFAULT rather than a constant: how long a wiki query legitimately takes
+ * depends on the Stack, so the number has to be changeable from the environment. Exported
+ * because `TenantRuntime.create` uses it as its own fallback — one number, one place, so an
+ * omitted argument cannot quietly restore the library's 30 s.
+ */
+export const DEFAULT_MCP_REQUEST_TIMEOUT_MS = 120_000;
+
+/**
+ * Read the MCP request deadline from the environment.
+ *
+ * Unset, empty and whitespace-only mean "use the default", the way every other optional
+ * value here is read. Anything else must be a positive finite number, and an invalid value
+ * FAILS the boot instead of falling back: a fallback would leave an operator believing they
+ * had set 300 s while every tool died at 120 s, which is the same invisible-default class of
+ * failure this value exists to remove. It also follows the rule this file opens with —
+ * "Configuration is read once at startup and validated. Nothing here has a silent default" —
+ * and matches `INGEST_API_TIMEOUT_MS`, which throws for the same reason.
+ */
+export function parseMcpRequestTimeoutMs(raw: string | undefined): number {
+  const value = raw?.trim();
+  if (!value) return DEFAULT_MCP_REQUEST_TIMEOUT_MS;
+
+  const timeoutMs = Number(value);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new ConfigError(`MCP_REQUEST_TIMEOUT_MS must be a positive number, got "${value}"`);
+  }
+  return timeoutMs;
+}
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
   const value = env[name]?.trim();
@@ -208,6 +249,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       urlVar: "INGEST_API_BASE_URL",
       timeoutVar: "INGEST_API_TIMEOUT_MS",
     }),
+    mcpRequestTimeoutMs: parseMcpRequestTimeoutMs(env.MCP_REQUEST_TIMEOUT_MS),
     publicBaseUrl: parsePublicBaseUrl(env.PUBLIC_BASE_URL),
     // Pi resolves user-scope resources from $HOME/.agents, so the agents directory
     // sits beside the skills one the image ships. An explicit path wins, which is
