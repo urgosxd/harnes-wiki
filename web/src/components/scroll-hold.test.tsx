@@ -89,8 +89,21 @@ function openChat(initial: ChatState) {
 describe("MessageList scroll holding", () => {
   it("follows the answer while the reader is pinned to the bottom", () => {
     const container = openChat(state());
-    // The existing behaviour is kept: an open stream starts at the end.
-    expect(scrollIntoView).toHaveBeenCalledWith({ block: "end" });
+    // The existing behaviour is kept: an open stream starts at the end, and it now asks
+    // for that twice — exactly twice. Opening the conversation places the viewport on its
+    // last message (the placement layout effect, S2), and the stream that is already
+    // running follows it there (S6). The scenario is deterministic, so the count is
+    // pinned instead of "the end was requested": one mount, one conversation, no timers,
+    // no frames arriving mid-test, and the two state writes the placement makes are both
+    // no-ops on the state they would set. A third request, or a missing one, is a change
+    // of behaviour and must fail here rather than pass as "something scrolled".
+    expect(scrollIntoView).toHaveBeenCalledTimes(2);
+    // Both requests carry the same argument, so the argument pins what each asks for —
+    // the end, with no `behavior: "smooth"` (the slide S2 forbids) — and the two
+    // `toHaveBeenNthCalledWith` calls fix which request is which: the open jump first,
+    // the follow second.
+    expect(scrollIntoView).toHaveBeenNthCalledWith(1, { block: "end" });
+    expect(scrollIntoView).toHaveBeenNthCalledWith(2, { block: "end" });
 
     scrollIntoView.mockClear();
     container.rerender(state({ streamingText: "partial answer" }));
