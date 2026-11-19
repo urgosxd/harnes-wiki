@@ -629,7 +629,27 @@ a retry — so the view is two columns and never one status.
 
 Polling backs off from 250 ms to 2 s and stops as soon as both dimensions settle;
 the service streams nothing. A `409 busy` is surfaced as a retry signal, not a
-failure.
+failure, and a read that fails is retried instead of ending the follow (below).
+
+### Staying attached: a reload, a blip and the list
+
+The panel is a window on the job, not a photograph of it, so three things happen
+without being asked (`S2`-`S7` of `odd/tasks/ingest-follow-resilience.md`).
+
+| Situation | What happens |
+|---|---|
+| A read throws, or answers a status other than `404`/`503` | Retried on the same 250 ms → 2 s backoff. The last snapshot stays on screen and the notice says it is reconnecting; the next good read clears it |
+| No read succeeds for 90 s | The follow stops with `reason: "error"` and a notice naming how long it went unanswered. The bound is the SAME `STALL_AFTER_MS` window that decides an unmoving job is orphaned — one notion of dead, not two |
+| A `404` after a snapshot, or a `503` | Unchanged, on purpose: an expired job and a host that does not track jobs are ANSWERS, not blips, and retrying them would turn them into spinners |
+| The panel is open | The **Recent** list is re-read every 5 s. A tick that lands on a read still in flight is dropped rather than queued, and nothing is read while the link names no Stack |
+| The panel opens with nothing being followed | The most recently updated job that still has work ahead of it is followed automatically — once per visit |
+| The user follows another job, stops the follow, or the adopted job ends | The automation is over for that visit. The screen is the user's |
+
+The re-attach asks the list which job is most recently running: there is no `job=`
+parameter and nothing is stored, so a single job is still not shareable by link, and a
+page cannot follow one it was never told about. A job whose ingest failed while its
+compile still reads `queued` is not adopted either — nothing will ever start that
+compile, so following it would only delay the same bad news.
 
 ### Per-dimension results
 
@@ -644,15 +664,19 @@ beside the two state machines.
 ]
 ```
 
-When that array is there, the detail pane renders **one row per dimension**, in the
-producer's order, with that dimension's own name, status badge and summary. No name is
-special-cased, so a dimension called `kg` or `qa` renders exactly like `wiki`, and a
-dimension whose status differs from the job's overall status keeps its own badge — a
-failed `kg` is visibly failed even when the compile reads `succeeded`.
+When that array is there, the detail pane renders the fixed `Ingest` / `Compile` columns
+and **one row per dimension** beside them, in the producer's order, with that dimension's
+own name, status badge and summary. One case is not drawn again: a dimension whose name
+merely repeats a fixed section's (`ingest` / `compile`, trimmed and case-insensitive) gets
+no row of its own, because that fixed column already carries it. Every other name is the
+payload's — repetition among dimensions included — so a dimension called `kg` or `qa`
+renders exactly like `wiki`, and a dimension whose status differs from the job's overall
+status keeps its own badge — a failed `kg` is visibly failed even when the compile reads
+`succeeded`.
 
 | Payload | What the detail pane shows |
 |---|---|
-| `dimensions` is usable | One row per dimension, and the fixed `Ingest` / `Compile` columns are not drawn beside them |
+| `dimensions` is usable | The fixed `Ingest` / `Compile` columns, always, plus one row per dimension beside them. The one row not drawn twice is a dimension that merely repeats a fixed section's name (`ingest` / `compile`), which the fixed column already carries |
 | Absent, empty, or with nothing in it readable | The fixed `Ingest` / `Compile` columns, exactly as before |
 
 The array is a **report**, not a lifecycle. It never decides when polling stops: a job
@@ -1049,6 +1073,14 @@ Text is rendered as text, never as HTML: model output is untrusted input.
 The SSE parser is hand-written because a chunk boundary can fall inside a frame,
 inside a JSON string, or between the two newlines that end a record; assuming one
 chunk equals one frame works in development and corrupts long replies.
+
+A conversation opens at its LAST message, and the transcript keeps following an
+answer only while the reader is at the bottom: scrolling up is respected, and
+content that arrives while they are away is announced by a control named "Jump to
+latest message" instead of moving them. The rule is a pure position check with a
+24px tolerance in `web/src/lib/stick-to-bottom.ts`, which is why it is testable
+without a browser; whether the browser actually lands on the pixels it asked for
+is not, so that part is eyeballed.
 
 Vite is pinned to 7.x because `@vitejs/plugin-react` does not support Vite 8 yet.
 Installing Vite 8 fails on a peer conflict; do not paper over it with

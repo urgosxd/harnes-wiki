@@ -82,7 +82,7 @@ describe("ActivityList", () => {
 describe("MessageList with activity", () => {
   // The transcript needs the scroll container that holds it. jsdom has no
   // layout, so these rendering checks pass a ref that is never attached.
-  const noScroll: RefObject<HTMLElement | null> = { current: null };
+  const noEnd: RefObject<HTMLDivElement | null> = { current: null };
 
   function state(overrides: Partial<ChatState> = {}): ChatState {
     return { ...initialChatState, ...overrides };
@@ -91,7 +91,7 @@ describe("MessageList with activity", () => {
   it("shows the activity while the answer streams", () => {
     render(
       <MessageList
-        scrollRef={noScroll}
+        endRef={noEnd}
         state={state({
           status: "streaming",
           pendingUserText: "hi",
@@ -104,14 +104,14 @@ describe("MessageList with activity", () => {
   });
 
   it("shows the working indicator before any text arrives", () => {
-    render(<MessageList scrollRef={noScroll} state={state({ status: "streaming", pendingUserText: "hi" })} />);
+    render(<MessageList endRef={noEnd} state={state({ status: "streaming", pendingUserText: "hi" })} />);
     expect(screen.getByText("Working…")).toBeDefined();
   });
 
   it("does not duplicate a thinking row with the answer", () => {
     render(
       <MessageList
-        scrollRef={noScroll}
+        endRef={noEnd}
         state={state({
           status: "streaming",
           streamingText: "the answer",
@@ -127,7 +127,7 @@ describe("MessageList with activity", () => {
   it("keeps the activity after the turn finishes", () => {
     render(
       <MessageList
-        scrollRef={noScroll}
+        endRef={noEnd}
         state={state({
           status: "idle",
           messages: [{ id: "m1", role: "assistant", text: "done" }],

@@ -1,4 +1,4 @@
-import { useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 import { describeJob, isJobSettled } from "../lib/ingest.ts";
 import { UNRESOLVED_STACK_ID_NOTICE, type UseIngestResult } from "../lib/use-ingest.ts";
 import { IngestJobView } from "./IngestJobView.tsx";
@@ -38,6 +38,18 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
   // The job the user is looking at. Read once so the controls below cannot act on a
   // different id than the one on screen.
   const active = ingest.activeJob;
+
+  /*
+    The list refreshes on an interval only while this panel is on screen. The hook cannot
+    know: it is created above the view switch, on purpose, so a follow survives a trip to
+    the chat tab — which is exactly why the interval has to be reported from here, and
+    turned off again on the way out.
+  */
+  const setListLive = ingest.setListLive;
+  useEffect(() => {
+    setListLive(true);
+    return () => setListLive(false);
+  }, [setListLive]);
 
   const pick = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];

@@ -27,6 +27,19 @@
  * There is no SSE and no WebSocket. Polling starts at 250 ms and backs off to at
  * most 2 s, and it stops only when BOTH dimensions are terminal-or-absent.
  *
+ * ## A blip is not an ending
+ *
+ * A read that throws, or that answers a status this contract does not name, is retried on
+ * the same backoff instead of ending the follow: one dropped connection must not freeze a
+ * panel on a job the server is still running, which is exactly what it used to do. The
+ * retry is bounded by EVIDENCE rather than hope — the same `STALL_AFTER_MS` window that
+ * decides a job stopped moving also decides that nothing has answered for too long, so
+ * this module keeps one notion of dead, not two.
+ *
+ * `404` and `503` are not blips. They are answers, they keep their meanings, and folding
+ * them into the retry would turn "this job expired" or "this host does not track jobs"
+ * into a spinner.
+ * *
  * ## The payload's `dimensions` array is a report, not a lifecycle
  *
  * The producer also publishes per-dimension results (`wiki`, `kg`, …). Those are RENDERED
@@ -204,8 +217,9 @@ export interface JobDimensionRow {
  * a non-string or blank summary drops the summary line and keeps the dimension: hiding a
  * reported result because of its prose would be the opposite of the rule.
  *
- * An empty result means "render the fixed pair instead" — the caller's decision, made on
- * `length === 0`, so an empty array and an unusable one are the same fact: nothing to show.
+ * An empty result means "nothing to add": the fixed `ingest`/`compile` sections render on
+ * every job regardless, as the union the panel is built on - so an empty array and an
+ * unusable one are the same fact here: no extra row, and nothing lost.
  *
  * Names are NOT deduplicated and NOT reordered: repetition and order are the payload's.
  */
@@ -428,6 +442,21 @@ export interface PollOutcome {
   message?: string;
 }
 
+/**
+ * One read that failed while the loop keeps going.
+ *
+ * This is the loop's own description of a blip, not a verdict: nothing here says the job
+ * is dead, and a surface must not read it that way. `status` is absent when the request
+ * never got an answer at all (a thrown transport error), which is a different fact from a
+ * host that answered `502`.
+ */
+export interface PollTransientFailure {
+  /** What the failed read said, in the words the loop would otherwise have stopped with. */
+  message: string;
+  /** The status the host answered, when it answered one. */
+  status?: number;
+}
+
 export interface PollOptions {
   baseUrl?: string;
   /** Which Stack to read. Absent means the endpoint's own. */
@@ -437,6 +466,15 @@ export interface PollOptions {
   signal?: AbortSignal;
   /** Called with every snapshot, so the UI updates as it polls. */
   onUpdate: (job: IngestJob) => void;
+  /**
+   * Called for every read that fails while the loop KEEPS GOING.
+   *
+   * The counterpart of `onUpdate`: that one reports a snapshot, this one reports the
+   * absence of one, so a surface can say it is reconnecting without waiting for the loop
+   * to end. Never called for the read that exhausts the window (that one becomes the
+   * outcome) and never for `404`/`503`, which end the follow with their own reasons.
+   */
+  onTransient?: (failure: PollTransientFailure) => void;
   /** Injection seam for tests; defaults to a real timer. */
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** First delay, exposed so a test can prove the curve without waiting. */
@@ -489,6 +527,43 @@ export async function pollJob(jobId: string, options: PollOptions): Promise<Poll
    * 404 that PERSISTS is still expired, so the tolerance is bounded.
    */
   let missingReads = 0;
+  /**
+   * When the current run of failed reads began, and what the last of them said.
+   *
+   * Measured on this client's clock, like the stall window: how long the panel has been
+   * unable to READ the job is not a property of the job. Cleared by the first good
+   * snapshot, so a blip costs nothing and a host that never answers ends the follow when
+   * the window is up.
+   */
+  let unansweredSince: number | undefined;
+  let lastFailure = "";
+
+  /**
+   * Record one failed read and say whether the budget for it is spent.
+   *
+   * Returns `undefined` to keep trying, or the outcome to stop with. The bound is
+   * `stallAfterMs` — the SAME window that decides an unmoving snapshot is orphaned —
+   * because "nothing moved for long enough" and "nothing answered for long enough" are
+   * the same kind of dead, and a second constant would be a second opinion about it.
+   */
+  const noteTransient = (failure: PollTransientFailure): PollOutcome | undefined => {
+    const now = Date.now();
+    if (unansweredSince === undefined) unansweredSince = now;
+    const elapsed = now - unansweredSince;
+    lastFailure = failure.message;
+    if (elapsed < stallAfterMs) {
+      options.onTransient?.(failure);
+      return undefined;
+    }
+    return {
+      reason: "error",
+      message:
+        `No read of this job has succeeded for ${describeWait(elapsed)}, so following it ` +
+        `has stopped. The last state it reported is shown below; whether it is still ` +
+        `running is unknown. The last attempt said: ${lastFailure}`,
+      ...(last ? { job: last } : {}),
+    };
+  };
 
   for (;;) {
     if (options.signal?.aborted) return { reason: "aborted", ...(last ? { job: last } : {}) };
@@ -503,11 +578,14 @@ export async function pollJob(jobId: string, options: PollOptions): Promise<Poll
       });
     } catch (error) {
       if (isAbort(error)) return { reason: "aborted", ...(last ? { job: last } : {}) };
-      return {
-        reason: "error",
-        message: messageOf(error),
-        ...(last ? { job: last } : {}),
-      };
+      // A transport that never answered is a blip, not a verdict: keep the last snapshot
+      // on screen and keep asking, until the window above runs out.
+      const stop = noteTransient({ message: messageOf(error) });
+      if (stop) return stop;
+      if (options.signal?.aborted) return { reason: "aborted", ...(last ? { job: last } : {}) };
+      await sleep(delay, options.signal);
+      delay = nextPollDelay(delay);
+      continue;
     }
 
     if (response.status === 503) {
@@ -541,20 +619,31 @@ export async function pollJob(jobId: string, options: PollOptions): Promise<Poll
     }
 
     if (!response.ok) {
+      // Any other status is treated as a blip too — a proxy's 502, a 429, a host that is
+      // restarting. It is NOT a `404` (this job is gone) and not a `503` (this host does
+      // not track jobs), both of which are answered above and stop the follow: those are
+      // facts, and retrying them would be pretending not to have heard them.
       const body = await safeJson(response);
-      return {
-        reason: "error",
+      const stop = noteTransient({
+        status: response.status,
         message:
           typeof body?.message === "string"
             ? body.message
             : `The server answered ${response.status}.`,
-        ...(last ? { job: last } : {}),
-      };
+      });
+      if (stop) return stop;
+      if (options.signal?.aborted) return { reason: "aborted", ...(last ? { job: last } : {}) };
+      await sleep(delay, options.signal);
+      delay = nextPollDelay(delay);
+      continue;
     }
 
     const job = (await response.json()) as IngestJob;
     const moved = !isUnchanged(last, job);
     last = job;
+    // A good read is the end of whatever run of failures preceded it.
+    unansweredSince = undefined;
+    lastFailure = "";
     options.onUpdate(job);
 
     if (isJobSettled(job)) return { reason: "settled", job };
@@ -614,4 +703,18 @@ function isAbort(error: unknown): boolean {
 function messageOf(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+/**
+ * How long a read has been failing, in the units a person reads.
+ *
+ * Exact rather than rounded up to something reassuring: the number is the whole point of
+ * the sentence it appears in, since it is the evidence that the retry was bounded.
+ */
+function describeWait(ms: number): string {
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds} s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds === 0 ? `${minutes} min` : `${minutes} min ${seconds} s`;
 }

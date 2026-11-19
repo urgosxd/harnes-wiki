@@ -189,6 +189,59 @@ body {
   min-height: 0;
 }
 
+/* The transcript and the control that overlays it, so the control can sit above the
+   last line without being part of what scrolls. */
+.chat__transcript {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* The way back to the last message. Painted only while the reader is away from the
+   bottom, so there is nothing here to keep aligned when it is absent. */
+.chat__jump {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 0.18);
+}
+
+.chat__jump:hover,
+.chat__jump[data-new="true"] {
+  border-color: var(--accent);
+}
+
+.chat__jump:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Something arrived while the reader was away: said in the accent the button takes,
+   never as a second floating badge. */
+.chat__jump-new {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .chat__hint {
   color: var(--text-dim);
   text-align: center;

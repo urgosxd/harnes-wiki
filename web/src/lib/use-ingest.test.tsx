@@ -1,8 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { ApiClient } from "./api.ts";
 import type { IngestJob } from "./ingest.ts";
-import { useIngest } from "./use-ingest.ts";
+import { POLL_MAX_MS, pollJob } from "./ingest.ts";
+import { noticeForOutcome, useIngest } from "./use-ingest.ts";
 
 /**
  * WHY THESE ASSERTIONS
@@ -567,5 +568,495 @@ describe("useIngest: a 409 that is not a job-control refusal keeps its own sente
       kind: "error",
       message: ALREADY_RUNNING_SENTENCE,
     }));
+  });
+});
+
+/**
+ * THE FOLLOW MUST SURVIVE A BLIP — AND MUST NOT SURVIVE IT FOREVER
+ *
+ * The defect: a `fetch` that threw (the `catch` around the read in `ingest.ts`) and any
+ * status other than `503`/`404` both `return`ed out of the loop with `reason: "error"`.
+ * One blip therefore froze the panel while the job kept running on the server, and the
+ * only recovery was a reload.
+ *
+ * The fix has to be bounded or "keep trying" becomes an endless spinner against a host
+ * that will never answer, so the bound is the window the loop already had
+ * (`STALL_AFTER_MS`) rather than a second constant. Both halves are asserted here with an
+ * injected `sleep` and an injected `Date.now`: no test waits 90 seconds, and no test reads
+ * a wall clock to decide whether the loop is bounded.
+ *
+ * `404` after a snapshot and `503` are the regression guards: they are NOT blips, and
+ * folding them into the retry would turn "this job expired" into a spinner.
+ */
+
+/** A job snapshot the loop can advance through: `updatedAt` is what makes it move. */
+function pollSnapshot(updatedAt: string, settled = false): IngestJob {
+  return {
+    id: "job_1",
+    source: "https://example.com/a",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt,
+    ingest: { status: settled ? "succeeded" : "running", stage: "committing", attempts: [] },
+    compile: settled
+      ? { status: "succeeded", progress: null }
+      : { status: "queued", progress: null },
+  };
+}
+
+function reply(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+describe("pollJob: a transient read failure is retried, not fatal (S2)", () => {
+  it("keeps the last snapshot and continues after a network error", async () => {
+    const seen: string[] = [];
+    const failures: string[] = [];
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      if (calls === 1) return reply(pollSnapshot("t1"));
+      if (calls === 2 || calls === 3) throw new TypeError("Failed to fetch");
+      return reply(pollSnapshot("t2", true));
+    }) as unknown as typeof fetch;
+
+    const outcome = await pollJob("job_1", {
+      headers: () => ({}),
+      fetchImpl,
+      sleep: async () => {},
+      onUpdate: (job) => seen.push(job.updatedAt),
+      onTransient: (failure) => failures.push(failure.message),
+    });
+
+    // The follow did not end at the first failure: the snapshots arrive in order, and
+    // the loop stops only because the job settled.
+    expect(seen).toEqual(["t1", "t2"]);
+    expect(failures).toEqual(["Failed to fetch", "Failed to fetch"]);
+    expect(calls).toBe(4);
+    expect(outcome.reason).toBe("settled");
+    expect(outcome.job?.updatedAt).toBe("t2");
+  });
+
+  it("retries a status that is neither 404 nor 503, and says what it said", async () => {
+    let calls = 0;
+    const failures: { message: string; status?: number }[] = [];
+    const fetchImpl = (async () => {
+      calls += 1;
+      if (calls === 1) return reply({ error: { code: "upstream", message: "no" } }, 502);
+      return reply(pollSnapshot("t2", true));
+    }) as unknown as typeof fetch;
+
+    const outcome = await pollJob("job_1", {
+      headers: () => ({}),
+      fetchImpl,
+      sleep: async () => {},
+      onUpdate: () => {},
+      onTransient: (failure) => failures.push(failure),
+    });
+
+    // The status travels with the failure, and the sentence is the one this loop has
+    // always produced for a bare status — no new copy for a case that has words.
+    expect(failures).toEqual([{ status: 502, message: "The server answered 502." }]);
+    expect(calls).toBe(2);
+    expect(outcome.reason).toBe("settled");
+  });
+
+  it("stops with `error` naming the wait once no read succeeds for the stall window (S3)", async () => {
+    // The clock is driven, not slept: `Date.now` is the loop's own measure of how long it
+    // has gone unanswered, and the injected `sleep` advances it by exactly the delay the
+    // backoff asked for.
+    let now = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      throw new TypeError("Failed to fetch");
+    }) as unknown as typeof fetch;
+
+    try {
+      const outcome = await pollJob("job_1", {
+        headers: () => ({}),
+        fetchImpl,
+        // The whole curve at the ceiling, so the elapsed time is arithmetic rather than an
+        // artefact of how the backoff happened to accumulate.
+        initialDelay: POLL_MAX_MS,
+        sleep: async (ms) => {
+          now += ms;
+        },
+        onUpdate: () => {},
+      });
+
+      expect(outcome.reason).toBe("error");
+      // The bound is the stall window this loop already had, and the notice names it: 45
+      // waits of 2 s, and the 46th read is the one that ends the follow.
+      expect(outcome.message).toContain("No read of this job has succeeded for 1 min 30 s");
+      expect(calls).toBe(46);
+      expect(now).toBe(90_000);
+      // Nothing was invented on the way out: no snapshot was ever read, so none is shown.
+      expect(outcome.job).toBeUndefined();
+
+      // And it lands on the existing notice channel, not on a new one (S9).
+      expect(noticeForOutcome(outcome)).toEqual({ kind: "error", message: outcome.message });
+    } finally {
+      clock.mockRestore();
+    }
+  });
+});
+
+describe("pollJob: the two answers that are NOT blips keep their meaning (S4)", () => {
+  it("ends as `unknown` when a 404 arrives after a snapshot exists", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      if (calls === 1) return reply(pollSnapshot("t1"));
+      return reply({ error: { code: "job_not_found" } }, 404);
+    }) as unknown as typeof fetch;
+
+    const outcome = await pollJob("job_1", {
+      headers: () => ({}),
+      fetchImpl,
+      sleep: async () => {},
+      onUpdate: () => {},
+    });
+
+    // A snapshot that arrived and then vanished is EXPIRED, not late: the leading-404
+    // tolerance is only for a job nothing has been seen of yet.
+    expect(outcome.reason).toBe("unknown");
+    expect(calls).toBe(2);
+    expect(outcome.job?.updatedAt).toBe("t1");
+  });
+
+  it("ends as `unavailable` on a 503, even after a snapshot", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      if (calls === 1) return reply(pollSnapshot("t1"));
+      return reply({ error: { code: "jobs_unavailable" } }, 503);
+    }) as unknown as typeof fetch;
+
+    const outcome = await pollJob("job_1", {
+      headers: () => ({}),
+      fetchImpl,
+      sleep: async () => {},
+      onUpdate: () => {},
+    });
+
+    expect(outcome.reason).toBe("unavailable");
+    expect(calls).toBe(2);
+  });
+});
+
+describe("useIngest: a blip reads as reconnecting, not as a failed job (S2)", () => {
+  it("keeps the last snapshot on screen, says it is reconnecting, and clears itself", async () => {
+    let polls = 0;
+    const fetchImpl = (async (url: string) => {
+      const href = String(url);
+      if (href.includes("/ingest/jobs/")) {
+        polls += 1;
+        if (polls === 1) return reply(pollSnapshot("t1"));
+        if (polls === 2 || polls === 3) throw new TypeError("Failed to fetch");
+        // Still moving, so the follow continues on its own and the notice has to be able
+        // to disappear without the user doing anything.
+        return reply(pollSnapshot(`t${polls}`));
+      }
+      if (href.endsWith("/documents")) return reply({ documents: [] });
+      if (href.endsWith("/stacks")) return reply({ stackIds: ["A"] });
+      return reply({ jobs: [] });
+    }) as unknown as typeof fetch;
+    const client = new ApiClient({
+      baseUrl: "/api",
+      headers: () => ({ "x-user-id": "u" }),
+      fetchImpl,
+    });
+
+    const view = renderHook(() => useIngest({ client, stackId: "A" }));
+    await waitFor(() => expect(view.result.current.loadingList).toBe(false));
+
+    act(() => view.result.current.follow("job_1"));
+    await waitFor(() => expect(view.result.current.activeJob?.updatedAt).toBe("t1"));
+
+    await waitFor(() => expect(view.result.current.pollNotice?.kind).toBe("reconnecting"));
+    // A blip is not a reason to blank the pane or to claim the job failed: the last
+    // snapshot stays, and the loop is still running.
+    expect(view.result.current.activeJob?.updatedAt).toBe("t1");
+    expect(view.result.current.following).toBe(true);
+
+    // The next good read continues the sequence and clears the notice by itself.
+    await waitFor(
+      () => expect(view.result.current.activeJob?.updatedAt).toBe("t4"),
+      { timeout: 5_000 },
+    );
+    expect(view.result.current.pollNotice).toBeNull();
+    expect(view.result.current.following).toBe(true);
+
+    view.result.current.stopFollowing();
+    await waitFor(() => expect(view.result.current.following).toBe(false));
+  });
+});
+
+/**
+ * THE LIST REFRESHES ON ITS OWN, WHILE THE PANEL IS ON SCREEN
+ *
+ * The defect: `refreshList` was wired to mount and to the actions, and `web/src` had no
+ * `setInterval` at all. A job that appeared in Recent stayed absent, and a row that
+ * finished stayed "live", until somebody clicked Refresh — the list was a photograph.
+ *
+ * Three properties are asserted, and the third is the one that keeps the fix from becoming
+ * a request storm: an interval while the panel is open, never a second read stacked on one
+ * still in flight, and nothing at all when the surface has no Stack.
+ *
+ * The interval is injected (20 ms) because the real one is 5 s: the value is a product
+ * choice, not something a test should wait for.
+ */
+const TEST_REFRESH_MS = 20;
+
+function intervalHarness() {
+  const state = {
+    listReads: 0,
+    /** Reads at or after this ordinal hang until the test releases them. */
+    hangFrom: Number.POSITIVE_INFINITY,
+    releases: [] as (() => void)[],
+  };
+  const fetchImpl = (async (url: string) => {
+    const href = String(url);
+    if (href.endsWith("/stacks")) return json({ stackIds: ["A"] });
+    if (href.endsWith("/documents")) return json({ documents: [] });
+    if (!/\/ingest\/jobs(\?|$)/.test(href)) return json({ jobs: [] });
+    state.listReads += 1;
+    if (state.listReads >= state.hangFrom) {
+      await new Promise<void>((resolve) => state.releases.push(resolve));
+    }
+    return json({ jobs: [] });
+  }) as unknown as typeof fetch;
+  const client = new ApiClient({
+    baseUrl: "/api",
+    headers: () => ({ "x-user-id": "u" }),
+    fetchImpl,
+  });
+  return { client, state };
+}
+
+describe("useIngest: the jobs list refreshes on an interval (S5)", () => {
+  it("refreshes while the panel is open, and stops when it closes", async () => {
+    const { client, state } = intervalHarness();
+    const view = renderHook(() =>
+      useIngest({ client, stackId: "A", listRefreshMs: TEST_REFRESH_MS }),
+    );
+    await waitFor(() => expect(view.result.current.loadingList).toBe(false));
+    const afterMount = state.listReads;
+
+    act(() => view.result.current.setListLive(true));
+    await waitFor(() => expect(state.listReads).toBeGreaterThan(afterMount), { timeout: 2_000 });
+
+    // And it stops when the panel closes: a timer over a list nobody is looking at is the
+    // same request storm in a quieter place.
+    act(() => view.result.current.setListLive(false));
+    const afterClose = state.listReads;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(state.listReads).toBe(afterClose);
+  });
+
+  it("does not stack a refresh on one that is still in flight", async () => {
+    const { client, state } = intervalHarness();
+    const view = renderHook(() =>
+      useIngest({ client, stackId: "A", listRefreshMs: TEST_REFRESH_MS }),
+    );
+    await waitFor(() => expect(view.result.current.loadingList).toBe(false));
+
+    // Every read from the next one on hangs until the test says otherwise, so several
+    // interval ticks land while the first is genuinely outstanding.
+    state.hangFrom = state.listReads + 1;
+    act(() => view.result.current.setListLive(true));
+    await waitFor(() => expect(state.listReads).toBe(2), { timeout: 2_000 });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(state.listReads).toBe(2);
+    expect(state.releases).toHaveLength(1);
+
+    // Once it answers, the interval carries on: the guard defers a read, it does not stop
+    // the refresh.
+    await act(async () => {
+      for (const release of state.releases) release();
+    });
+    await waitFor(() => expect(state.listReads).toBeGreaterThan(2), { timeout: 2_000 });
+    act(() => view.result.current.setListLive(false));
+  });
+
+  it("issues no request at all when the surface has no Stack", async () => {
+    const seen: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      seen.push(String(url));
+      return json({ stackIds: [] });
+    }) as unknown as typeof fetch;
+    const client = new ApiClient({
+      baseUrl: "/api",
+      headers: () => ({ "x-user-id": "u" }),
+      fetchImpl,
+    });
+
+    const view = renderHook(() =>
+      useIngest({ client, stackId: null, listRefreshMs: TEST_REFRESH_MS }),
+    );
+    await waitFor(() => expect(view.result.current.loadingList).toBe(false));
+    act(() => view.result.current.setListLive(true));
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    // `GET /stacks` is the only thing this state may ask, exactly as before: no list read,
+    // no poll, nothing into a tenant nobody named.
+    expect(seen.filter((url) => !url.endsWith("/stacks"))).toEqual([]);
+  });
+});
+
+/**
+ * COMING BACK TO THE PAGE MUST NOT MEAN PRESSING F5
+ *
+ * The third gap in the report: `follow` was only ever called from a user action, so a
+ * reload lost the follow and the panel opened on an empty detail pane while the job ran on.
+ * The decision (Option A, `odd/tasks/ingest-follow-resilience.md` L3) is automatic and has
+ * no link parameter: on the first list read of a visit, with nothing being followed, adopt
+ * the most recently updated job that still has work ahead of it.
+ *
+ * The second half of that rule is what these tests are really about: the automation gets ONE
+ * chance per visit. Once the user picks a job, stops a follow, or the adopted job ends, the
+ * screen belongs to the user and nothing is imposed again.
+ */
+function listJob(
+  id: string,
+  updatedAt: string,
+  status: "running" | "succeeded" = "running",
+): IngestJob {
+  return {
+    id,
+    source: "https://example.com/a",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt,
+    ingest: { status, stage: "committing", attempts: [] },
+    compile:
+      status === "running"
+        ? { status: "queued", progress: null }
+        : { status: "succeeded", progress: null },
+  };
+}
+
+/** The list, mutable between reads; a poll answers the job it names, else a settled one. */
+function autoResumeHarness(initial: IngestJob[]) {
+  let jobs = initial;
+  const calls: { method: string; url: string }[] = [];
+  const fetchImpl = (async (url: string, init?: RequestInit) => {
+    const href = String(url);
+    calls.push({ method: init?.method ?? "GET", url: href });
+    if (href.includes("/ingest/jobs/")) {
+      const id = decodeURIComponent(href.split("/ingest/jobs/")[1]!.split("?")[0]!);
+      return json(jobs.find((job) => job.id === id) ?? listJob(id, "2026-01-01T00:00:09.000Z", "succeeded"));
+    }
+    if (href.endsWith("/stacks")) return json({ stackIds: ["A"] });
+    if (href.endsWith("/documents")) return json({ documents: [] });
+    return json({ jobs });
+  }) as unknown as typeof fetch;
+  const client = new ApiClient({
+    baseUrl: "/api",
+    headers: () => ({ "x-user-id": "u" }),
+    fetchImpl,
+  });
+  return {
+    client,
+    setJobs: (next: IngestJob[]) => {
+      jobs = next;
+    },
+    polls: () => calls.filter((call) => call.url.includes("/ingest/jobs/")),
+  };
+}
+
+describe("useIngest: it re-attaches to a running job on mount (S6)", () => {
+  it("follows the only running job without the user asking", async () => {
+    const h = autoResumeHarness([listJob("job_run", "2026-01-01T00:00:05.000Z")]);
+    const view = renderHook(() => useIngest({ client: h.client, stackId: "A" }));
+
+    await waitFor(() => expect(view.result.current.activeId).toBe("job_run"));
+    expect(view.result.current.following).toBe(true);
+    expect(h.polls().some((call) => call.url.includes("/ingest/jobs/job_run"))).toBe(true);
+
+    view.result.current.stopFollowing();
+    await waitFor(() => expect(view.result.current.following).toBe(false));
+  });
+
+  it("follows the most recently updated one when several are still running", async () => {
+    const h = autoResumeHarness([
+      listJob("job_older", "2026-01-01T00:00:01.000Z"),
+      listJob("job_newest", "2026-01-01T00:00:09.000Z"),
+      listJob("job_middle", "2026-01-01T00:00:04.000Z"),
+    ]);
+    const view = renderHook(() => useIngest({ client: h.client, stackId: "A" }));
+
+    await waitFor(() => expect(view.result.current.activeId).toBe("job_newest"));
+    expect(h.polls().some((call) => call.url.includes("/ingest/jobs/job_older"))).toBe(false);
+
+    view.result.current.stopFollowing();
+    await waitFor(() => expect(view.result.current.following).toBe(false));
+  });
+
+  it("follows nothing when every job has finished or is blocked", async () => {
+    // Two different kinds of dead: a settled job, and a job whose ingest FAILED while its
+    // compile still reads `queued` — nothing will ever start that compile, so adopting it
+    // would open the panel on a corpse.
+    const blocked = listJob("job_blocked", "2026-01-01T00:00:08.000Z");
+    blocked.ingest = { status: "failed", stage: "committing", attempts: [], error: "boom" };
+    const h = autoResumeHarness([
+      listJob("job_done", "2026-01-01T00:00:05.000Z", "succeeded"),
+      blocked,
+    ]);
+    const view = renderHook(() => useIngest({ client: h.client, stackId: "A" }));
+
+    await waitFor(() => expect(view.result.current.loadingList).toBe(false));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(view.result.current.activeId).toBeNull();
+    expect(h.polls()).toEqual([]);
+  });
+});
+
+describe("useIngest: the automation never overrides the user (S7)", () => {
+  it("does not take the screen back once the user follows another job", async () => {
+    const h = autoResumeHarness([listJob("job_run", "2026-01-01T00:00:05.000Z")]);
+    const view = renderHook(() => useIngest({ client: h.client, stackId: "A" }));
+    await waitFor(() => expect(view.result.current.activeId).toBe("job_run"));
+
+    // The user picks one instead, and it is already finished.
+    act(() => view.result.current.follow("job_done"));
+    await waitFor(() => expect(view.result.current.activeId).toBe("job_done"));
+    await waitFor(() => expect(view.result.current.following).toBe(false));
+
+    // A later read of the list surfaces something newer and still running.
+    h.setJobs([
+      listJob("job_run", "2026-01-01T00:00:05.000Z"),
+      listJob("job_newer", "2026-01-01T00:00:09.000Z"),
+    ]);
+    await act(async () => {
+      await view.result.current.refreshList();
+    });
+
+    expect(view.result.current.activeId).toBe("job_done");
+    expect(h.polls().some((call) => call.url.includes("job_newer"))).toBe(false);
+  });
+
+  it("does not start anything again after the user stops following", async () => {
+    const h = autoResumeHarness([listJob("job_run", "2026-01-01T00:00:05.000Z")]);
+    const view = renderHook(() => useIngest({ client: h.client, stackId: "A" }));
+    await waitFor(() => expect(view.result.current.activeId).toBe("job_run"));
+
+    view.result.current.stopFollowing();
+    await waitFor(() => expect(view.result.current.following).toBe(false));
+
+    h.setJobs([
+      listJob("job_run", "2026-01-01T00:00:05.000Z"),
+      listJob("job_other", "2026-01-01T00:00:07.000Z"),
+    ]);
+    await act(async () => {
+      await view.result.current.refreshList();
+    });
+
+    expect(view.result.current.following).toBe(false);
+    expect(h.polls().some((call) => call.url.includes("job_other"))).toBe(false);
   });
 });
