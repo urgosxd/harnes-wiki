@@ -36,6 +36,13 @@ import type { Model } from "@earendil-works/pi-ai";
 async function main(): Promise<void> {
   const log = new Logger({ level: (process.env.LOG_LEVEL as "debug" | "info" | "warn" | "error") ?? "info" });
   const config = loadConfig();
+  // Reported the moment it is known, before any later check can fail the boot: an
+  // operator debugging a tool that died mid-turn needs this number on the record even when
+  // another misconfiguration is what stops the process. It used to be the MCP client
+  // library's 30 s, invisible in every log this server writes — measured, `query_wiki`
+  // timed out at exactly that on a large Stack. Exactly one line, and it names the
+  // EFFECTIVE value, so the default is visible too.
+  log.info("mcp request timeout", { timeoutMs: config.mcpRequestTimeoutMs });
   if (!config.databaseUrl) {
     throw new Error("DATABASE_URL is required");
   }
@@ -203,6 +210,7 @@ async function main(): Promise<void> {
         workspaceDir: config.workspaceDir,
         systemPrompt: SYSTEM_PROMPT,
         capabilities: config.tools,
+        mcpRequestTimeoutMs: config.mcpRequestTimeoutMs,
       });
     })();
 

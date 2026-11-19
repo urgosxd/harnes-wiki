@@ -87,6 +87,7 @@ Never commit provider credentials.
 | `DATABASE_URL` | Postgres connection string. |
 | `INGEST_API_BASE_URL` | Origin of the external ingest service, e.g. `http://host:4173`. Empty answers `503 ingest_not_configured`. |
 | `INGEST_API_TIMEOUT_MS` | Deadline for one job read. Default `10000`. |
+| `MCP_REQUEST_TIMEOUT_MS` | Deadline for one MCP tool request, e.g. `query_wiki`. Default `120000` (120 s); the MCP client library's own default is 30 s, which timed out on a large Stack. A value that is not a positive number FAILS the boot rather than falling back. |
 | `PUBLIC_BASE_URL` | Origin the ingest service reaches THIS server at, e.g. `http://server:8080`. Empty still allows uploads and plain references, but not ingest-by-document. |
 
 `PI_AGENT_DIR` matters more than it looks: on many setups the provider key lives
@@ -1198,7 +1199,9 @@ them reintroduces a bug that was already observed.
    Sessions are rebuilt per turn with `SessionManager.inMemory(cwd, {id}, entries)`.
 3. **MCP is one long-lived client per tenant, proxied as custom tools.** The built-in
    MCP extension spawns one child process per session and does not reap it on
-   dispose.
+   dispose. Every request on that client carries `MCP_REQUEST_TIMEOUT_MS` (default
+   120 s, reported once at startup); a tool that outlives it comes back to the model
+   as an `isError: true` tool result rather than failing the turn.
 4. **`prompt()` resolving does not mean the turn succeeded.** Read `stopReason` from
    the persisted assistant message.
 5. **`agent_settled` ends a run.** `agent_end` does not: retries and queued work can

@@ -101,6 +101,10 @@ services:
       CHAT_USERS: ${CHAT_USERS:-}
       INGEST_API_BASE_URL: ${INGEST_API_BASE_URL:-}
       INGEST_API_TIMEOUT_MS: ${INGEST_API_TIMEOUT_MS:-10000}
+      # Deadline for ONE MCP tool request, in milliseconds. A tool that outlives it comes
+      # back to the model as a tool error, not a failed turn. The fallback matches the
+      # server's own default; the server logs the effective value once at startup.
+      MCP_REQUEST_TIMEOUT_MS: ${MCP_REQUEST_TIMEOUT_MS:-120000}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://server:8080}
       AGENT_READ_TOOLS: ${AGENT_READ_TOOLS:-true}
       AGENT_SKILLS: ${AGENT_SKILLS:-true}

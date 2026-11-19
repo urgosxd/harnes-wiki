@@ -16,7 +16,7 @@ import { currentStackId } from "./stack-context.ts";
 import { rolePromptExtension } from "./agent-role.ts";
 import { stackPromptExtension } from "./stack-prompt.ts";
 import { Type } from "typebox";
-import type { ThinkingLevelName } from "../config.ts";
+import { DEFAULT_MCP_REQUEST_TIMEOUT_MS, type ThinkingLevelName } from "../config.ts";
 
 /**
  * One MCP server a tenant is allowed to reach.
@@ -86,6 +86,14 @@ export class TenantRuntime {
   /** Coding tools (read/grep/find/ls and optionally bash/write/edit). */
   readonly builtinTools: AgentTool<TSchema, unknown>[];
   readonly toolNames: string[];
+  /**
+   * The deadline every MCP request on this runtime carries.
+   *
+   * Reported rather than private because it is the one fact that says whether the
+   * configured value reached the client: the `McpClient` that holds it is internal, and a
+   * missing deadline is invisible until a tool dies at the library's own 30 s.
+   */
+  readonly mcpRequestTimeoutMs: number;
 
   private readonly mcpConnections = new Map<string, McpConnection>();
   private closed = false;
@@ -97,6 +105,7 @@ export class TenantRuntime {
     settingsManager: SettingsManager,
     customTools: ToolDefinition[],
     builtinTools: AgentTool<TSchema, unknown>[],
+    mcpRequestTimeoutMs: number,
   ) {
     this.tenant = tenant;
     this.modelRuntime = modelRuntime;
@@ -104,6 +113,7 @@ export class TenantRuntime {
     this.settingsManager = settingsManager;
     this.customTools = customTools;
     this.builtinTools = builtinTools;
+    this.mcpRequestTimeoutMs = mcpRequestTimeoutMs;
     // The session's allowlist covers both kinds: built-in names and our own tools.
     this.toolNames = [...builtinTools.map((tool) => tool.name), ...customTools.map((tool) => toolName(tool))];
   }
@@ -120,8 +130,15 @@ export class TenantRuntime {
       writes?: boolean;
       skills?: boolean;
     };
+    /**
+     * Deadline for one MCP request, in milliseconds. Defaults to
+     * `DEFAULT_MCP_REQUEST_TIMEOUT_MS` (120 s) rather than to the client library's 30 s, so
+     * a caller that forgets the argument cannot restore the timeout this feature removed.
+     */
+    mcpRequestTimeoutMs?: number;
   }): Promise<TenantRuntime> {
     const { tenant, agentDir, workspaceDir, systemPrompt } = options;
+    const mcpRequestTimeoutMs = options.mcpRequestTimeoutMs ?? DEFAULT_MCP_REQUEST_TIMEOUT_MS;
 
     // The credential and catalog paths are passed explicitly. `ModelRuntime.create()`
     // without them resolves through HOME and PI_CODING_AGENT_DIR, which happens to
@@ -193,7 +210,16 @@ export class TenantRuntime {
     try {
       for (const server of tenant.mcpServers) {
         if (!tenant.exposedMcpTools.length) break;
-        const client = new McpClient({ name: "agentdocumentor", version: "0.1.0" });
+        // The deadline is set ONCE, on the client: `callTool` in `callAndShape` passes no
+        // per-request options, so this is where every proxied tool inherits it. The
+        // library resolves `options.timeoutMs ?? requestTimeoutMs ?? 30_000`
+        // (`pi-mcp/dist/client.js:263`), and leaving the middle term unset is what made
+        // `query_wiki` die at 30 s on a large Stack.
+        const client = new McpClient({
+          name: "agentdocumentor",
+          version: "0.1.0",
+          requestTimeoutMs: mcpRequestTimeoutMs,
+        });
         await client.connect(transportFor(server));
         // Keep the whole tool descriptor, not just its name: the model needs the
         // real parameter schema to know a tool takes `stackId`, a `limit`, or
@@ -225,6 +251,7 @@ export class TenantRuntime {
       SettingsManager.inMemory({}),
       tools,
       builtinTools,
+      mcpRequestTimeoutMs,
     );
     for (const [name, connection] of connections) runtime.mcpConnections.set(name, connection);
     return runtime;

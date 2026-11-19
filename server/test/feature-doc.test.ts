@@ -331,6 +331,7 @@ if (inCheckout) {
         "ingest-dimensions-union.md",
         "ingest-follow-resilience.md",
         "ingest-operator-controls.md",
+        "mcp-request-timeout.md",
         "multitenant-stackId.md",
         "prod-hardening.md",
         "role-by-volume.md",
