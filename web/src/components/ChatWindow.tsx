@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { stackNoticesFor, type ChatState } from "../lib/chat-reducer.ts";
+import { useStickToBottom } from "../lib/stick-to-bottom.ts";
 import { MessageList } from "./MessageList.tsx";
 
 export interface ChatWindowProps {
@@ -30,11 +31,44 @@ export function ChatWindow({
 }: ChatWindowProps) {
   const [draft, setDraft] = useState("");
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
-  // The transcript's scroll container: owning it here lets the message list tell
-  // a reader following the answer from one who scrolled up to read.
+  // The transcript's scroll container, and the sentinel at the end of it. Owning both
+  // here, rather than in the list that renders the messages, lets the window tell a
+  // reader following the answer from one who scrolled up to read — and keeps that
+  // decision beside the layout around it.
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const endRef = useRef<HTMLDivElement | null>(null);
   const streaming = state.status === "streaming";
   const empty = state.messages.length === 0 && state.pendingUserText === null && !loadingThread;
+
+  // Follow the answer as it grows, but only while the reader is at the bottom:
+  // scrolling on every streamed token would fight a user who scrolled up to
+  // read, and a message they sent pulls the view back so it is never off-screen.
+  // Opening a conversation is the other deliberate move: it lands at the end.
+  //
+  // `sentCount` counts turns the READER sent: one per user message plus the draft
+  // bubble while it waits for its reply. It must not be the transcript length,
+  // which also grows when a finished turn is committed (the draft turns into a
+  // user message and the answer is appended) and would therefore move a reader
+  // who had scrolled up at the exact moment the answer ends. The arithmetic, per
+  // step of a real turn:
+  //   send        pending appears                      1 -> 2  (re-pins)
+  //   token       nothing relevant changes             2 -> 2  (follows only if pinned)
+  //   finished    pending -1, one user message +1      2 -> 2  (cannot move the reader)
+  //   second turn pending appears again                2 -> 3  (re-pins)
+  // The reducer only ever appends a user message together with clearing the
+  // draft, so those two always cancel out. Loading a stored conversation does
+  // grow this count, which is wanted: the transcript lands at its end.
+  useStickToBottom(scrollRef, endRef, {
+    streaming,
+    contentKey: state.streamingText,
+    // `Message.role` is only ever "user" or "assistant" (see `api.ts`), so one
+    // comparison covers every role the transcript can hold.
+    sentCount:
+      state.messages.filter((message) => message.role === "user").length +
+      (state.pendingUserText !== null ? 1 : 0),
+    conversationId,
+    loadingThread,
+  });
 
   // Keep the caret in the composer when the answer finishes, so the user can type
   // the next message without clicking.
@@ -78,7 +112,7 @@ export function ChatWindow({
         ) : empty ? (
           <p className="chat__hint">Ask anything to start.</p>
         ) : (
-          <MessageList state={state} scrollRef={scrollRef} />
+          <MessageList state={state} endRef={endRef} />
         )}
 
         {/*

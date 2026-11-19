@@ -1,9 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { createElement, type RefObject } from "react";
 import { render } from "@testing-library/react";
-import { isPinnedToBottom } from "./stick-to-bottom.ts";
-import { initialChatState, type ChatState } from "./chat-reducer.ts";
-import { MessageList } from "../components/MessageList.tsx";
+import { isPinnedToBottom, useStickToBottom } from "./stick-to-bottom.ts";
 
 // Content 1000px tall in a 400px viewport: the bottom sits at scrollTop 600.
 function at(scrollTop: number, scrollHeight = 1000, clientHeight = 400) {
@@ -72,15 +70,27 @@ function scrollContainer(metrics: { scrollTop: number; scrollHeight: number; cli
 }
 
 // This file is TypeScript, not TSX, so the host component is a createElement call.
-const streamingState: ChatState = {
-  ...initialChatState,
-  status: "streaming",
-  pendingUserText: "question",
-  streamingText: "partial",
-};
+//
+// The host calls the hook the way the chat window does — the component that owns the
+// scroll container — with the container handed in, so a test can swap it. The options are
+// the quiet ones: no streaming, no conversation, nothing that asks for a scroll on its own.
+const endRef: RefObject<HTMLElement | null> = { current: null };
 
-function transcript(ref: RefObject<HTMLElement | null>) {
-  return createElement(MessageList, { state: streamingState, scrollRef: ref });
+function Host({ container }: { container: RefObject<HTMLElement | null> }) {
+  useStickToBottom(container, endRef, {
+    streaming: false,
+    contentKey: "",
+    sentCount: 0,
+    conversationId: null,
+    loadingThread: false,
+  });
+  return null;
+}
+
+function transcript(container: RefObject<HTMLElement | null>) {
+  // The same component type every time, so a rerender is an update and not a remount:
+  // the test is about a listener moving between containers, not about unmounting.
+  return createElement(Host, { container });
 }
 
 function scrollListener(calls: unknown[][]): unknown {
