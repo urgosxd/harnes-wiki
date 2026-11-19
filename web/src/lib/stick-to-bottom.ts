@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 
 /**
  * How close to the bottom counts as "following the answer", in pixels.
@@ -63,9 +63,29 @@ export interface StickToBottomOptions {
   loadingThread: boolean;
 }
 
+/**
+ * What the reader is owed besides a transcript: where they are, and the way back.
+ *
+ * `atBottom` and `hasNews` are React state rather than refs because a control is
+ * painted from them; the decision itself is taken once, in this hook, so the
+ * window that shows the control and the effect that follows the answer can
+ * never disagree about whether the reader is following.
+ */
+export interface StickToBottomView {
+  /** True while the viewport is at the bottom of its content. */
+  atBottom: boolean;
+  /** True when content arrived while the reader was somewhere else. */
+  hasNews: boolean;
+  /** Move the viewport to the last message now, and follow again from there. */
+  jumpToLatest(): void;
+}
+
 function scrollToEnd(element: HTMLElement | null): void {
   // Optional call: a document without layout (tests, some embedded webviews) has
   // no scrollIntoView, and a missing scroller must not break the answer.
+  //
+  // No `behavior: "smooth"` on purpose: a long history animated on open is a
+  // slide through every message the reader did not ask to see.
   element?.scrollIntoView?.({ block: "end" });
 }
 
@@ -84,10 +104,14 @@ export function useStickToBottom(
   container: RefObject<HTMLElement | null>,
   end: RefObject<HTMLElement | null>,
   opts: StickToBottomOptions,
-): void {
+): StickToBottomView {
   const { streaming, contentKey, sentCount, conversationId, loadingThread } = opts;
   // Starts pinned: an open stream begins at the end, as it always did.
   const pinned = useRef(true);
+  // The same fact as `pinned`, in state, because a control is painted from it. One
+  // decision, two readers of it.
+  const [atBottom, setAtBottom] = useState(true);
+  const [hasNews, setHasNews] = useState(false);
   const previousSent = useRef(sentCount);
   // The conversation the viewport was last placed for. `undefined` means "never
   // placed yet", which is not the same fact as `null`, "no conversation on
@@ -95,22 +119,38 @@ export function useStickToBottom(
   // that one's end.
   const placedFor = useRef<string | null | undefined>(undefined);
 
+  /** The reader asked to be at the end: nothing below is unseen any more. */
+  const placeAtEnd = useCallback(() => {
+    pinned.current = true;
+    setAtBottom(true);
+    setHasNews(false);
+    scrollToEnd(end.current);
+  }, [end]);
+
   // The reader's own scrolling is the only thing that changes the decision, so
   // it is read from the container's scroll event and from nothing else.
   useEffect(() => {
     const element = container.current;
     if (!element) return;
     const onScroll = () => {
-      pinned.current = isPinnedToBottom(element);
+      const next = isPinnedToBottom(element);
+      pinned.current = next;
+      setAtBottom(next);
+      // Back at the bottom by hand is as good as having read what was below.
+      if (next) setHasNews(false);
     };
     element.addEventListener("scroll", onScroll, { passive: true });
     return () => element.removeEventListener("scroll", onScroll);
   }, [container]);
 
-  // Follow the growing answer, but never fight a reader who scrolled away.
+  // Follow the growing answer, but never fight a reader who scrolled away: for that
+  // reader the arriving content is news to come back to, not a reason to move.
   useEffect(() => {
-    if (!streaming || !pinned.current) return;
-    scrollToEnd(end.current);
+    if (pinned.current) {
+      if (streaming) scrollToEnd(end.current);
+      return;
+    }
+    setHasNews(true);
   }, [contentKey, streaming, end]);
 
   // Opening a conversation lands on its last message, and so does switching to
@@ -127,6 +167,8 @@ export function useStickToBottom(
     placedFor.current = conversationId;
     if (conversationId === null) return;
     pinned.current = true;
+    setAtBottom(true);
+    setHasNews(false);
     // The arrival of a stored history also grows `sentCount`: its user turns appear all
     // at once. Placing the viewport here IS the re-pin that growth would ask for, so it
     // is recorded as already handled — one arrival, one request, not two.
@@ -141,7 +183,8 @@ export function useStickToBottom(
   useEffect(() => {
     if (sentCount === previousSent.current) return;
     previousSent.current = sentCount;
-    pinned.current = true;
-    scrollToEnd(end.current);
-  }, [sentCount, end]);
+    placeAtEnd();
+  }, [sentCount, placeAtEnd]);
+
+  return { atBottom, hasNews, jumpToLatest: placeAtEnd };
 }

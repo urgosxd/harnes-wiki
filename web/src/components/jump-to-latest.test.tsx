@@ -161,3 +161,99 @@ describe("a conversation opens on its last message (S2)", () => {
     expect(screen.getByText("Ask anything to start.")).toBeDefined();
   });
 });
+
+describe("the way back to the last message while reading (S3-S5)", () => {
+  /** The control, found the way a screen reader finds it: by role and name. */
+  const control = () => screen.queryByRole("button", { name: /jump to latest message/i });
+
+  it("is offered once the reader is away from the bottom, under a name that says what it does", () => {
+    const window = openWindow(loaded(thread("a", 12)), "conv-a");
+    // Opening put the viewport at the end, so there is nothing to jump to yet.
+    expect(control()).toBeNull();
+
+    scrollTo(window, AT_TOP);
+
+    // The exact name, computed from the accessible tree: the arrow beside the words is
+    // decorative, so a reader is told what the control DOES, not that it points down.
+    expect(screen.getByRole("button", { name: "Jump to latest message" })).toBeDefined();
+  });
+
+  it("can be reached with the keyboard", () => {
+    const window = openWindow(loaded(thread("a", 12)), "conv-a");
+    scrollTo(window, AT_TOP);
+
+    const button = screen.getByRole("button", { name: /jump to latest message/i });
+    button.focus();
+
+    expect(document.activeElement).toBe(button);
+  });
+
+  it("is gone at the bottom, because a button that does nothing is noise", () => {
+    const window = openWindow(loaded(thread("a", 12)), "conv-a");
+    expect(control()).toBeNull();
+
+    scrollTo(window, { scrollTop: 300 });
+    expect(control()).not.toBeNull();
+
+    scrollTo(window, AT_BOTTOM);
+    expect(control()).toBeNull();
+  });
+
+  it("requests the jump when clicked, and disappears because the click put the reader at the end", () => {
+    const window = openWindow(loaded(thread("a", 12)), "conv-a");
+    scrollTo(window, AT_TOP);
+    scrollIntoView.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: /jump to latest message/i }));
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "end" });
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(control()).toBeNull();
+  });
+
+  it("marks something new instead of moving a reader who is scrolled up (S5)", () => {
+    const window = openWindow(
+      loaded(thread("a", 3), { status: "streaming", streamingText: "the answer so far" }),
+      "conv-a",
+    );
+    scrollTo(window, AT_TOP);
+    scrollIntoView.mockClear();
+
+    window.rerender(
+      loaded(thread("a", 3), { status: "streaming", streamingText: "the answer so far, and more" }),
+      "conv-a",
+    );
+
+    // Not moved: the viewport stays exactly where the reader put it.
+    expect(scrollIntoView).not.toHaveBeenCalled();
+    expect(window.metrics.scrollTop).toBe(0);
+    // And told that there is something below.
+    const button = control();
+    expect(button).not.toBeNull();
+    expect(button?.textContent).toMatch(/new/i);
+  });
+
+  it("keeps following the answer while the reader is at the bottom, with no control (S6)", () => {
+    const window = openWindow(
+      loaded(thread("a", 3), { status: "streaming", streamingText: "the answer so far" }),
+      "conv-a",
+    );
+    scrollIntoView.mockClear();
+
+    window.rerender(
+      loaded(thread("a", 3), { status: "streaming", streamingText: "the answer so far, and more" }),
+      "conv-a",
+    );
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "end" });
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(control()).toBeNull();
+  });
+
+  it("is not offered where there is no transcript to jump through", () => {
+    // S7: the empty state is untouched, and a control over nothing would be noise.
+    openWindow(initialChatState, null);
+    expect(screen.getByText("Ask anything to start.")).toBeDefined();
+    expect(control()).toBeNull();
+  });
+});
