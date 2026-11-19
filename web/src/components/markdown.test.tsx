@@ -9,13 +9,13 @@ import { initialChatState } from "../lib/chat-reducer.ts";
 
 // The transcript needs the scroll container that holds it. jsdom has no layout,
 // so these rendering checks pass a ref that is never attached.
-const noScroll: RefObject<HTMLElement | null> = { current: null };
+const noEnd: RefObject<HTMLDivElement | null> = { current: null };
 
 /** Render one stored assistant answer, the way the transcript shows it. */
 function renderAnswer(text: string) {
   return render(
     <MessageList
-      scrollRef={noScroll}
+      endRef={noEnd}
       state={{
         ...initialChatState,
         messages: [{ id: "m1", role: "assistant", text }],
@@ -28,7 +28,7 @@ function renderAnswer(text: string) {
 function renderStreaming(text: string) {
   return render(
     <MessageList
-      scrollRef={noScroll}
+      endRef={noEnd}
       state={{ ...initialChatState, status: "streaming", streamingText: text }}
     />,
   );
@@ -129,7 +129,7 @@ describe("regression: the transcript still reads like it does today", () => {
     const written = "**not bold** <b>x</b>";
     const { container } = render(
       <MessageList
-        scrollRef={noScroll}
+        endRef={noEnd}
         state={{
           ...initialChatState,
           messages: [{ id: "u1", role: "user", text: written }],

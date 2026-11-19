@@ -326,6 +326,7 @@ if (inCheckout) {
       // set, not the order the filesystem happens to return.
       evaluatedDocuments.sort(),
       [
+        "chat-jump-to-latest.md",
         "ingest-dimensions-array.md",
         "ingest-dimensions-union.md",
         "ingest-follow-resilience.md",

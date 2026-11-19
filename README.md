@@ -1074,6 +1074,14 @@ The SSE parser is hand-written because a chunk boundary can fall inside a frame,
 inside a JSON string, or between the two newlines that end a record; assuming one
 chunk equals one frame works in development and corrupts long replies.
 
+A conversation opens at its LAST message, and the transcript keeps following an
+answer only while the reader is at the bottom: scrolling up is respected, and
+content that arrives while they are away is announced by a control named "Jump to
+latest message" instead of moving them. The rule is a pure position check with a
+24px tolerance in `web/src/lib/stick-to-bottom.ts`, which is why it is testable
+without a browser; whether the browser actually lands on the pixels it asked for
+is not, so that part is eyeballed.
+
 Vite is pinned to 7.x because `@vitejs/plugin-react` does not support Vite 8 yet.
 Installing Vite 8 fails on a peer conflict; do not paper over it with
 `--legacy-peer-deps`.
