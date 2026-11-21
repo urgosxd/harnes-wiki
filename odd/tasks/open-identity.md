@@ -1,5 +1,7 @@
 # Feature: open-identity
 
+> Superseded by odd/tasks/password-login.md.
+
 La identidad es el nombre que trae el enlace. Sin secreto, sin cuentas, sin
 contraseñas. `?user=ana` es ana.
 

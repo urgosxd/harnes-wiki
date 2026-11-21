@@ -1,14 +1,19 @@
 import type { IncomingMessage } from "node:http";
+import type { Database } from "../db/pool.ts";
 import { parseRoster, resolveRosterUser, type RosterUser } from "./users.ts";
+import { SESSION_COOKIE, parseCookies, resolveSession } from "./sessions.ts";
 
 /**
  * Resolve the caller's user id.
  *
- * Three modes, and the difference between them is the only thing that matters here:
+ * Four modes, and the difference between them is the only thing that matters here:
  * **whether the claimed id can be checked against a secret.**
  *
+ *  - `password`: the caller signs in with an account and a password, and identity comes
+ *    from the session cookie. The product's mode, and the only one where the caller has
+ *    to prove something to BE a user.
  *  - `roster`: each user has their own token, so a claimed id that disagrees with
- *    the token is refused. The only mode that resists impersonation.
+ *    the token is refused. The only legacy mode that resists impersonation.
  *  - `shared-token`: one token for everyone. It proves the caller was given the
  *    token, and proves nothing about WHICH user they are.
  *  - `open`: no secret at all. The claimed id IS the identity.
@@ -28,8 +33,9 @@ import { parseRoster, resolveRosterUser, type RosterUser } from "./users.ts";
  *
  *  - A request without a resolvable identity is refused. There is no anonymous
  *    default, because an anonymous default silently merges everyone's data.
- *  - The id comes from the request headers only. It is never read from a body field
- *    or a query parameter, which a client could set to someone else's id.
+ *  - The id never comes from a body field or a query parameter, which a client could
+ *    set to someone else's id. Legacy modes read it from headers because there is no
+ *    session to read it from; `password` mode reads the cookie and nothing else.
  */
 export type Authenticator = (req: IncomingMessage) => Promise<string | undefined>;
 
@@ -38,7 +44,16 @@ export type Authenticator = (req: IncomingMessage) => Promise<string | undefined
  * happen to be configured: an operator who switches the mechanism should not have
  * to reason about the precedence of an empty string versus an undefined one.
  */
-export type AuthMode = "roster" | "shared-token" | "open";
+export type AuthMode = "password" | "roster" | "shared-token" | "open";
+
+/**
+ * What a deployment runs with when nothing is configured.
+ *
+ * `password`, never `open`: forgetting `AUTH_MODE` used to be survivable because the
+ * server refused everything, and it must not become a server that believes whatever
+ * name a request claims. Expressed here, once, so no entry point can pick another.
+ */
+export const DEFAULT_AUTH_MODE: AuthMode = "password";
 
 export interface AuthConfig {
   /**
@@ -58,6 +73,16 @@ export interface AuthConfig {
    * user id.
    */
   devToken?: string | undefined;
+  /**
+   * Where sessions are looked up. Required by `password` mode and ignored by the legacy
+   * ones.
+   *
+   * Injected rather than imported so the router keeps holding no connection details:
+   * the authenticator is a closure over one database handle, built by whoever already
+   * has it. Without a handle, `password` mode refuses every request instead of throwing
+   * on each one — the same fail-closed answer the modes above give.
+   */
+  db?: Database | undefined;
 }
 
 /** Ids that can safely become a `user_id` and a log field. */
@@ -73,9 +98,16 @@ const USER_ID_PATTERN = /^[A-Za-z0-9._@-]{1,64}$/;
 export function parseAuthMode(raw: string | undefined): AuthMode | undefined {
   const value = raw?.trim();
   if (!value) return undefined;
-  if (value === "roster" || value === "shared-token" || value === "open") return value;
+  if (
+    value === "password" ||
+    value === "roster" ||
+    value === "shared-token" ||
+    value === "open"
+  ) {
+    return value;
+  }
   throw new Error(
-    `AUTH_MODE must be one of roster, shared-token, open, got "${value}"`,
+    `AUTH_MODE must be one of password, roster, shared-token, open, got "${value}"`,
   );
 }
 
@@ -91,12 +123,29 @@ function header(req: IncomingMessage, name: string): string | undefined {
  * must never fall FORWARD into the weakest mode: a server started without its
  * environment should refuse every request, not quietly become open to whoever can
  * reach it. `open` is therefore reachable only by asking for it.
+ *
+ * `undefined` here is not what a deployment runs with: `resolveDeploymentAuthMode`
+ * turns it into `DEFAULT_AUTH_MODE`. Kept separate so the legacy inference stays exactly
+ * as it was and the default lives in one readable place.
  */
 export function resolveAuthMode(config: AuthConfig): AuthMode | undefined {
   if (config.mode) return config.mode;
   if (parseRoster(config.users).length > 0) return "roster";
   if (config.devToken) return "shared-token";
   return undefined;
+}
+
+/**
+ * The mode a deployment ACTUALLY runs with: its explicit choice, then the legacy
+ * inference, then `DEFAULT_AUTH_MODE`.
+ *
+ * A deployment that configured nothing gets password mode: it refuses every request
+ * until accounts exist, which is the fail-closed posture this file has always had. A
+ * deployment that configured a roster or a shared token keeps it — those modes stay for
+ * tests and for setups that already run them.
+ */
+export function resolveDeploymentAuthMode(config: AuthConfig): AuthMode {
+  return resolveAuthMode(config) ?? DEFAULT_AUTH_MODE;
 }
 
 export function createAuthenticator(config: AuthConfig): Authenticator {
@@ -106,6 +155,22 @@ export function createAuthenticator(config: AuthConfig): Authenticator {
     // Fail closed. Every request is unauthorized until identity is configured, and
     // this is the one place where a missing setting is not a licence to guess.
     return async () => undefined;
+  }
+
+  if (mode === "password") {
+    const db = config.db;
+    // No database, no sessions, no identity. Refusing is the only honest answer; the
+    // alternative is throwing on every request of a misconfigured deployment.
+    if (!db) return async () => undefined;
+
+    // Identity comes from the session and from nothing else: no header carries a
+    // verified name in this mode, so reading one here would undo the whole feature.
+    return async (req) => {
+      const token = parseCookies(header(req, "cookie"))[SESSION_COOKIE];
+      if (!token) return undefined;
+      const session = await resolveSession(db, token);
+      return session?.userId;
+    };
   }
 
   if (mode === "roster") {

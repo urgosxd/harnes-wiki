@@ -106,7 +106,11 @@ test("with no Stack context the call is blocked and the stored default is never 
   // whatever Stack the upstream happens to sit on.
   const { result, args, calls } = await run(undefined, {});
   assert.equal(result.isError, true);
-  assert.match(textOf(result), /\?user=<name>&stackId=<stack-id>/);
+  // What the person is told to open: a link that carries the Stack, and a sign-in for
+  // the identity. `?user=` is what the removed model said, and it must never return.
+  assert.match(textOf(result), /a link that ends in \?stackId=<stack-id>/);
+  assert.match(textOf(result), /sign in/);
+  assert.doesNotMatch(textOf(result), /[?&]user=/);
   assert.equal(args, undefined);
   assert.equal(calls, 0, "the MCP client must receive ZERO calls");
 });

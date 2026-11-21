@@ -84,20 +84,35 @@ services:
       CHAT_THINKING_LEVEL: ${CHAT_THINKING_LEVEL:-medium}
       PI_WORKSPACE_DIR: /data/workspace
       DATABASE_URL: postgres://agentdocumentor:${POSTGRES_PASSWORD}@postgres:5432/agentdocumentor
-      # How callers are identified. `roster` is the default HERE, unlike the development
-      # stack: production is the one place where "the name in the link IS the identity" is
-      # a decision somebody has to take on purpose, and a deployment that boots open by
-      # accident is exactly what this default prevents. Each user gets a secret of their
-      # own, a claimed id that disagrees with the token is refused with `401`, and tokens
-      # shorter than 16 characters stop the boot.
+      # How callers are identified. `password` is the default HERE, and it is the only mode
+      # the browser can use: everyone signs in through `POST /api/login` with their own user
+      # and password, and the identity comes from the `sid` cookie. Nothing is read from the
+      # query string or from a request header, so no link can sign anybody in.
       #
-      # Still overridable, because `open` behind a private network is a legitimate choice
-      # and a compose file that refused the operator's decision would be a second product.
-      # The roster itself is NOT here and NOT in `.env`: it is mounted below.
-      AUTH_MODE: ${AUTH_MODE:-roster}
-      # Empty is the normal state: the roster arrives through the mount below. This
-      # variable exists so an orchestrator secret can OVERRIDE that file, and the
-      # entrypoint gives it precedence.
+      # The legacy modes are opt-in and this file never selects one. `open` behind a private
+      # network is a legitimate choice and a compose file that refused the operator's
+      # decision would be a second product. `roster` restores per-user tokens (a claimed id
+      # that disagrees with the token is refused with `401`, and tokens shorter than 16
+      # characters stop the boot), but it is API-only: the web client has no token field, so
+      # the browser answers `401` forever. Falling back to `roster` here was the same class
+      # of mistake — a production boot nobody could sign into — which is why the fallback is
+      # `password` and a legacy mode now has to be named on purpose.
+      AUTH_MODE: ${AUTH_MODE:-password}
+      # The accounts a fresh database starts with: `id:password,id:password`. Empty is the
+      # normal state — `alice` and `bob` are then created at the first boot with a generated
+      # password printed ONCE in the server log, so that log stream is sensitive until the
+      # password is saved somewhere. An account that already exists is never rewritten.
+      #
+      # Forwarded explicitly because `deploy/env.prod.example` sets it: Compose interpolates
+      # the env file, but only what this block names reaches the container, so an unlisted
+      # value would be silently ignored and every deployment would invent its own passwords.
+      DEFAULT_USERS: ${DEFAULT_USERS:-}
+      # DEPRECATED — legacy `roster` mode only. Read when AUTH_MODE=roster (or as the
+      # inference fallback when AUTH_MODE is unset); the default password path never consults
+      # it, because identity there is a row in `users`. Kept because roster mode and its
+      # tests still use it, and empty is its normal state: the roster arrives through the
+      # mount below, and this variable exists so an orchestrator secret can OVERRIDE that
+      # file — the entrypoint gives it precedence.
       CHAT_USERS: ${CHAT_USERS:-}
       INGEST_API_BASE_URL: ${INGEST_API_BASE_URL:-}
       INGEST_API_TIMEOUT_MS: ${INGEST_API_TIMEOUT_MS:-10000}
@@ -164,9 +179,10 @@ services:
       # exports `CHAT_USERS` from it. Rotating a user is editing this file and restarting
       # the server container; nothing is baked into an image and nothing is committed.
       #
-      # A missing host file is created here as an EMPTY DIRECTORY by Docker; with
-      # `AUTH_MODE=roster` as the default the entrypoint then STOPS the boot and says so,
-      # rather than starting a server that refuses every request.
+      # A missing host file is created here as an EMPTY DIRECTORY by Docker; under
+      # `AUTH_MODE=roster` — the only mode that reads it — the entrypoint then STOPS the
+      # boot and says so, rather than starting a server that refuses every request. The
+      # default `AUTH_MODE=password` path never looks at this mount.
       - ./.chat-users:/run/secrets/chat-users:ro
     healthcheck:
       test:

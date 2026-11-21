@@ -356,7 +356,11 @@ if [ -z "$PUBLIC_BASE_URL" ]; then
 fi
 case "$AUTH_MODE" in
   open | '')
-    warn "AUTH_MODE=open: the name in the link IS the identity and there is no secret behind it. Put TLS and network restrictions in front, or use AUTH_MODE=roster with CHAT_USERS."
+    # Text only, because the pattern is what the script does. `open` is not the fix to
+    # anything any more: the browser signs in through `POST /api/login`, so a name in a
+    # header is a mode nobody can reach from the UI, and `password` is the mode this
+    # deployment ships in — which is also the fallback an empty value resolves to.
+    warn "AUTH_MODE=open: a name in a request header IS the identity and there is no secret behind it. Put TLS and network restrictions in front, or use AUTH_MODE=password (which is what an empty AUTH_MODE already falls back to)."
     ;;
 esac
 

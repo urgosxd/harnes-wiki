@@ -87,7 +87,7 @@ export const LIST_REFRESH_MS = 5_000;
 export const MISSING_STACK_ID_PROBLEM =
   "This page needs a stackId in the link. Ingest reads and writes belong to one " +
   "Stack, so without it there is nothing safe to read. Open the link you were " +
-  "given, which ends in ?user=<name>&stackId=<stack-id>.";
+  "given, which ends in ?stackId=<stack-id>.";
 
 /**
  * What an ingest attempt says when neither source names a Stack.

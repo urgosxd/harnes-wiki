@@ -21,23 +21,32 @@ odd/tasks/      Feature plan and evidence for the current work
 
 ## API
 
-Every request must name a caller, and by default the name is all there is: the
-server accepts `x-user-id: <name>` and treats it as the identity. Nothing verifies
-it. See **Identity: the name in the link** below for what that means and for the
-`AUTH_MODE` that restores per-user tokens.
+Every request must name a caller, and the caller is a signed-in account: sign in with
+`POST /login`, keep the `sid` cookie it sets, and send it with every later request. A
+request without a valid session is `401`. See **Sign in: a user and a password** below for
+the whole model, and for the legacy `AUTH_MODE`s that still identify a caller from
+headers.
 
 ```bash
-curl -H "x-user-id: alice" http://127.0.0.1:8088/api/me   # 200 {"id":"alice",...}
+curl -c cookies.txt -X POST http://127.0.0.1:8088/api/login \
+  -H 'content-type: application/json' \
+  -d '{"user":"alice","password":"<from DEFAULT_USERS, or from the first boot log>"}'
+# 200 {"user":{"id":"alice","displayName":"alice"}}
+
+curl -b cookies.txt http://127.0.0.1:8088/api/me   # 200 {"id":"alice","displayName":"alice"}
 ```
 
-A request with no `x-user-id`, or with one that is empty or malformed, is `401`. The
-id is read from the request headers only, never from a body or query parameter.
-Under `AUTH_MODE=roster`, `x-dev-token` is what identifies the caller and a claimed
-`x-user-id` must agree with it.
+The legacy modes (`open`, `shared-token`, `roster`) still identify a caller from the
+`x-user-id` and `x-dev-token` headers, and exist for the test suites and for an API
+deployment that deliberately has no accounts. The web client does not support them.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness |
+| `GET` | `/health` | Liveness. The one route that needs no session |
+| `POST` | `/login` | Sign in with `{user,password}`; `200` plus the `sid` cookie |
+| `POST` | `/logout` | Sign out; `204`, and the cookie is cleared |
+| `GET` | `/me` | `{id,displayName}` of the session's account |
+| `POST` | `/users` | Create an account from `{user,password,displayName?}`; `201` |
 | `GET` | `/conversations` | The caller's conversations, newest first |
 | `POST` | `/conversations` | Create one |
 | `GET` | `/conversations/:id` | Conversation plus projected messages |
@@ -74,8 +83,9 @@ Never commit provider credentials.
 | Variable | Purpose |
 |---|---|
 | `PI_AGENT_DIR` | Pi agent directory holding `models.json` and, when needed, `auth.json`. Mounted read-only in containers. |
-| `AUTH_MODE` | `open` (the development default), `shared-token` or `roster` (the production default). Chooses how a caller is identified; see **Identity: the name in the link**. |
-| `CHAT_USERS` | `id:token,id:token`, only read when `AUTH_MODE=roster`. Normally **not set at all**: both compose files mount `.chat-users` read-only and the entrypoint exports this from it. |
+| `AUTH_MODE` | `password` (the default), or the legacy `open`, `shared-token` and `roster`. Chooses how a caller is identified; see **Sign in: a user and a password**. |
+| `DEFAULT_USERS` | `id:password,id:password` for the two accounts a fresh database gets (`alice`, `bob`). Unset means their passwords are generated at the first boot and printed once in the server log. |
+| `CHAT_USERS` | **Legacy, roster mode only**: `id:token,id:token`, read only when `AUTH_MODE=roster`, never by the password path. Normally **not set at all**: both compose files mount `.chat-users` read-only and the entrypoint exports this from it. |
 | `CHAT_API_KEY` | Provider key. The container generates its own `models.json` from it and never carries it in the image. |
 | `POSTGRES_PASSWORD` | Database password. Applied on the volume's first `initdb` only; see the note below. |
 | `PI_WORKSPACE_DIR` | Neutral workspace handed to the session as `cwd`. Never a real project path. |
@@ -341,11 +351,14 @@ CHAT_API_KEY=sk-...
 # Database (secret). Applied only on the volume's first initdb.
 POSTGRES_PASSWORD=<48 hex chars>
 
-# How callers are identified. `open` = the name in the link, no secret.
-# Use `roster` to require per-user tokens. The tokens do NOT go here and do not go in
-# any compose file: they live in `.chat-users`, which both stacks mount read-only. See
-# "Three people, three tokens" below.
-AUTH_MODE=open
+# How callers are identified. `password` is the default: everyone signs in with their
+# own user and password. `DEFAULT_USERS` sets the passwords of the two accounts a fresh
+# database gets; leave it out and they are generated at the first boot and printed once
+# in the server log. The legacy modes (`open`, `shared-token`, `roster`) still exist for
+# the tests, and the web client cannot use them. See "Sign in: a user and a password"
+# below.
+AUTH_MODE=password
+DEFAULT_USERS=alice:<password>,bob:<password>
 
 # External ingest service
 INGEST_API_BASE_URL=http://host.docker.internal:4240
@@ -368,66 +381,165 @@ Three notes that are easy to get wrong:
    `INGEST_API_BASE_URL` one this server can reach. A container IP changes when the
    network is recreated; prefer a hostname, or `extra_hosts:
    ["host.docker.internal:host-gateway"]` when the ingest service runs on the host.
-3. **`AUTH_MODE=open` means no authentication.** Anyone who can reach the server can
-   act as any user by editing a URL. Only choose it where that is acceptable, and
-   have TLS plus network restrictions in front. `AUTH_MODE=roster` is the mode that
-   requires a secret per user.
+3. **`AUTH_MODE` defaults to `password`, and that is the mode to keep.** The legacy
+   `open` mode means no authentication: anyone who can reach the server can act as any
+   user by sending a header. Only choose it where that is acceptable, behind TLS and
+   network restrictions, and never on a host that holds real conversations.
 
-## Identity: the name in the link
+## Sign in: a user and a password
 
-**There is no authentication** in the sense of a login: no password, no session, no
-sign-in form. In the development stack the `user` in the link IS the identity —
+Identity is an account. A person opens the app, types a `User` and a `Password`, and
+signs in; the server answers with an `HttpOnly` session cookie, and every later request
+carries it. That is the whole model: no email, no token in the link, and no way to be
+identified by the URL.
 
 ```
-http://localhost:8088/?user=alice
+http://localhost:8088/?stackId=<stack-id>
 ```
 
-— while a production deployment defaults to `AUTH_MODE=roster`, where the link also
-carries a per-user token that the server checks (see **Three people, three tokens**).
-The consequence of the first case has to be stated plainly:
+`?stackId=` chooses the Stack and signs nobody in (see **The Stack comes from the
+link**). `?user=` and `?token=` are dead parameters: the client ignores both, and a link
+carrying them lands on the sign-in screen like any other URL.
 
-- **Anybody who can reach the server can act as any user.** Change `user=alice` to
-  `user=bob` and you are bob.
-- **There is nothing to "validate" the name against.** With no secret, a check
-  would only confirm that a string looks like a name. Writing one would be a claim
-  of control where there is none.
-- **Conversations are still separated by `user_id` in the database.** Ownership is
-  enforced on every query; what is missing is any proof that the caller is entitled
-  to the id they claim.
+### The two default accounts
 
-There is no `users` table and no account to create. Any name matching
-`[A-Za-z0-9._@-]{1,64}` is accepted, and it becomes a `user_id` the first time it
-creates a conversation. What a roster deployment adds is one line in `.chat-users` per
-person — a secret, not a user record: nothing has to be migrated when someone leaves, only
-rotated. With `AUTH_MODE=open`, which is where the development stack starts, there is no
-roster to maintain at all.
+A fresh database gets **two** accounts, `alice` and `bob`, created after the migrations
+and before the server starts listening, so a new install needs no hand-created user
+before the product is usable. Their passwords come from `DEFAULT_USERS`
+(`alice:<password>,bob:<password>`):
 
-**The link is not a secret.** Send it however you like; what it grants is the name
-it contains, and everyone can type that name themselves.
+- **Set**, the value is used as written. A malformed entry — an id that is not
+  `[A-Za-z0-9._@-]{1,64}`, a password outside 8–200 characters, or the same id declared
+  twice — **stops the boot** and names the entry, because a deployment that seeded
+  `alice` and silently skipped `bob` looks healthy and is missing an account.
+- **Unset**, both accounts are created anyway, each with a generated password printed
+  **once** in the server log at that first boot:
 
-### Modes
+```
+default user "alice" created with a generated password — this is the only copy, save
+it now: password="…"
+```
 
-`AUTH_MODE` selects the scheme, and the difference is only whether a claimed id can
-be checked against a secret:
+That makes the log stream sensitive exactly once, so capture it there and then
+(`docker compose logs server | grep 'generated password'`) and store the passwords with
+whatever holds the deployment's other secrets. It is never printed again: seeding is
+`INSERT ... ON CONFLICT DO NOTHING`, so an account that already exists is left exactly as
+it is and a changed `DEFAULT_USERS` afterwards has nothing left to do. The tempting
+upsert would turn every restart into a silent credential reset for people who are already
+signed in.
+
+Everyone has the same permissions: no role, no admin flag, no privileged account. Anyone
+signed in can create another account, and ownership of conversations, documents and jobs
+stays scoped by `user_id`.
+
+### The endpoints
+
+`POST /api/login` with `{"user":"<id>","password":"<password>"}`:
+
+| Answer | Body |
+|---|---|
+| `200` | `{"user":{"id":"…","displayName":"…"}}`, plus `Set-Cookie: sid=…` |
+| `400 invalid_request` | `user and password are required` — a missing or blank field |
+| `401 invalid_credentials` | `User or password is incorrect` |
+| `429 too_many_attempts` | `Too many failed attempts; try again later` |
+
+An unknown user and a wrong password answer with the same status, the same body and the
+same amount of work (a `scrypt` verification against a dummy hash), so the endpoint
+cannot be used to discover which accounts exist.
+
+`POST /api/logout` answers `204` and expires the cookie, whatever arrived: no cookie, a
+cookie for a session that is already gone, or a token the server never issued. Signing out
+is not something a client should have to succeed at twice.
+
+`GET /api/me` answers `200 {"id":"…","displayName":"…"}` for a valid session and `401`
+without one. In password mode `displayName` is the account's own name, not the id echoed
+back; in the legacy modes there is no account and the id is the name.
+
+`POST /api/users` with `{"user":"…","password":"…","displayName":"…"}` creates an
+account. `displayName` is optional (it defaults to the id, capped at 120 characters), the
+id must match `[A-Za-z0-9._@-]{1,64}`, and the password is 8 to 200 characters — never
+trimmed, because spaces inside a password are part of it:
+
+| Answer | Body |
+|---|---|
+| `201` | `{"user":{"id":"…","displayName":"…"}}` |
+| `400 invalid_request` | the rule that was broken: the id pattern, the password bounds, or the `displayName` cap |
+| `401` | no valid session |
+| `409 user_exists` | `User "<id>" already exists` |
+| `409 user_reserved` | `User "<id>" is reserved: it already owns data in this deployment` |
+
+An id that already **owns data in this deployment** — at least one row in `conversations`,
+`tenant_mcp` or `tenant_scopes` with that `user_id` — is refused rather than adopted. Those
+rows are keyed by a name, and a deployment coming from a legacy mode has rows whose name is
+not an account yet; under a password, creating that name would mean signing in as the owner
+of somebody else's conversations. `user_exists` wins when the id is both an account and an
+owner, because an existing account is the more specific fact.
+
+The two seeded accounts are the documented exception: `alice` and `bob` may still adopt a
+legacy deployment's existing rows, because `seedDefaultUsers` creates them at boot and that is
+the migration path off the header modes — the operator's action, not a caller's.
+
+The `409` comes from the insert's unique violation and never from a `SELECT` first: two
+requests for the same id can both find it missing, and only the database can decide which
+one wins. The loser is refused and the existing row is not touched — a duplicate must
+never be a silent password reset.
+
+### The session
+
+The cookie is an opaque 32-byte token: `sid`, `Path=/`, `HttpOnly`, `SameSite=Lax`, a
+`Max-Age` of 30 days, and `Secure` only when `PUBLIC_BASE_URL` is https (a `Secure` cookie
+sent over plain http is dropped by the browser, which turns into a login that silently
+never sticks).
+
+It is a bearer secret, so the database stores only its SHA-256 in `sessions.token_hash`;
+the plain token goes to the browser and is never written down server-side. Nothing in the
+browser keeps a second copy either — no `localStorage`, no `sessionStorage`, no token in
+the URL — and `HttpOnly` keeps it away from scripts. Signing out deletes the row, which is
+what makes it a revocation rather than a suggestion: from that moment the cookie names
+nobody.
+
+### The login throttle
+
+Failures are counted **in memory, per process**: 10 failures for one account lock that
+account for 15 minutes and answer `429`. The count is **per account, not per caller**, which
+is worth stating plainly: guessing one account's password is slowed, while spraying a single
+guess across many account names is not slowed at all — a caller who already knows which
+account to attack pays for the lock, a caller walking a list of names pays nothing.
+Three further consequences are worth knowing before an operator meets them: a restart resets
+every counter, a stack running more than one server process counts per process rather than
+globally, and nothing here is durable. The lock is a speed bump, not the brute-force
+defence — that is a strong password, chosen in `DEFAULT_USERS`.
+
+### The legacy modes
+
+`AUTH_MODE=password` is the default. `open`, `shared-token` and `roster` remain, and they
+identify a caller from headers instead of a session:
 
 | `AUTH_MODE` | Identity comes from | Resists impersonation | Needs |
 |---|---|---|---|
-| `open` (default) | `x-user-id` alone | **No** | nothing |
-| `shared-token` | `x-dev-token` + `x-user-id` | No — one token for everyone | `DEV_AUTH_TOKEN` (≥1 char, shared) |
-| `roster` | `x-dev-token` resolved to a user | **Yes** | `CHAT_USERS=id:token,...` |
+| `password` (default) | the `sid` cookie of a signed-in account | **Yes** | `DEFAULT_USERS`, or the passwords generated at the first boot |
+| `open` (legacy) | `x-user-id` alone | **No** | nothing |
+| `shared-token` (legacy) | `x-dev-token` + `x-user-id` | No — one token for everyone | `DEV_AUTH_TOKEN` (≥1 char, shared) |
+| `roster` (legacy) | `x-dev-token` resolved to a user | **Yes** | `CHAT_USERS=id:token,...` |
 
-With `AUTH_MODE=roster` each person gets a secret of their own, a claimed id that
-disagrees with the token is refused with `401`, and tokens shorter than 16
-characters are rejected at startup. That mode still works and is still tested; it is
-a configuration change, not a rewrite.
+The legacy modes exist for the test suites and for an API deployment that deliberately has
+no accounts. **The web client supports `password` only**: it signs in with the cookie and
+never sends an identity header, so a stack running a legacy mode answers the browser with
+`401` and the app stays on the sign-in screen. Under `open` a name in a header is the
+identity, with no secret behind it — anyone who can reach the server can act as any user —
+which is a decision somebody takes on purpose, behind TLS and network restrictions, and
+never on a host that holds real conversations.
 
-A misspelled `AUTH_MODE` throws at startup instead of falling back to a weaker mode.
-With nothing configured at all, the server refuses every request: inference never
-falls forward into `open`.
+A misspelled `AUTH_MODE` throws at startup instead of falling back to a weaker mode. With
+nothing configured at all the server now runs `password`, never `open`: the inference
+that still understands the legacy modes cannot fall forward into a mode that refuses
+every request it was not given a session for.
 
-### Three people, three tokens: onboarding and rotating a user
+### Roster mode, if a deployment chooses it
 
-Each person gets a secret the others do not have, and the secrets live in ONE file:
+Roster mode is legacy and **cannot serve the web client** (see above): it exists for an
+API deployment that wants a secret per caller. Each person gets a secret the others do not
+have, and the secrets live in ONE file:
 
 - `.chat-users`, in the deployment directory beside the compose file that mounts it, holds
   **a single line**: `id:token,id:token,id:token`.
@@ -439,9 +551,11 @@ Each person gets a secret the others do not have, and the secrets live in ONE fi
   and interpolated into every service that names a variable, and a token is not a setting.
   A mounted file also has one place to rotate and one thing to protect.
 
-Production (`docker-compose.prod.yml`) defaults to `AUTH_MODE=roster`. The development
-stack stays `open` on purpose, so a fresh clone boots with no roster file at all; the mount
-is already in place there, so trying the real thing is `AUTH_MODE=roster` in `.env`.
+Neither compose file defaults to this mode any more: `docker-compose.yml` defaults to
+`AUTH_MODE=password`, and `docker-compose.prod.yml` falls back to the same `password` when
+nothing sets the variable — `deploy/env.prod.example` sets it too. Choosing roster is
+`AUTH_MODE=roster` in `.env` and nothing else, and then a missing `.chat-users` stops the
+boot instead of starting a server that refuses every request.
 
 **Token shape.** 16 to 64 characters; 32 hex characters from the OS CSPRNG is what this
 repository generates. Shorter than 16 stops the boot (`CHAT_USERS token for "<id>" is too
@@ -468,42 +582,39 @@ node scripts/provision-mcp.mjs       # also reads .chat-users when USERS is unse
 ```
 
 **Rotating one token** is the same edit with a new value: replace `dave:<old>` with
-`dave:<new>` in `.chat-users`, restart, hand out the new link. The old link stops working
-at the restart. There is no revocation API and no expiry, so a rotation IS this edit —
-nothing else has to be told.
+`dave:<new>` in `.chat-users`, restart, and give the person the new value to send as
+`x-dev-token`. The old one stops working at the restart. There is no revocation API and no
+expiry, so a rotation IS this edit — nothing else has to be told.
 
-**The link** is `?user=dave&token=<his value>`. The name must match the token's owner: a
-valid token that claims somebody else answers `401 unauthorized`, and so does a name with
-no token. On the API a token alone is enough to identify its owner; the browser needs the
-name as well, because the client turns `?user=` and `?token=` into headers and shows nothing
-at all without a name.
+**A roster caller** is `x-dev-token: <his value>`, plus `x-user-id` when it wants to say
+who it is: a valid token that claims somebody else answers `401`, and so does a name with
+no token. On the API a token alone is enough, because it names its own owner. This is an
+API spelling and not a product URL: `?user=` and `?token=` are ignored by the client, and
+the browser cannot sign in to a stack in this mode at all.
 
 **The silent state to watch for.** A roster user with no `tenant_mcp` rows chats normally
 and simply has **no MCP tools**: no error, no notice, no log line. Step 4 above is the fix.
 If a new user reports that the assistant cannot search the wiki or read a Stack, check the
 provisioning step before anything else — the identity worked, the grant is what is missing.
 
-### Opening a link never asks for credentials
+### What a person sees
 
-There is no sign-in form on any path, because there is nothing to type that the link
-does not already carry.
-
-| URL | What the person sees |
+| State | What the person sees |
 |---|---|
-| `?user=alice` | The product, straight away |
-| No `user` | "This page needs a user in the link", and nothing to type |
-| A name the server refuses | "This link was not accepted" |
-| Server down | "Cannot reach the server", never an identity error |
+| `?stackId=<stack-id>` | The sign-in screen, then the product, scoped to that Stack |
+| No `stackId` | The sign-in screen, then the product; only the ingest surface asks for a Stack |
+| A `?user=` / `?token=` link | The sign-in screen: both parameters are ignored |
+| Wrong credentials | `User or password is incorrect` |
+| 10 failures in 15 minutes | `Too many failed attempts; try again later` |
+| Signed out, or a session that expired | The sign-in screen again, with no error |
+| Server down | "Cannot reach the server", with a retry — never an identity error |
 
-A token-only link (`?token=...`) is **not** an identity any more: with no roster a
-token names nobody, so it is treated as a link with no user. A link carrying both is
-still accepted, and the token is forwarded as `x-dev-token`, which is what keeps
-`AUTH_MODE=roster` and old links working.
-
-**Giving someone access** is just giving them the URL with their name. **Revoking**
-it is not possible without switching to `AUTH_MODE=roster` — where the procedure is
-**Three people, three tokens** above: a name has no secret of its own to revoke, and a
-roster entry does.
+**Giving someone access** is creating an account: `POST /api/users` while signed in, then
+telling them the id and the password. Everyone has the same permissions, so there is no
+role to grant. **Taking it away** is signing them out and deleting their row in `users`;
+there is no endpoint for the delete yet, and the two effects are worth knowing: their
+sessions cascade away, and their conversations do **not** — those tables predate accounts
+and declare no foreign key, so the rows stay and become unreachable.
 
 ### Giving a user the wiki tools
 
@@ -564,16 +675,16 @@ like `/api/ingest/jobs` to the browser and `/ingest/jobs` to the server.
 The ingest surface is tenant-scoped, and the tenant is the `stackId` in the URL:
 
 ```
-http://localhost:8088/?user=alice&stackId=<stack-id>
+http://localhost:8088/?stackId=<stack-id>
 ```
 
 Every READ — the document list, the job list, an upload — takes that parameter and
 nothing else. There is no Stack environment variable, nothing is injected at build
 time, and no default is assumed when it is absent; each of those would let one
 tenant's jobs be read under another tenant's name. It is read once, at mount, from
-`location.search`, right next to `?user=`; it is not stored in `localStorage`, not
-remembered between visits, and not accepted from a header or a cookie, so a reload
-without it is blocked exactly like a first visit.
+`location.search`, beside the `GET /api/me` that decides whether the person is signed in;
+it is not stored in `localStorage`, not remembered between visits, and not accepted from a
+header or a cookie, so a reload without it is blocked exactly like a first visit.
 
 A WRITE resolves its Stack in one place, in the same order the agent's tools use: the
 Stack chosen in the panel wins, and the link's is the fallback. The panel's **Stack**
@@ -586,7 +697,7 @@ choice started, because a job created in one Stack cannot be followed in another
 
 | Link | Ingest surface |
 |---|---|
-| `?user=alice&stackId=<stack-id>` | The reads and the prefill carry that Stack, and so does every write while the control is left alone |
+| `?stackId=<stack-id>` | The reads and the prefill carry that Stack, and so does every write while the control is left alone |
 | No `stackId`, or empty / whitespace-only | States the missing parameter and issues no READ at all — no list, no upload, no poll. A Stack chosen in the control can still start an ingest |
 | Neither the link nor the control names one | No request at all, and the notice below is on screen |
 
@@ -943,7 +1054,7 @@ Every validation message names the variable and never its value.
 | `REGISTRY` | empty | **required to pull**: a deployment consumes registry images, so on a fresh host this is the variable that makes `pull` possible. Empty is allowed and selects local images, but then `agentdocumentor-server:latest` and `agentdocumentor-web:latest` must already exist on that host |
 | `INGEST_API_BASE_URL` | empty (allowed) | degrades: uploads keep working, ingest-by-document answers `503 ingest_not_configured` |
 | `PUBLIC_BASE_URL` | empty (allowed) | degrades: upload-backed ingests are disabled |
-| `AUTH_MODE` | `open` in the development stack, `roster` in `docker-compose.prod.yml` | `open` degrades: the name in the link IS the identity, with no secret behind it. `roster` with no roster file **aborts** the boot |
+| `AUTH_MODE` | `password` in `deploy/env.prod.example`, which is the template `deploy.sh` copies, and `password` again is the fallback in `docker-compose.prod.yml` when nothing sets it; `roster` there takes an explicit `AUTH_MODE=roster` | `password` needs no extra file: the two default accounts are seeded at the first boot. The legacy `open` degrades: a name in a header IS the identity, with no secret behind it. `roster` with no roster file **aborts** the boot, and the web client cannot sign in to it |
 
 `PI_AGENT_CONFIG_MODE` is the one that looks optional and is not: `config.ts` aborts
 when the mode is anything but `generate` **and** `PI_AGENT_DIR` is empty, which is why
@@ -1059,16 +1170,18 @@ that is the whole reason the two compose files exist.
 
 ## Client
 
-React 19 + Vite. The `?token=` in the URL IS how a user authenticates (`?user=` is
-an optional display hint), and the rules for reading it live in
-`web/src/lib/credentials.ts` with their own tests. The ingest tenant is read the
-same way — once, at mount, from `location.search` — by `web/src/lib/tenant.ts`.
+React 19 + Vite. Identity is the session cookie, so the client stores no token: a person
+signs in at the sign-in screen (`User`, `Password`, `Sign in`) and the browser holds the
+`sid` cookie from then on. `web/src/lib/session.ts` is the whole session client —
+`fetchIdentity`, `signIn`, `signOut` — and `App` asks `GET /api/me` once on mount to decide
+between the loading state, "Cannot reach the server" with a retry, the sign-in screen and
+the product. The ingest tenant is read differently: once, at mount, from
+`location.search`, by `web/src/lib/tenant.ts`.
 
-One consequence worth stating: the token appears in the URL, so it also appears in
-nginx's access log (default `combined` format logs the query string). Use TLS in
-front of this stack, and treat the logs as sensitive. Moving the token to the URL
-fragment (`#token=`) would keep it out of the server log — a deliberate follow-up,
-not an oversight.
+One consequence worth stating: no secret travels in the URL any more, so the access log
+holds no credential and the query string carries only `?stackId=`. The cookie is
+`HttpOnly`, which keeps it away from scripts; it is a bearer token all the same, so put
+TLS in front of this stack — a plain-http deployment sends it in the clear.
 
 Text is rendered as text, never as HTML: model output is untrusted input.
 The SSE parser is hand-written because a chunk boundary can fall inside a frame,
@@ -1091,8 +1204,10 @@ Installing Vite 8 fails on a peer conflict; do not paper over it with
 
 `server/test/isolation.test.ts` is the MVP's definition of done. It builds its
 server with `AUTH_MODE=roster` and **one token per user**, so every request it makes
-carries that user's own secret: what it verifies is data-layer ownership under the
-deployed posture, not under a harness that trusts a header. It defaults to 2
+carries that user's own secret: what it verifies is data-layer ownership with distinct
+identities, not under a harness that trusts a header. (That mode is legacy; the ownership
+predicates it exercises are the ones every mode shares, and password mode pins its own
+identity rules on top.) It defaults to 2
 users (`ISOLATION_USERS=5` for the full run) and nothing in it is specific to that
 number:
 
@@ -1110,12 +1225,12 @@ against its own connection, and a business tool enforces only its tenant's scope
 
 **What this file cannot tell you.** The ownership predicates it exercises are what stop
 one *legitimate* user's data appearing in another's sidebar; they are tested here with
-two different secrets, which is as far as a test can go. What no test can settle is
-whether the operator kept the roster out of a chat message: under `AUTH_MODE=roster` a
-leaked link is a leaked account until that token is rotated, and under `open` there is no
-secret at all. `scripts/smoke.mjs` prints an explicit `SKIP` for the impersonation check,
-with that reason. The ownership tests need a reachable Postgres and skip without one —
-a skip is not a pass.
+two different secrets, which is as far as a test can go. What no test can settle is how
+the operator handed the credentials over: a password pasted into a chat message is a
+password in a chat message, and one reused from somewhere else is worse. The claim the old
+`SKIP` here used to leave open is an assertion now — `scripts/smoke.mjs` proves that a name
+in a header signs nobody in and that one session's cookie cannot claim another's id. The
+ownership tests need a reachable Postgres and skip without one — a skip is not a pass.
 
 Both properties were mutation-checked: removing the ownership predicate makes all
 seven tests fail, and rebuilding the tenant runtime per turn fails the process
@@ -1232,7 +1347,9 @@ It takes the ids from `USERS` (or `CHAT_USERS=id:token,...`, or a legacy
 `.chat-users` file), upserts one row per user, and is idempotent: running it twice is
 the same as running it once, and a corrected `MCP_SERVER_URL` replaces the old
 address instead of adding a second server. It grants tools; it does not create
-users, because with `AUTH_MODE=open` a user is just a name.
+accounts. Under the default `AUTH_MODE=password` an account is a row in `users`, made by
+`POST /api/users` or by the seeding, so list the ids that already exist there: a grant for
+an id nobody can sign in as is a grant nobody can use.
 
 Before touching a row it asks the host `tools/list` and refuses to write a list the
 host cannot honour:
@@ -1307,8 +1424,8 @@ about Stacks.
 The Stack an agent tool call reads is the `stackId` from the page's link: the page
 forwards it as `x-stack-id` on the turn request, and the MCP proxy reads it per call.
 It is a SELECTION of which Stack to read, never an authorisation — no entitlement is
-derived from it, nothing is stored with the conversation, and under `AUTH_MODE=open`
-any caller could set it, just as any caller can already claim any `x-user-id`.
+derived from it and nothing is stored with the conversation. Any signed-in caller can set
+it, exactly as they can pick a Stack in the ingest panel.
 
 A link without `stackId` therefore cannot use the wiki tools BY FALLBACK: a
 Stack-scoped call that names no Stack fails closed with a visible error naming the

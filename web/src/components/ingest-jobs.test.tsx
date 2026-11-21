@@ -4,6 +4,7 @@ import { IngestJobView } from "./IngestJobView.tsx";
 import { IngestJobsPanel } from "./IngestJobsPanel.tsx";
 import { ApiClient, ApiError } from "../lib/api.ts";
 import {
+  MISSING_STACK_ID_PROBLEM,
   noticeFor,
   noticeForOutcome,
   UNRESOLVED_STACK_ID_NOTICE,
@@ -681,9 +682,7 @@ describe("IngestJobsPanel", () => {
           stackId: null,
           resolvedStackId: null,
           stackIds: [],
-          blockedProblem:
-            "This page needs a stackId in the link. Open the link you were given, " +
-            "which ends in ?user=<name>&stackId=<stack-id>.",
+          blockedProblem: MISSING_STACK_ID_PROBLEM,
         })}
         onClose={onClose}
       />,
@@ -694,7 +693,9 @@ describe("IngestJobsPanel", () => {
     // exact S4 copy, stated as the state of the control rather than announced twice.
     const alerts = screen.getAllByRole("alert").map((node) => node.textContent);
     expect(alerts).toHaveLength(1);
-    expect(alerts[0]).toContain("?user=<name>&stackId=<stack-id>");
+    expect(alerts[0]).toContain("?stackId=<stack-id>");
+    // And it no longer sends anyone to a link that names a user (S3).
+    expect(alerts[0]).not.toContain("?user=");
     expect(screen.getByText(UNRESOLVED_STACK_ID_NOTICE)).toBeDefined();
 
     // No Stack resolved means no form: there is nothing to submit into, so the panel
@@ -1246,9 +1247,7 @@ describe("IngestJobsPanel: delete and retry", () => {
           stackId: null,
           resolvedStackId: null,
           stackIds: [],
-          blockedProblem:
-            "This page needs a stackId in the link. Open the link you were given, " +
-            "which ends in ?user=<name>&stackId=<stack-id>.",
+          blockedProblem: MISSING_STACK_ID_PROBLEM,
           jobs: [job()],
           activeJob: job(),
           activeId: job().id,
