@@ -422,7 +422,7 @@ function resolveStackArgument(
     return {
       error:
         `${toolName} works on one Stack, and this turn has no Stack. ` +
-        "Open the app with a link that names it — ?user=<name>&stackId=<stack-id> — and ask again.",
+        "Open the app with a link that ends in ?stackId=<stack-id>, sign in, and ask again.",
     };
   }
 

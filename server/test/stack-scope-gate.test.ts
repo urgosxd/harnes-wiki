@@ -95,8 +95,12 @@ test("S9 no context on a flat-schema Stack tool: refused, exact copy, zero upstr
   assert.equal(
     text(result),
     "ingest_jobs_list works on one Stack, and this turn has no Stack. " +
-      "Open the app with a link that names it — ?user=<name>&stackId=<stack-id> — and ask again.",
+      "Open the app with a link that ends in ?stackId=<stack-id>, sign in, and ask again.",
   );
+  // The old model put a NAME in the link. A link names nobody now: identity comes from
+  // a sign-in, and a copy that still spells `?user=` would send the person to a
+  // parameter no surface reads.
+  assert.doesNotMatch(text(result), /[?&]user=/);
   assert.equal(calls.length, before, "an error after a read is still a read");
 });
 

@@ -536,10 +536,10 @@ have, and the secrets live in ONE file:
   A mounted file also has one place to rotate and one thing to protect.
 
 Neither compose file defaults to this mode any more: `docker-compose.yml` defaults to
-`AUTH_MODE=password`, and `docker-compose.prod.yml` falls back to `roster` only when
-nothing sets the variable — `deploy/env.prod.example` sets `password`. Choosing it is
-`AUTH_MODE=roster` in `.env`, and then a missing `.chat-users` stops the boot instead of
-starting a server that refuses every request.
+`AUTH_MODE=password`, and `docker-compose.prod.yml` falls back to the same `password` when
+nothing sets the variable — `deploy/env.prod.example` sets it too. Choosing roster is
+`AUTH_MODE=roster` in `.env` and nothing else, and then a missing `.chat-users` stops the
+boot instead of starting a server that refuses every request.
 
 **Token shape.** 16 to 64 characters; 32 hex characters from the OS CSPRNG is what this
 repository generates. Shorter than 16 stops the boot (`CHAT_USERS token for "<id>" is too
@@ -1038,7 +1038,7 @@ Every validation message names the variable and never its value.
 | `REGISTRY` | empty | **required to pull**: a deployment consumes registry images, so on a fresh host this is the variable that makes `pull` possible. Empty is allowed and selects local images, but then `agentdocumentor-server:latest` and `agentdocumentor-web:latest` must already exist on that host |
 | `INGEST_API_BASE_URL` | empty (allowed) | degrades: uploads keep working, ingest-by-document answers `503 ingest_not_configured` |
 | `PUBLIC_BASE_URL` | empty (allowed) | degrades: upload-backed ingests are disabled |
-| `AUTH_MODE` | `password` in `deploy/env.prod.example`, which is the template `deploy.sh` copies; `docker-compose.prod.yml` falls back to `roster` when nothing sets it | `password` needs no extra file: the two default accounts are seeded at the first boot. The legacy `open` degrades: a name in a header IS the identity, with no secret behind it. `roster` with no roster file **aborts** the boot, and the web client cannot sign in to it |
+| `AUTH_MODE` | `password` in `deploy/env.prod.example`, which is the template `deploy.sh` copies, and `password` again is the fallback in `docker-compose.prod.yml` when nothing sets it; `roster` there takes an explicit `AUTH_MODE=roster` | `password` needs no extra file: the two default accounts are seeded at the first boot. The legacy `open` degrades: a name in a header IS the identity, with no secret behind it. `roster` with no roster file **aborts** the boot, and the web client cannot sign in to it |
 
 `PI_AGENT_CONFIG_MODE` is the one that looks optional and is not: `config.ts` aborts
 when the mode is anything but `generate` **and** `PI_AGENT_DIR` is empty, which is why

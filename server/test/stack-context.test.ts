@@ -168,7 +168,7 @@ test("with no Stack context the call is blocked, visibly, and never reaches the 
   assert.equal(
     textOf(result),
     "ingest_jobs_list works on one Stack, and this turn has no Stack. " +
-      "Open the app with a link that names it — ?user=<name>&stackId=<stack-id> — and ask again.",
+      "Open the app with a link that ends in ?stackId=<stack-id>, sign in, and ask again.",
   );
   assert.deepEqual(result.details, {});
   // The fact that matters: nothing went out unscoped. An error result plus an
