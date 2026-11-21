@@ -11,6 +11,7 @@ import { Logger } from "./log.ts";
 import { loadConfig } from "./config.ts";
 import { createDatabase } from "./db/pool.ts";
 import { migrate } from "./db/migrate.ts";
+import { seedDefaultUsers } from "./db/seed-users.ts";
 import { ConversationStore } from "./db/conversation-store.ts";
 import { TenantRuntime, type TenantDefinition } from "./pi/tenant-runtime.ts";
 import { TurnService } from "./api/turn-service.ts";
@@ -159,6 +160,18 @@ async function main(): Promise<void> {
   if (migration.applied.length > 0) {
     log.info("migrations applied", { migrations: migration.applied });
   }
+
+  // The two accounts a fresh deployment can sign in with (S5), created here so a new
+  // install needs no hand-created user before the product is usable. Idempotent, and it
+  // never touches an account that already exists, so a restart cannot reset a password.
+  // A malformed `DEFAULT_USERS` throws out of this call on purpose: the boot must fail
+  // with the offending entry named, not seed a deployment that is silently missing an
+  // account. Logged through the one logger, and before the server listens, so nothing is
+  // printed after the process looks ready.
+  await seedDefaultUsers(db, {
+    ...(process.env.DEFAULT_USERS === undefined ? {} : { raw: process.env.DEFAULT_USERS }),
+    log: (line) => log.info(line),
+  });
 
   const store = new ConversationStore(db);
 

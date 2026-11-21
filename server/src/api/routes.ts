@@ -6,7 +6,13 @@ import { withStackContext } from "../pi/stack-context.ts";
 import type { ConversationStore } from "../db/conversation-store.ts";
 import type { Database } from "../db/pool.ts";
 import type { AuthMode } from "../http/auth.ts";
-import { hashPassword, verifyPassword } from "../http/passwords.ts";
+import {
+  MAX_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  hashPassword,
+  verifyPassword,
+} from "../http/passwords.ts";
+import { USER_ID_PATTERN } from "../db/seed-users.ts";
 import {
   LoginThrottle,
   SESSION_COOKIE,
@@ -60,6 +66,21 @@ interface LoginBody {
   user?: unknown;
   password?: unknown;
 }
+
+interface CreateUserBody {
+  user?: unknown;
+  password?: unknown;
+  displayName?: unknown;
+}
+
+/**
+ * Longest display name the endpoint accepts.
+ *
+ * The column has no bound of its own, so this route is the only place the length of a name
+ * is decided. A bound exists at all because a name is rendered: an unbounded one is a
+ * layout somebody else has to survive.
+ */
+const MAX_DISPLAY_NAME_LENGTH = 120;
 
 /**
  * The Stack this turn must read, as the page named it.
@@ -242,6 +263,83 @@ export function registerRoutes(router: Router, deps: RouteDeps): void {
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // Accounts
+  // ---------------------------------------------------------------------------
+
+  if (db) {
+    /**
+     * Create an account.
+     *
+     * Anyone signed in may do it (S4), and that is the whole authorization story: there is
+     * no role, no admin flag and no privileged account, so the creator is not recorded as
+     * the owner of anything (S6). The account it creates is an ordinary account — same
+     * permissions as whoever created it, and its own rows and nobody else's.
+     *
+     * The id rule is the one `users.id` enforces in the database. Checking it here is what
+     * turns a rejected id into a `400` the client can read instead of the `500` a violated
+     * CHECK constraint would produce.
+     *
+     * A duplicate is answered from the INSERT's unique violation and never from a SELECT
+     * first: two requests for the same id can both find it missing, and only the database
+     * can decide which one wins. With the decision inside the insert, the loser answers
+     * `409` and the row that already exists is not touched — a duplicate must never be a
+     * silent password reset.
+     */
+    router.post("/users", async (ctx) => {
+      const body = (await ctx.body()) as CreateUserBody | undefined;
+
+      const userId = typeof body?.user === "string" ? body.user.trim() : "";
+      if (!USER_ID_PATTERN.test(userId)) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          "user must match [A-Za-z0-9._@-] and be at most 64 characters",
+        );
+      }
+
+      // Never trimmed: spaces inside a password are part of it, and the bounds are the
+      // hashing module's, so this route cannot accept one it would refuse to hash.
+      const password = typeof body?.password === "string" ? body.password : "";
+      if (password.length < MIN_PASSWORD_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          `Password must be between ${MIN_PASSWORD_LENGTH} and ${MAX_PASSWORD_LENGTH} characters`,
+        );
+      }
+
+      // Optional, and the id is its own default: a client that only cares about the id
+      // should not have to send a name. Blank is treated as absent, because a name made of
+      // spaces is not a name.
+      const requestedName = typeof body?.displayName === "string" ? body.displayName.trim() : "";
+      if (requestedName.length > MAX_DISPLAY_NAME_LENGTH) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          `displayName must be at most ${MAX_DISPLAY_NAME_LENGTH} characters`,
+        );
+      }
+      const displayName = requestedName || userId;
+
+      const passwordHash = await hashPassword(password);
+      try {
+        await db.query("INSERT INTO users (id, display_name, password_hash) VALUES ($1, $2, $3)", [
+          userId,
+          displayName,
+          passwordHash,
+        ]);
+      } catch (error) {
+        if (isUniqueViolation(error)) {
+          throw new HttpError(409, "user_exists", `User "${userId}" already exists`);
+        }
+        throw error;
+      }
+
+      sendJson(ctx.res, 201, { user: { id: userId, displayName } });
+    });
+  }
+
   router.get("/conversations", async ({ res, userId }) => {
     const list = await store.listForUser(userId);
     sendJson(res, 200, {
@@ -378,6 +476,17 @@ async function streamFrames(
   } finally {
     ctx.res.end();
   }
+}
+
+/**
+ * Whether this error is Postgres refusing a duplicate key (SQLSTATE 23505).
+ *
+ * Read through the error's `code` rather than by importing the driver's error class, so a
+ * wrapped or re-thrown error is still recognised for the one fact that matters: the
+ * database already has that id.
+ */
+function isUniqueViolation(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "23505";
 }
 
 function toConversationJson(conversation: {
