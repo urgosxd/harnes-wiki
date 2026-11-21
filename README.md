@@ -466,6 +466,18 @@ trimmed, because spaces inside a password are part of it:
 | `400 invalid_request` | the rule that was broken: the id pattern, the password bounds, or the `displayName` cap |
 | `401` | no valid session |
 | `409 user_exists` | `User "<id>" already exists` |
+| `409 user_reserved` | `User "<id>" is reserved: it already owns data in this deployment` |
+
+An id that already **owns data in this deployment** — at least one row in `conversations`,
+`tenant_mcp` or `tenant_scopes` with that `user_id` — is refused rather than adopted. Those
+rows are keyed by a name, and a deployment coming from a legacy mode has rows whose name is
+not an account yet; under a password, creating that name would mean signing in as the owner
+of somebody else's conversations. `user_exists` wins when the id is both an account and an
+owner, because an existing account is the more specific fact.
+
+The two seeded accounts are the documented exception: `alice` and `bob` may still adopt a
+legacy deployment's existing rows, because `seedDefaultUsers` creates them at boot and that is
+the migration path off the header modes — the operator's action, not a caller's.
 
 The `409` comes from the insert's unique violation and never from a `SELECT` first: two
 requests for the same id can both find it missing, and only the database can decide which
@@ -489,10 +501,14 @@ nobody.
 ### The login throttle
 
 Failures are counted **in memory, per process**: 10 failures for one account lock that
-account for 15 minutes and answer `429`. Two consequences are worth knowing before an
-operator meets them: a restart resets every counter, and a stack running more than one
-server process counts per process, not globally. The lock is a speed bump, not the
-brute-force defence — that is a strong password, chosen in `DEFAULT_USERS`.
+account for 15 minutes and answer `429`. The count is **per account, not per caller**, which
+is worth stating plainly: guessing one account's password is slowed, while spraying a single
+guess across many account names is not slowed at all — a caller who already knows which
+account to attack pays for the lock, a caller walking a list of names pays nothing.
+Three further consequences are worth knowing before an operator meets them: a restart resets
+every counter, a stack running more than one server process counts per process rather than
+globally, and nothing here is durable. The lock is a speed bump, not the brute-force
+defence — that is a strong password, chosen in `DEFAULT_USERS`.
 
 ### The legacy modes
 

@@ -1,12 +1,14 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Database } from "../src/db/pool.ts";
 import { createRouter } from "../src/http/router.ts";
 import { createAuthenticator } from "../src/http/auth.ts";
 import { registerRoutes } from "../src/api/routes.ts";
-import type { ConversationStore } from "../src/db/conversation-store.ts";
+import { ConversationStore } from "../src/db/conversation-store.ts";
+import { SESSION_COOKIE } from "../src/http/sessions.ts";
 import type { TurnService } from "../src/api/turn-service.ts";
 import { DEFAULT_USER_IDS, parseDefaultUsers, seedDefaultUsers } from "../src/db/seed-users.ts";
 import { databaseAvailable, openTestDatabase } from "./support/db.ts";
@@ -23,6 +25,12 @@ import { databaseAvailable, openTestDatabase } from "./support/db.ts";
  * This file owns `alice` and `bob` on the test database: it removes them before and
  * after, because "two accounts exist on a fresh database" is only observable when those
  * two ids are absent. No other suite uses them (they build ids from `testUser`).
+ *
+ * It also carries the documented EXCEPTION to the creation rule: `POST /users` refuses an
+ * id that already owns data, but seeding may adopt a legacy deployment's rows, which is
+ * how a deployment migrating off the header modes keeps its conversations. That case needs
+ * the `alice` fixture, so it lives here — where the fixture is reset around every test —
+ * and not in a suite that would have to negotiate with this file's teardown.
  */
 const available = await databaseAvailable();
 const skip = available ? false : "needs a reachable Postgres (docker compose up -d postgres)";
@@ -42,12 +50,26 @@ before(async () => {
 
 after(async () => {
   if (!available) return;
+  await removeAdoptedConversations();
   await resetSeededAccounts();
   await db.close();
 });
 
 async function resetSeededAccounts(): Promise<void> {
   await db.query("DELETE FROM users WHERE id = ANY($1::text[])", [SEEDED]);
+}
+
+/**
+ * Remove the legacy conversation the adoption case inserts.
+ *
+ * `conversations.user_id` has no foreign key to `users` (rows are keyed before an account
+ * exists), so deleting the seeded account does not take the row with it, and the row has to
+ * be deleted by hand. Scoped to `alice`, which is the only id this file adopts rows for and
+ * which no other suite writes conversations under; running it before the case starts as well
+ * means a previous crashed run cannot make this one see two conversations.
+ */
+async function removeAdoptedConversations(): Promise<void> {
+  await db.query("DELETE FROM conversations WHERE user_id = 'alice'");
 }
 
 async function seededRows(): Promise<Array<{ id: string; display_name: string; created_at: Date }>> {
@@ -63,10 +85,10 @@ interface Booted {
 }
 
 /** Just enough server to attempt a login: the endpoint that reads what seeding stored. */
-async function boot(): Promise<Booted> {
+async function boot(store: ConversationStore = {} as unknown as ConversationStore): Promise<Booted> {
   const router = createRouter({ authenticate: createAuthenticator({ mode: "password", db }) });
   registerRoutes(router, {
-    store: {} as unknown as ConversationStore,
+    store,
     turns: {} as unknown as TurnService,
     db,
     authMode: "password",
@@ -92,6 +114,22 @@ async function loginStatus(baseUrl: string, user: string, password: string): Pro
 /** The password a log line carries, or `undefined` when the line carries none. */
 function loggedPassword(line: string): string | undefined {
   return /password="([^"]+)"/.exec(line)?.[1];
+}
+
+/** Sign in for real and return the `sid` cookie header, so a later request can be that account. */
+async function signInCookie(baseUrl: string, user: string, password: string): Promise<string> {
+  const response = await fetch(`${baseUrl}/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ user, password }),
+  });
+  await response.text();
+  assert.equal(response.status, 200, `${user} must be able to sign in with the password seeding used`);
+
+  const setCookies = response.headers.getSetCookie();
+  const line = setCookies.find((cookie) => cookie.startsWith(`${SESSION_COOKIE}=`));
+  assert.ok(line !== undefined, `expected a ${SESSION_COOKIE} cookie, got ${JSON.stringify(setCookies)}`);
+  return line.slice(0, line.indexOf(";") === -1 ? line.length : line.indexOf(";"));
 }
 
 // ---------------------------------------------------------------------------
@@ -250,5 +288,53 @@ test("an invalid DEFAULT_USERS throws, names the entry and seeds nothing", { ski
     // A half-seeded deployment is worse than a failed boot: the transaction must leave
     // the table exactly as it was.
     assert.deepEqual(await seededRows(), [], `a rejected DEFAULT_USERS must create no account (raw: ${raw})`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The documented exception: seeding adopts a legacy deployment's rows
+// ---------------------------------------------------------------------------
+
+test("seeded accounts adopt the rows a legacy deployment already owns", { skip }, async () => {
+  await resetSeededAccounts();
+  await removeAdoptedConversations();
+
+  // What a deployment coming from a header mode leaves behind: a conversation keyed by
+  // `alice` with no account by that name. `conversations.user_id` has no foreign key, which
+  // is exactly why such a row can exist before any account does.
+  assert.deepEqual(await seededRows(), [], "the fixture needs both seeded accounts to be absent");
+  const conversationId = randomUUID();
+  await db.query("INSERT INTO conversations (id, user_id, pi_session_id) VALUES ($1, $2, $3)", [
+    conversationId,
+    "alice",
+    randomUUID(),
+  ]);
+
+  // The exception, and the ONLY place it applies: seeding says "yes, that id already owns
+  // rows — that is the point". `POST /users` refuses the same id with `409 user_reserved`,
+  // so an operator migrating a deployment is the only actor who can reach those rows.
+  const seeded = await seedDefaultUsers(db, { raw: "alice:legacypass01,bob:bobpass012" });
+  assert.ok(
+    seeded.created.includes("alice"),
+    `alice must be created over her existing rows, got ${JSON.stringify(seeded.created)}`,
+  );
+
+  const server = await boot(new ConversationStore(db));
+  try {
+    const cookie = await signInCookie(server.baseUrl, "alice", "legacypass01");
+
+    // The whole point of the exception: the account that was just created reads the rows that
+    // were already there. Asserted by id, because "the login answered 200" says nothing about
+    // whether the ownership link survived the migration.
+    const response = await fetch(`${server.baseUrl}/conversations`, { headers: { cookie } });
+    const body = (await response.json()) as { conversations: Array<{ id: string }> };
+    assert.equal(response.status, 200, "the seeded account must be able to list its conversations");
+    assert.deepEqual(
+      body.conversations.map((conversation) => conversation.id),
+      [conversationId],
+      "the seeded account must read the conversation the deployment already had",
+    );
+  } finally {
+    server.close();
   }
 });

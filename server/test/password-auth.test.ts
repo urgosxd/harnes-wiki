@@ -549,3 +549,54 @@ test("GET /me in open mode still answers the old { id, displayName } shape", { s
     server.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// The two ways a session stops working that nothing inward can show
+// ---------------------------------------------------------------------------
+
+test("a session that has expired is refused", { skip }, async () => {
+  const account = await createAccount();
+  const server = await boot();
+  try {
+    // A row a real login would have left behind, except for the one column under test: the
+    // token is correctly hashed and belongs to an account that still exists, and only
+    // `expires_at` is in the past.
+    const token = globalThis.crypto.randomUUID();
+    await db.query(
+      "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() - interval '1 day')",
+      [sha256(token), account.id],
+    );
+
+    const reply = await getMe(server.baseUrl, { cookie: `${SESSION_COOKIE}=${token}` });
+
+    assert.equal(reply.status, 401);
+    // The whole body, not only the status: a refusal that names the account would still be
+    // a leak, and `{ error: "unauthorized" }` is everything a caller may learn here.
+    assert.deepEqual(reply.body, { error: "unauthorized" });
+    assert.doesNotMatch(JSON.stringify(reply.body), new RegExp(account.id));
+  } finally {
+    server.close();
+  }
+});
+
+test("a session whose account was deleted is refused", { skip }, async () => {
+  const account = await createAccount();
+  const server = await boot();
+  try {
+    const logged = await postLogin(server.baseUrl, { user: account.id, password: account.password });
+    assert.equal(logged.status, 200, "the fixture must be a real session, not a hand-made cookie");
+    const token = cookieValue(sessionCookie(logged.setCookies));
+
+    // The cookie is untouched and its hash is still stored: the JOIN to `users` is the only
+    // thing that can refuse it, so a session row cannot outlive the account it names.
+    await db.query("DELETE FROM users WHERE id = $1", [account.id]);
+
+    const reply = await getMe(server.baseUrl, { cookie: `${SESSION_COOKIE}=${token}` });
+
+    assert.equal(reply.status, 401);
+    assert.deepEqual(reply.body, { error: "unauthorized" });
+    assert.doesNotMatch(JSON.stringify(reply.body), new RegExp(account.id));
+  } finally {
+    server.close();
+  }
+});

@@ -1,5 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { Database } from "../src/db/pool.ts";
@@ -46,9 +47,13 @@ before(async () => {
 
 after(async () => {
   if (!available) return;
-  // Transcripts first, then the accounts: `conversations.user_id` has no foreign key
-  // (rows are keyed before an account exists), so the cascade does not clean this up.
+  // Transcripts and the other owner-keyed rows first, then the accounts:
+  // `conversations.user_id` has no foreign key (rows are keyed before an account exists),
+  // so the cascade does not clean this up, and `tenant_mcp`/`tenant_scopes` are the rows
+  // this file seeds to make an id look like it already owns data.
   await db.query("DELETE FROM conversations WHERE user_id LIKE $1", [`${createdPrefix}%`]);
+  await db.query("DELETE FROM tenant_mcp WHERE user_id LIKE $1", [`${createdPrefix}%`]);
+  await db.query("DELETE FROM tenant_scopes WHERE user_id LIKE $1", [`${createdPrefix}%`]);
   await db.query("DELETE FROM users WHERE id LIKE $1", [`${createdPrefix}%`]);
   await db.close();
 });
@@ -148,6 +153,37 @@ async function existingAccount(): Promise<{ id: string; password: string }> {
   return { id, password: PASSWORD };
 }
 
+/**
+ * An id that already owns a conversation, with no account behind it.
+ *
+ * This is exactly what a deployment coming from a header mode leaves: rows keyed by a name
+ * that is not an account yet. `createdPrefix` keeps every row this file writes inside its
+ * own teardown.
+ */
+async function ownsConversation(): Promise<string> {
+  const id = freshId("legacy-conv");
+  await db.query("INSERT INTO conversations (id, user_id, pi_session_id) VALUES ($1, $2, $3)", [
+    randomUUID(),
+    id,
+    randomUUID(),
+  ]);
+  return id;
+}
+
+/** The same, where the only thing the id owns is an MCP server row. */
+async function ownsMcpServer(): Promise<string> {
+  const id = freshId("legacy-mcp");
+  await db.query("INSERT INTO tenant_mcp (user_id, server_name, command) VALUES ($1, 'legacy', 'node')", [id]);
+  return id;
+}
+
+/** The same, where the only thing the id owns is a business-scope row. */
+async function ownsScope(): Promise<string> {
+  const id = freshId("legacy-scope");
+  await db.query("INSERT INTO tenant_scopes (user_id, scope) VALUES ($1, 'orders:read')", [id]);
+  return id;
+}
+
 async function userRows(id: string): Promise<Array<{ id: string; display_name: string; password_hash: string }>> {
   return db.query<{ id: string; display_name: string; password_hash: string }>(
     "SELECT id, display_name, password_hash FROM users WHERE id = $1",
@@ -230,6 +266,92 @@ test("a duplicate id answers 409 and leaves the existing row untouched", { skip 
     // by "creating" their account again is the failure this pins.
     const after = await userRows(id);
     assert.deepEqual(after, before, "the existing account must be exactly as it was");
+  } finally {
+    server.close();
+  }
+});
+
+test("an id that already owns data is refused with 409 user_reserved and creates no account", { skip }, async () => {
+  const actor = await existingAccount();
+  const server = await boot();
+  try {
+    const signedIn = await signIn(server.baseUrl, actor.id, actor.password);
+    const baseline = await ownedRowCount();
+
+    // Each id owns exactly ONE kind of row. A single fixture owning all three would pass on
+    // the strength of whichever check happens to be first, and the rule names three tables.
+    const cases: Array<[string, () => Promise<string>]> = [
+      ["a conversation", ownsConversation],
+      ["an MCP server row", ownsMcpServer],
+      ["a scope row", ownsScope],
+    ];
+
+    for (const [label, seed] of cases) {
+      const id = await seed();
+      const reply = await createUser(server.baseUrl, signedIn.cookie, {
+        user: id,
+        password: "a-fresh-password",
+      });
+
+      assert.equal(reply.status, 409, `an id that owns ${label} must be refused`);
+      assert.deepEqual(
+        reply.body,
+        {
+          error: "user_reserved",
+          message: `User "${id}" is reserved: it already owns data in this deployment`,
+        },
+        `the frozen user_reserved body for an id that owns ${label}`,
+      );
+      // The row the route writes before it checks is rolled back with the refusal, so the
+      // id stays unclaimed: a created account here would hand the caller somebody's data.
+      assert.deepEqual(await userRows(id), [], `an id that owns ${label} must not become an account`);
+      assert.equal(await ownedRowCount(), baseline, "a refusal must not change the number of accounts");
+
+      // Stable, and it does not decay into `user_exists`: nothing was created to collide with.
+      const again = await createUser(server.baseUrl, signedIn.cookie, { user: id, password: PASSWORD });
+      assert.equal(again.status, 409, `the second attempt for ${label} is refused too`);
+      assert.deepEqual(again.body, reply.body);
+    }
+
+    // The rule refuses ids that own data, not creation itself: a brand-new id still works.
+    const fresh = freshId("owns-nothing");
+    const created = await createUser(server.baseUrl, signedIn.cookie, { user: fresh, password: PASSWORD });
+    assert.equal(created.status, 201, "creating an id that owns nothing must still work");
+    assert.deepEqual(created.body, { user: { id: fresh, displayName: fresh } });
+    assert.equal((await userRows(fresh)).length, 1);
+    assert.equal(await ownedRowCount(), baseline + 1);
+  } finally {
+    server.close();
+  }
+});
+
+test("an id that is both an account and an owner answers user_exists, the more specific fact", { skip }, async () => {
+  const actor = await existingAccount();
+  const server = await boot();
+  try {
+    const signedIn = await signIn(server.baseUrl, actor.id, actor.password);
+
+    // The ordinary shape of a legacy deployment: the id has an account AND owns rows. Both
+    // rules match, and "this id is taken" is the more specific truth, so it is answered
+    // first — a `user_reserved` here would report an id as free that is not.
+    const id = freshId("account-and-owner");
+    await db.query("INSERT INTO users (id, display_name, password_hash) VALUES ($1, $2, $3)", [
+      id,
+      `Display ${id}`,
+      await hashPassword(PASSWORD),
+    ]);
+    await db.query("INSERT INTO conversations (id, user_id, pi_session_id) VALUES ($1, $2, $3)", [
+      randomUUID(),
+      id,
+      randomUUID(),
+    ]);
+    const before = await userRows(id);
+
+    const reply = await createUser(server.baseUrl, signedIn.cookie, { user: id, password: "another-password" });
+
+    assert.equal(reply.status, 409);
+    assert.deepEqual(reply.body, { error: "user_exists", message: `User "${id}" already exists` });
+    assert.deepEqual(await userRows(id), before, "the existing account must be exactly as it was");
   } finally {
     server.close();
   }

@@ -285,6 +285,21 @@ export function registerRoutes(router: Router, deps: RouteDeps): void {
      * can decide which one wins. With the decision inside the insert, the loser answers
      * `409` and the row that already exists is not touched — a duplicate must never be a
      * silent password reset.
+     *
+     * ## An id that already OWNS data is refused
+     *
+     * `conversations`, `tenant_mcp` and `tenant_scopes` are keyed by a text `user_id` with
+     * no foreign key, on purpose: a deployment coming from a header mode has rows whose id
+     * is not an account yet. Under `AUTH_MODE=open` a name in a header IS the identity, so
+     * "becoming" such an id was never a privilege — everybody could claim it already. Under
+     * a password it is one: the first caller to create that id would sign in as the owner of
+     * somebody else's existing conversations, servers and scopes. So the id is refused with
+     * `409 user_reserved` and stays unclaimed.
+     *
+     * The one deliberate exception is NOT here, and it is not a caller's action: see
+     * `seedDefaultUsers`, which still seeds `alice` and `bob` over pre-existing rows. That is
+     * a deployment's migration path, run by the operator at boot, and it is the only place
+     * that may adopt rows nobody's account owns.
      */
     router.post("/users", async (ctx) => {
       const body = (await ctx.body()) as CreateUserBody | undefined;
@@ -324,12 +339,39 @@ export function registerRoutes(router: Router, deps: RouteDeps): void {
 
       const passwordHash = await hashPassword(password);
       try {
-        await db.query("INSERT INTO users (id, display_name, password_hash) VALUES ($1, $2, $3)", [
-          userId,
-          displayName,
-          passwordHash,
-        ]);
+        await db.transaction(async (tx) => {
+          // The insert runs FIRST so that an id which is both an account and an owner of
+          // rows answers `user_exists`: an existing account is the more specific fact, and
+          // the unique violation is the only decision a concurrent request cannot beat.
+          await tx.query("INSERT INTO users (id, display_name, password_hash) VALUES ($1, $2, $3)", [
+            userId,
+            displayName,
+            passwordHash,
+          ]);
+
+          // One question, three columns that already exist: "owns data" is exactly what
+          // `conversations`, `tenant_mcp` and `tenant_scopes` already say, so the rule needs
+          // no new table and no new column.
+          const [ownership] = await tx.query<{ reserved: boolean }>(
+            `SELECT EXISTS (SELECT 1 FROM conversations WHERE user_id = $1)
+                 OR EXISTS (SELECT 1 FROM tenant_mcp WHERE user_id = $1)
+                 OR EXISTS (SELECT 1 FROM tenant_scopes WHERE user_id = $1) AS reserved`,
+            [userId],
+          );
+          if (ownership?.reserved) {
+            throw new HttpError(
+              409,
+              "user_reserved",
+              `User "${userId}" is reserved: it already owns data in this deployment`,
+            );
+          }
+          // The check shares the insert's transaction, so a reserved id leaves no account
+          // behind: the row written above is rolled back together with the refusal.
+        });
       } catch (error) {
+        // Raised by the insert, which runs before the ownership check, so an id that is both
+        // an account and an owner lands here: `user_exists` is the more specific fact. Any
+        // other error, including the `user_reserved` above, is re-thrown as itself.
         if (isUniqueViolation(error)) {
           throw new HttpError(409, "user_exists", `User "${userId}" already exists`);
         }
