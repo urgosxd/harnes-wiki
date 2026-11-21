@@ -1,132 +1,241 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { App } from "./App.tsx";
 
 /**
- * The product has no sign-in surface, on any path.
+ * WHAT THIS FILE PINS
  *
- * Identity is the `user` in the link, and there is no secret behind it — so a form
- * could not verify anything a person typed. These tests pin that there is nothing to
- * type, and that the three non-happy paths explain themselves instead of offering one.
+ * Identity comes from the session cookie and from nothing else (S1, S3): the app asks
+ * `GET /api/me`, shows the account it is given, and never sends `x-user-id` or
+ * `x-dev-token` again. A URL that still carries `user` and `token` authenticates nobody
+ * and is not an error either. `?stackId=<id>` keeps working exactly as it did (S2) and
+ * still travels as `x-stack-id`.
  */
+
 function useUrl(search: string) {
   window.history.replaceState(null, "", `/${search}`);
 }
 
-/** A path with no request in it, so a missing fetch is a failure rather than a hang. */
-function noFetch() {
-  const mock = vi.fn(async () => {
-    throw new Error("no request expected on this path");
-  });
-  vi.stubGlobal("fetch", mock);
-  return mock;
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status });
 }
+
+const ALICE = { id: "alice", displayName: "Alice" };
+
+interface RecordedCall {
+  method: string;
+  url: string;
+  body: Record<string, unknown> | null;
+  /** Every header the client sent, so a transport rule can be asserted rather than
+   *  inferred from the URL. */
+  headers: Record<string, string>;
+}
+
+type Route = [needle: string, handler: (call: RecordedCall) => Response | Promise<Response>];
 
 /**
- * No sign-in surface, and nothing that accepts a credential.
+ * A stubbed server that records every call.
  *
- * Deliberately not "no textbox at all": once a valid link authenticates, the chat
- * window legitimately renders a composer. What must never appear is a field asking
- * for an identity, so the assertion names those fields rather than every input.
+ * `/api/me` answers the session — the account when `signedIn`, a 401 when not — and the
+ * product's own reads answer empty, so only the traffic under test has to be described.
+ * An unexpected request throws, which is how a stray call becomes a failure instead of
+ * a silently plausible empty screen.
  */
-function expectNoSignInForm() {
-  expect(document.querySelectorAll("input")).toHaveLength(0);
-  expect(screen.queryAllByLabelText(/token/i)).toHaveLength(0);
-  expect(screen.queryAllByLabelText(/your name/i)).toHaveLength(0);
-  expect(screen.queryAllByLabelText(/password/i)).toHaveLength(0);
-  expect(screen.queryAllByText(/sign in/i)).toHaveLength(0);
-  expect(screen.queryAllByText(/continue/i)).toHaveLength(0);
+function stubApi(routes: Route[] = [], options: { signedIn?: boolean } = {}) {
+  const signedIn = options.signedIn ?? true;
+  const calls: RecordedCall[] = [];
+  const fetchMock = vi.fn(async (input: unknown, init: RequestInit = {}) => {
+    const raw = typeof init.body === "string" ? init.body : null;
+    const call: RecordedCall = {
+      method: (init.method ?? "GET").toUpperCase(),
+      url: String(input),
+      body: raw ? (JSON.parse(raw) as Record<string, unknown>) : null,
+      headers: (init.headers ?? {}) as Record<string, string>,
+    };
+    calls.push(call);
+    for (const [needle, handler] of routes) {
+      if (call.url.includes(needle)) return handler(call);
+    }
+    if (call.url.endsWith("/api/me")) {
+      return signedIn ? json(ALICE) : json({ error: "unauthorized", message: "no session" }, 401);
+    }
+    if (call.url.includes("/conversations")) return json({ conversations: [] });
+    if (call.url.includes("/documents")) return json({ documents: [] });
+    if (call.url.includes("/stacks")) return json({ stackIds: [] });
+    if (call.url.includes("/ingest/jobs")) return json({ jobs: [] });
+    throw new Error(`unexpected request: ${call.method} ${call.url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return calls;
 }
 
-describe("App identity from the link", () => {
-  beforeEach(() => {
-    useUrl("?user=alice");
-  });
+/** Requests that would read or write somebody's data. */
+function dataReads(calls: readonly RecordedCall[]) {
+  return calls.filter((call) => /\/ingest\/|\/documents/.test(call.url));
+}
 
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
-  });
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
 
-  it("opens the product from a link that only names a user", async () => {
-    const fetchMock = vi.fn(
-      async () => new Response(JSON.stringify({ id: "alice", displayName: "alice" })),
-    );
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(<App />);
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    // The name alone, and no token header at all.
-    expect(init.headers).toEqual({ "x-user-id": "alice" });
-    expectNoSignInForm();
-  });
-
-  it("still forwards a token when an older link carries one", async () => {
-    useUrl("?user=alice&token=abc123");
-    const fetchMock = vi.fn(
-      async () => new Response(JSON.stringify({ id: "alice", displayName: "alice" })),
-    );
-    vi.stubGlobal("fetch", fetchMock);
+describe("App identity comes from the session", () => {
+  it("renders the app for the account the session names", async () => {
+    useUrl("?stackId=stack-a");
+    const calls = stubApi();
 
     render(<App />);
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(init.headers).toEqual({ "x-user-id": "alice", "x-dev-token": "abc123" });
-    expectNoSignInForm();
+    // The account the session answered with is the account on screen.
+    await waitFor(() => expect(screen.getByTitle("Signed in as Alice")).toBeDefined());
+    expect(screen.getByText("New chat")).toBeDefined();
+    // It asked the session who it is, through the shared client and nothing else.
+    expect(calls[0]?.url).toBe("/api/me");
+    expect(calls[0]?.method).toBe("GET");
   });
 
-  it("explains a link with no user instead of offering a form", () => {
-    useUrl("");
-    const fetchMock = noFetch();
+  it("shows neither the app nor the login form while the session is unresolved", async () => {
+    useUrl("?stackId=stack-a");
+    let release!: (response: Response) => void;
+    stubApi([
+      [
+        "/api/me",
+        () =>
+          new Promise<Response>((resolve) => {
+            release = resolve;
+          }),
+      ],
+    ]);
 
     render(<App />);
 
-    expect(screen.getByText(/needs a user in the link/i)).toBeDefined();
-    expectNoSignInForm();
-    // Nothing was asked of the server: there is no identity to check.
-    expect(fetchMock).not.toHaveBeenCalled();
+    // The neutral state: not a flash of the login form, not a flash of somebody's
+    // conversations.
+    expect(screen.getByText("Connecting…")).toBeDefined();
+    expect(screen.queryByLabelText("Password")).toBeNull();
+    expect(screen.queryByLabelText("User")).toBeNull();
+    expect(screen.queryByText("New chat")).toBeNull();
+
+    release(json(ALICE));
+    await waitFor(() => expect(screen.getByText("New chat")).toBeDefined());
+    expect(screen.queryByLabelText("Password")).toBeNull();
+    expect(screen.queryByText("Connecting…")).toBeNull();
   });
 
-  it("does not accept a token-only link as an identity", () => {
-    // With no roster, a token names nobody. Guessing which account was meant would
-    // be worse than saying the link is incomplete.
-    useUrl("?token=abc123");
-    const fetchMock = noFetch();
+  it("asks for a user and a password when the session names nobody", async () => {
+    useUrl("?stackId=stack-a");
+    const calls = stubApi([], { signedIn: false });
 
     render(<App />);
 
-    expect(screen.getByText(/needs a user in the link/i)).toBeDefined();
-    expectNoSignInForm();
-    expect(fetchMock).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByLabelText("Password")).toBeDefined());
+    expect(screen.getByLabelText("User")).toBeDefined();
+    expect(screen.queryByText("New chat")).toBeNull();
+    // Nobody's data was asked for before someone signed in: the session question is
+    // the only request, so not even the (unscoped) chat list was read.
+    expect(calls.map((call) => call.url)).toEqual(["/api/me"]);
   });
 
-  it("explains a refused identity instead of offering a form that cannot work", async () => {
-    const fetchMock = vi.fn(
-      async () => new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 }),
-    );
-    vi.stubGlobal("fetch", fetchMock);
+  it("treats a link that still carries user and token as dead, not as dangerous", async () => {
+    // S3: `user` and `token` leave the URL. The old link authenticates nobody, and the
+    // honest answer for it is the login form — not a link error, and certainly not an
+    // identity taken from the query string.
+    useUrl("?user=alice&token=abc123&stackId=stack-a");
+    const calls = stubApi([], { signedIn: false });
 
     render(<App />);
 
-    await waitFor(() => expect(screen.getByText(/was not accepted/i)).toBeDefined());
-    expectNoSignInForm();
+    await waitFor(() => expect(screen.getByLabelText("Password")).toBeDefined());
+    expect(screen.queryByText(/not accepted/i)).toBeNull();
+    expect(screen.queryByText(/needs a user in the link/i)).toBeNull();
+    // It did not authenticate either: the only thing that left the browser was the
+    // session question.
+    expect(calls.map((call) => call.url)).toEqual(["/api/me"]);
+    expect(
+      calls.every(
+        (call) => call.headers["x-user-id"] === undefined && call.headers["x-dev-token"] === undefined,
+      ),
+    ).toBe(true);
   });
 
-  it("does not turn a server that is down into an identity problem", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new Error("ECONNREFUSED");
-      }),
-    );
+  it("never sends x-user-id or x-dev-token, on any request, at any point", async () => {
+    // The rule is about the whole session, so it is asserted over every request the
+    // product made: the session question, the login, and everything after it.
+    useUrl("?user=alice&token=abc123&stackId=stack-a");
+    const calls = stubApi([["/api/login", () => json({ user: ALICE })]], { signedIn: false });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByLabelText("Password")).toBeDefined());
+    fireEvent.change(screen.getByLabelText("User"), { target: { value: "alice" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "s3cret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+    await waitFor(() => expect(screen.getByText("New chat")).toBeDefined());
+
+    expect(calls.length).toBeGreaterThan(1);
+    for (const call of calls) {
+      expect(call.headers["x-user-id"]).toBeUndefined();
+      expect(call.headers["x-dev-token"]).toBeUndefined();
+    }
+  });
+
+  it("renders the app with the session's identity after signing in, and leaves the URL alone", async () => {
+    useUrl("?stackId=stack-a");
+    const calls = stubApi([["/api/login", () => json({ user: ALICE })]], { signedIn: false });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByLabelText("Password")).toBeDefined());
+    fireEvent.change(screen.getByLabelText("User"), { target: { value: "alice" } });
+    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "s3cret" } });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+    await waitFor(() => expect(screen.getByTitle("Signed in as Alice")).toBeDefined());
+    // The identity on screen is the one the SERVER named, not the one that was typed.
+    expect(screen.getByText("New chat")).toBeDefined();
+    const login = calls.find((call) => call.url.endsWith("/api/login"));
+    expect(login?.body).toEqual({ user: "alice", password: "s3cret" });
+    // The pre-login URL is untouched: no `?user=`, no `?token=`, ever added to it.
+    expect(window.location.search).toBe("?stackId=stack-a");
+  });
+
+  it("signs out and lands back on the login form", async () => {
+    useUrl("?stackId=stack-a");
+    const calls = stubApi([["/api/logout", () => new Response(null, { status: 204 })]]);
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("New chat")).toBeDefined());
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+
+    await waitFor(() => expect(screen.getByLabelText("Password")).toBeDefined());
+    const logout = calls.find((call) => call.url.endsWith("/api/logout"));
+    expect(logout?.method).toBe("POST");
+    // The app is gone: nothing of the previous session stays on screen.
+    expect(screen.queryByText("New chat")).toBeNull();
+  });
+
+  it("says the server could not be reached, and retries instead of showing a form that cannot work", async () => {
+    useUrl("?stackId=stack-a");
+    let attempt = 0;
+    stubApi([
+      [
+        "/api/me",
+        () => {
+          attempt += 1;
+          if (attempt === 1) throw new Error("ECONNREFUSED");
+          return json(ALICE);
+        },
+      ],
+    ]);
 
     render(<App />);
 
-    await waitFor(() => expect(screen.getByText(/cannot reach the server/i)).toBeDefined());
-    expectNoSignInForm();
+    await waitFor(() => expect(screen.getByText(/Cannot reach the server/i)).toBeDefined());
+    // Neither the login form (which would blame the person) nor a blank page.
+    expect(screen.queryByLabelText("Password")).toBeNull();
+    expect(screen.queryByText("New chat")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(screen.getByText("New chat")).toBeDefined());
   });
 });
 
@@ -138,15 +247,6 @@ describe("App identity from the link", () => {
  *  R3 — whitespace is not a stackId, so it is blocked before any request.
  *  R4 — a Stack the server rejects is shown once, and never retried.
  */
-interface RecordedCall {
-  method: string;
-  url: string;
-  body: Record<string, unknown> | null;
-  /** Every header the client sent, so a transport rule can be asserted rather than
-   *  inferred from the URL. */
-  headers: Record<string, string>;
-}
-
 const ACCEPTED = {
   jobId: "ing_1",
   status: "queued",
@@ -164,51 +264,9 @@ const SETTLED = {
   compile: { status: "succeeded", progress: null },
 };
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status });
-}
-
-/**
- * A stubbed server that records every call, with the chat endpoints answered so only
- * the ingest traffic has to be described.
- */
-function stubApi(routes: Array<[string, (call: RecordedCall) => Response]> = []) {
-  const calls: RecordedCall[] = [];
-  const fetchMock = vi.fn(async (input: unknown, init: RequestInit = {}) => {
-    const raw = typeof init.body === "string" ? init.body : null;
-    const call: RecordedCall = {
-      method: (init.method ?? "GET").toUpperCase(),
-      url: String(input),
-      body: raw ? (JSON.parse(raw) as Record<string, unknown>) : null,
-      headers: (init.headers ?? {}) as Record<string, string>,
-    };
-    calls.push(call);
-    for (const [needle, handler] of routes) {
-      if (call.url.includes(needle)) return handler(call);
-    }
-    if (call.url.endsWith("/me")) return json({ id: "alice", displayName: "alice" });
-    if (call.url.includes("/conversations")) return json({ conversations: [] });
-    if (call.url.includes("/documents")) return json({ documents: [] });
-    if (call.url.includes("/ingest/jobs")) return json({ jobs: [] });
-    throw new Error(`unexpected request: ${call.method} ${call.url}`);
-  });
-  vi.stubGlobal("fetch", fetchMock);
-  return calls;
-}
-
-/** Requests that would read or write somebody's data. */
-function dataReads(calls: readonly RecordedCall[]) {
-  return calls.filter((call) => /\/ingest\/|\/documents/.test(call.url));
-}
-
 describe("App ingest scoping from the link", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
-  });
-
   it("blocks the ingest surface and reads nothing when the link has no stackId", async () => {
-    useUrl("?user=alice");
+    useUrl("?stackId=");
     const calls = stubApi();
 
     render(<App />);
@@ -218,7 +276,9 @@ describe("App ingest scoping from the link", () => {
     // The failure is visible and names what is missing and how the link must look.
     const alert = screen.getByRole("alert");
     expect(alert.textContent).toContain("stackId");
-    expect(alert.textContent).toContain("?user=<name>&stackId=<stack-id>");
+    // S3: the link it tells people to open no longer carries a user.
+    expect(alert.textContent).toContain("?stackId=<stack-id>");
+    expect(alert.textContent).not.toContain("?user=");
     // And there is no ingest surface behind it to read from.
     expect(screen.queryByLabelText("Source")).toBeNull();
 
@@ -228,7 +288,7 @@ describe("App ingest scoping from the link", () => {
   });
 
   it("treats whitespace as no stackId, before any request", async () => {
-    useUrl("?user=alice&stackId=%20%20");
+    useUrl("?stackId=%20%20");
     const calls = stubApi();
 
     render(<App />);
@@ -240,7 +300,7 @@ describe("App ingest scoping from the link", () => {
   });
 
   it("carries the link's stackId on the list, the poll and the create", async () => {
-    useUrl("?user=alice&stackId=0f8b1e42-1111-2222-3333-444455556666");
+    useUrl("?stackId=0f8b1e42-1111-2222-3333-444455556666");
     const stack = "0f8b1e42-1111-2222-3333-444455556666";
     const calls = stubApi([
       [
@@ -287,13 +347,16 @@ describe("App ingest scoping from the link", () => {
   });
 
   it("shows a rejected StackId once, and does not retry it", async () => {
-    useUrl("?user=alice&stackId=not-a-stack");
+    useUrl("?stackId=not-a-stack");
     const calls = stubApi([
       [
         "/ingest/jobs",
         (call) => {
           if (call.method === "POST") {
-            return json({ error: { code: "invalid_stack_id", message: "'not-a-stack' is not a Stack id." } }, 400);
+            return json(
+              { error: { code: "invalid_stack_id", message: "'not-a-stack' is not a Stack id." } },
+              400,
+            );
           }
           return json({ jobs: [] });
         },
@@ -315,10 +378,14 @@ describe("App ingest scoping from the link", () => {
     );
 
     // One attempt. A rejected tenant is a fact, not something to hammer.
-    const creates = calls.filter((call) => call.method === "POST" && call.url.includes("/ingest/jobs"));
+    const creates = calls.filter(
+      (call) => call.method === "POST" && call.url.includes("/ingest/jobs"),
+    );
     expect(creates).toHaveLength(1);
     await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(calls.filter((call) => call.method === "POST" && call.url.includes("/ingest/jobs"))).toHaveLength(1);
+    expect(
+      calls.filter((call) => call.method === "POST" && call.url.includes("/ingest/jobs")),
+    ).toHaveLength(1);
   });
 });
 
@@ -327,13 +394,13 @@ describe("App ingest scoping from the link", () => {
  *
  * The ingest surface already names its Stack in the URL and the body; the chat's own
  * turn POST has no such place, so the link's Stack travels as `x-stack-id`. It is a
- * SELECTION, never an authorisation: the server derives no entitlement from it, and
- * it is the only way the agent's Stack-scoped tools learn which Stack to read.
+ * SELECTION, never an authorisation: the server derives no entitlement from it, and it
+ * is the only way the agent's Stack-scoped tools learn which Stack to read.
  *
  * With no Stack in the link there is nothing to send, and the header must be absent
  * rather than empty — an empty value would name a Stack called "".
  */
-function chatRoutes(): Array<[string, (call: RecordedCall) => Response]> {
+function chatRoutes(): Route[] {
   return [
     [
       "/conversations",
@@ -342,8 +409,8 @@ function chatRoutes(): Array<[string, (call: RecordedCall) => Response]> {
           return json({ id: "c1", title: "hola", createdAt: "", updatedAt: "" }, 201);
         }
         if (call.url.endsWith("/conversations/c1/turns")) {
-          // A turn stream that closes immediately: the test reads the request, not
-          // the answer.
+          // A turn stream that closes immediately: the test reads the request, not the
+          // answer.
           return new Response('data: {"type":"run_finished","outcome":"ok"}\n\n', {
             status: 200,
             headers: { "content-type": "text/event-stream" },
@@ -371,14 +438,9 @@ async function sendOneMessage(): Promise<void> {
 }
 
 describe("App turn transport carries the link's StackId", () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
-  });
-
   it("sends x-stack-id equal to the link's stackId on the turn", async () => {
     const stack = "0f8b1e42-1111-2222-3333-444455556666";
-    useUrl(`?user=alice&stackId=${stack}`);
+    useUrl(`?stackId=${stack}`);
     const calls = stubApi(chatRoutes());
 
     await sendOneMessage();
@@ -388,7 +450,7 @@ describe("App turn transport carries the link's StackId", () => {
   });
 
   it("sends no x-stack-id at all when the link names no stackId", async () => {
-    useUrl("?user=alice");
+    useUrl("");
     const calls = stubApi(chatRoutes());
 
     await sendOneMessage();
@@ -397,5 +459,30 @@ describe("App turn transport carries the link's StackId", () => {
     // Absent, not empty: the header names a Stack or it says nothing.
     expect(turnPost(calls)?.headers["x-stack-id"]).toBeUndefined();
     expect("x-stack-id" in (turnPost(calls)?.headers ?? {})).toBe(false);
+  });
+
+  it("still reads the Stack out of the URL, on every mount", async () => {
+    useUrl("?stackId=stack-a");
+    const calls = stubApi();
+    const first = render(<App />);
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/ingest/jobs?stackId=stack-a")).toBe(true),
+    );
+    first.unmount();
+
+    useUrl("?stackId=stack-b");
+    const mark = calls.length;
+    render(<App />);
+
+    await waitFor(() =>
+      expect(calls.some((call) => call.url === "/api/ingest/jobs?stackId=stack-b")).toBe(true),
+    );
+    // The second mount's traffic belongs to the second Stack and to no other: the id is
+    // read from the URL at mount, not remembered from the previous one.
+    const afterRemount = calls.slice(mark);
+    expect(afterRemount.length).toBeGreaterThan(0);
+    expect(afterRemount.every((call) => (call.headers["x-stack-id"] ?? "stack-b") === "stack-b")).toBe(
+      true,
+    );
   });
 });

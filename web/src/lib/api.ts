@@ -86,9 +86,45 @@ export class ApiClient {
     this.onUnauthorized?.();
   }
 
-  /** Who these credentials belong to. Proves a link carried a real secret. */
+  /** Who the session belongs to, or a 401 when there is no session. */
   async me(): Promise<Identity> {
     return this.json<Identity>("GET", "/me");
+  }
+
+  /**
+   * One sign-in attempt.
+   *
+   * Success carries the account the server named. The session itself arrives as an
+   * `HttpOnly` cookie: the browser stores it and replays it on every later request, so
+   * this client never sees the token and has nowhere to keep one.
+   *
+   * A refusal THROWS `ApiError` with the server's own status, so the caller can tell a
+   * wrong password (401) from a throttle (429) from a rejected request body (400)
+   * instead of treating all three as "no".
+   */
+  async login(user: string, password: string): Promise<Identity> {
+    const body = await this.json<{ user?: Identity }>("POST", "/login", { user, password });
+    const identity = body?.user;
+    // A 200 that names no account is not a sign-in: reporting it as one would hand the
+    // caller an identity nobody authenticated.
+    if (!identity || typeof identity.id !== "string" || identity.id === "") {
+      throw new ApiError(200, "malformed_response", "the server did not name the account");
+    }
+    return identity;
+  }
+
+  /**
+   * End the session.
+   *
+   * The server answers `204` and clears the cookie. Anything else is a failed sign-out
+   * and is reported as one: a screen that says "signed out" while the cookie is still
+   * valid is worse than the error it is hiding.
+   */
+  async logout(): Promise<void> {
+    const response = await this.request("POST", "/logout");
+    if (response.status !== 204) {
+      throw new ApiError(response.status, undefined, `sign-out answered ${response.status}`);
+    }
   }
 
   async listConversations(): Promise<Conversation[]> {
