@@ -873,7 +873,8 @@ cd web
 npm run dev
 ```
 
-Open the link printed by `up.sh` (see **Two users** below).
+Open http://localhost:5173/ and sign in — a fresh database gets `alice` and `bob`
+(see **The two default accounts** above).
 
 `source scripts/dev-env.sh` reads the provider key, the `api` type and the base URL
 from your Pi config. It is sourced, not executed, so the variables reach `npm start`.
@@ -1118,21 +1119,17 @@ what exposes it.
 ## Production (containers)
 
 ```bash
-./scripts/up.sh          # builds, starts, waits for health, prints the URL
-```
-
-Then open the links printed by the script (see **Two users** below).
-
-Or by hand:
-
-```bash
 CHAT_API_KEY=sk-... docker compose up -d --build
 docker compose ps                 # three services must be healthy
 docker compose logs -f server     # structured JSON
 docker compose down               # stops, keeps conversations and volumes
 docker compose down -v            # DANGER: see below before using -v
-node scripts/smoke.mjs            # 8 acceptance checks against the running stack
 ```
+
+Then open http://localhost:8088/ and sign in with an account from the database — a
+fresh one gets two, `alice` and `bob` (see **The two default accounts** above). That
+sign-in, plus one turn, is the whole acceptance check on this path: what a person
+verifies by hand is exactly what the product offers, with no check script in between.
 
 **`-v` removes BOTH volumes, not just the database.** `docker-compose.yml` declares
 `agentdoc-pgdata` (the database) *and* `agentdoc-workspace` (the agent's workspace).
@@ -1145,9 +1142,11 @@ docker compose up -d postgres     # recreated from this file's own credentials
 ```
 
 The container is self-contained: it generates its own Pi model configuration from
-`CHAT_*` variables and mounts nothing from the host. `scripts/up.sh` takes the key
-(and the api type and base URL) from `~/.pi/agent/models.json` so you do not retype
-them; the file itself is never mounted.
+`CHAT_*` variables and mounts nothing from the host. `CHAT_API_KEY` is the one variable
+you must supply; the api type, base URL and model come from the compose file's defaults
+(`synthetic`) unless your shell or `.env` overrides them. Nothing on this path reads
+`~/.pi/agent/models.json` — `scripts/dev-env.sh` does that, for the development path
+only — and the file itself is never mounted.
 
 ### Dev vs production at a glance
 
@@ -1228,8 +1227,10 @@ one *legitimate* user's data appearing in another's sidebar; they are tested her
 two different secrets, which is as far as a test can go. What no test can settle is how
 the operator handed the credentials over: a password pasted into a chat message is a
 password in a chat message, and one reused from somewhere else is worse. The claim the old
-`SKIP` here used to leave open is an assertion now — `scripts/smoke.mjs` proves that a name
-in a header signs nobody in and that one session's cookie cannot claim another's id. The
+`SKIP` here used to leave open is an assertion now — `server/test/password-auth.test.ts`
+proves that a name in a header signs nobody in and that one session's cookie cannot claim
+another's id, and `web/src/lib/session.test.ts` proves no web request carries either
+legacy header. The
 ownership tests need a reachable Postgres and skip without one — a skip is not a pass.
 
 Both properties were mutation-checked: removing the ownership predicate makes all
