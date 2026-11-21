@@ -150,7 +150,7 @@ export function createRouter(options: {
             // Liveness is deliberately public: a healthcheck that needs a user
             // token couples container health to a secret.
             const path = new URL(req.url ?? "/", "http://localhost").pathname;
-            if (!userId && path !== "/health" && !isCapabilityPath(path)) {
+            if (!userId && !isPublicPath(path) && !isCapabilityPath(path)) {
               sendJson(res, 401, { error: "unauthorized" });
               return;
             }
@@ -168,7 +168,26 @@ export function createRouter(options: {
 }
 
 /**
- * Paths that authorise themselves instead of carrying an identity.
+ * Paths that answer without an identity.
+ *
+ * The compare is against the router's OWN paths: the `/api` prefix belongs to the web
+ * client's proxy and is stripped before a request reaches this process, so the entries
+ * are `/login` and `/logout`, exactly as they are registered.
+ *
+ *  - `/health`: liveness, with no data behind it.
+ *  - `/login` and `/logout`: the door itself. If signing in required being signed in,
+ *    nobody could ever arrive; and signing out must work with a cookie that has already
+ *    expired, or a browser would be stuck with a session it cannot drop.
+ *
+ * An allowlist, not a prefix rule: a new exception has to be written here on purpose,
+ * and `/me` — which is nothing BUT identity — stays authenticated.
+ */
+function isPublicPath(pathname: string): boolean {
+  return pathname === "/health" || pathname === "/login" || pathname === "/logout";
+}
+
+/**
+ * Whether a path authorises itself instead of carrying an identity.
  *
  * A capability URL is handed to another service that holds no credential of ours,
  * so requiring one would make the handoff impossible. The path is public by

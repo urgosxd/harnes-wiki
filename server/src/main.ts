@@ -15,7 +15,7 @@ import { ConversationStore } from "./db/conversation-store.ts";
 import { TenantRuntime, type TenantDefinition } from "./pi/tenant-runtime.ts";
 import { TurnService } from "./api/turn-service.ts";
 import { createRouter } from "./http/router.ts";
-import { createAuthenticator, parseAuthMode, resolveAuthMode } from "./http/auth.ts";
+import { createAuthenticator, parseAuthMode, resolveDeploymentAuthMode } from "./http/auth.ts";
 import { registerRoutes } from "./api/routes.ts";
 import { SYSTEM_PROMPT } from "./pi/system-prompt.ts";
 import {
@@ -258,16 +258,20 @@ async function main(): Promise<void> {
     mode: parseAuthMode(process.env.AUTH_MODE),
     users: process.env.CHAT_USERS,
     devToken: process.env.DEV_AUTH_TOKEN,
+    // Password mode reads sessions from here. Injected rather than reached for, so the
+    // authenticator is the only thing that knows an account lookup happens.
+    db,
   };
-  const authenticator = createAuthenticator(authConfig);
+  // An explicit `AUTH_MODE` wins, then the legacy inference, then the product default
+  // (password). A deployment that forgot the variable must NOT end up trusting a claimed
+  // name, which is why the fallback is not `open`.
+  const authMode = resolveDeploymentAuthMode(authConfig);
+  const authenticator = createAuthenticator({ ...authConfig, mode: authMode });
 
   // Say which scheme is live, and say it loudly when the scheme has no secret. An
   // operator reading the logs should never have to infer whether callers are
   // identified or merely self-declared.
-  const authMode = resolveAuthMode(authConfig);
-  if (!authMode) {
-    log.warn("no AUTH_MODE, CHAT_USERS or DEV_AUTH_TOKEN: every request will be refused");
-  } else if (authMode === "open") {
+  if (authMode === "open") {
     log.warn(
       "AUTH_MODE=open: identity is the claimed x-user-id and there is no secret behind " +
         "it. Anyone who can reach this server can act as any user.",
@@ -284,12 +288,17 @@ async function main(): Promise<void> {
         "claim any user id. Set CHAT_USERS=id:token,id:token for per-user identities.",
       { authMode },
     );
-  } else {
+  } else if (authMode === "roster") {
     log.info("identity resolved from a per-user roster", { authMode });
+  } else {
+    // Password mode, whether chosen or defaulted. Worth a line: it is the mode where
+    // accounts have to exist, and an operator seeing 401s should be able to tell that
+    // from the log before opening the database.
+    log.info("identity resolved from username/password sessions", { authMode });
   }
 
   const router = createRouter({ authenticate: authenticator });
-  registerRoutes(router, { store, turns });
+  registerRoutes(router, { store, turns, db, authMode, publicBaseUrl: config.publicBaseUrl });
 
   // The external ingest service is reached server-side only, because it validates
   // its own request headers and cannot be called from the browser's origin. When no
