@@ -60,8 +60,9 @@ export interface ApiClientOptions {
    *  token is picked up without rebuilding the client. */
   headers: () => Record<string, string>;
   fetchImpl?: typeof fetch;
-  /** Called once when the server rejects the credentials, so the UI can ask for
-   *  them again instead of showing an empty screen. */
+  /** Called once when the server answers 401, i.e. the session is gone (expired, or
+   *  signed out elsewhere), so the UI can show the sign-in form instead of an empty
+   *  screen. */
   onUnauthorized?: () => void;
 }
 
