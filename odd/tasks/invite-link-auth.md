@@ -1,5 +1,7 @@
 # Feature: invite-link-auth
 
+> Superseded by odd/tasks/password-login.md.
+
 El token de la URL es la identidad, y no hay formulario de login. Un enlace
 compartido entra directo al producto; un enlace ausente o rechazado dice qué hacer
 en vez de pedir dos campos que la persona no tiene.

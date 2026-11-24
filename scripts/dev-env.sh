@@ -53,11 +53,17 @@ export PI_AGENT_CONFIG_MODE="${PI_AGENT_CONFIG_MODE:-generate}"
 export PI_WORKSPACE_DIR="${PI_WORKSPACE_DIR:-/tmp/agentdoc-dev-workspace}"
 
 export DATABASE_URL="${DATABASE_URL:-postgres://agentdocumentor:agentdocumentor@127.0.0.1:5432/agentdocumentor}"
-# Identity is the name the client claims: there is no secret, so there is no roster
-# to generate and no token file to keep. `?user=alice` IS alice. Stated here rather
-# than assumed, because a local server that looks authenticated but is not is the
-# kind of thing that gets exposed by accident.
-export AUTH_MODE="${AUTH_MODE:-open}"
+# Identity is a login: an account and a password, verified against the `users` table,
+# with an HttpOnly session cookie behind it. There is no secret in the URL and nothing to
+# generate by hand: the database gets `alice` and `bob` on its first boot, and their
+# passwords come from `DEFAULT_USERS` ("alice:<password>,bob:<password>"). Export that before the
+# first `npm start` if you want to choose them; with it unset the server generates both
+# passwords and prints them ONCE in its stdout, so treat that first log as sensitive.
+#
+# The Stack still comes from the URL: `?stackId=<id>` on the Vite dev server. `?user=` and
+# `?token=` are ignored — stated here rather than assumed, because a local server whose
+# identity came from a header would be the kind of thing that gets exposed by accident.
+export AUTH_MODE="${AUTH_MODE:-password}"
 export PORT="${PORT:-8080}"
 export LOG_LEVEL="${LOG_LEVEL:-info}"
 

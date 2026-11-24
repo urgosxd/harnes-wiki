@@ -5,9 +5,9 @@
  *
  * The Stack an ingest belongs to is the `stackId` in the link. Full stop. There is
  * no env var, no build-time config, no localStorage, no header, no cookie and no
- * remembered previous value: opening `?user=alice&stackId=<id>` is what puts a
- * session on a Stack, and a reload without the parameter is blocked exactly like a
- * first visit would be.
+ * remembered previous value: opening `?stackId=<id>` is what puts a session on a
+ * Stack, and a reload without the parameter is blocked exactly like a first visit
+ * would be.
  *
  * That is deliberate rather than convenient. A Stack is a selection, not a boundary:
  * the link says which one this session works against, and a caller may enumerate the
@@ -26,8 +26,10 @@
  *
  * ## Why this is a module and not four lines in `App.tsx`
  *
- * It is pure logic over `location.search`, like `credentials.ts` next door: testable
- * without a DOM, and independent of whichever screen happens to render it.
+ * It is pure logic over `location.search`: testable without a DOM, and independent of
+ * whichever screen happens to render it. The tenant is the only thing the URL still
+ * carries — identity is a session cookie now, held by `session.ts` — which is exactly
+ * why reading it must not depend on any screen or on a value remembered from before.
  */
 
 /**

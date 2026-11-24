@@ -207,7 +207,7 @@ test("no source at all is still refused, with the exact copy, and carries no not
   assert.equal(
     text(result),
     "ingest_jobs_list works on one Stack, and this turn has no Stack. " +
-      "Open the app with a link that names it — ?user=<name>&stackId=<stack-id> — and ask again.",
+      "Open the app with a link that ends in ?stackId=<stack-id>, sign in, and ask again.",
   );
   assert.equal(calls.length, before, "a refusal never reaches the upstream");
   assert.equal(stackNoticeFromResult(result), undefined, "a refusal is not a divergence");
