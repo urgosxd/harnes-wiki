@@ -1334,7 +1334,20 @@ acceptance checklist, and the evidence log.
 
 ## Provisioning the MCP tools
 
-`tenant_mcp` is per user, so the external MCP server has to be granted to each one:
+The server does this automatically. At boot it upserts one `tenant_mcp` row for every
+account in `users`, and `POST /api/users` does the same inside the transaction that
+creates the account. A new user's first turn therefore has the tools the role names —
+no script to remember.
+
+Two variables control it:
+
+| Variable | Effect |
+|---|---|
+| `MCP_SERVER_URL` | The Streamable HTTP endpoint, e.g. `http://172.30.0.10:4173/mcp`. Empty disables automatic provisioning. |
+| `MCP_GRANT_ALL_TOOLS` | `false` (default) grants the shipped role's read-only tools. `true` grants **every** tool the host publishes, including the writes `ingest_source`, `compile_wiki`, `export_okf`, `run_eval` and `ingest_job_delete`. |
+
+The CLI remains available for dry runs, bulk repair, or a deployment that prefers an
+explicit provisioning step:
 
 ```bash
 cd server
@@ -1343,6 +1356,8 @@ MCP_SERVER_URL=http://172.17.0.1:4173/mcp \
 DATABASE_URL=postgres://... \
 node scripts/provision-mcp.mjs            # --dry-run previews, --skip-drift-check skips the host check
 ```
+
+Set `MCP_GRANT_ALL_TOOLS=true` for that command too if you want the write tools.
 
 It takes the ids from `USERS` (or `CHAT_USERS=id:token,...`, or a legacy
 `.chat-users` file), upserts one row per user, and is idempotent: running it twice is
@@ -1385,10 +1400,11 @@ the check. So, in order of preference:
 3. **Rebuild and republish the image**, which is the only permanent fix for the baked
    copy. See *Building and publishing both architectures*.
 
-Nothing runs the script automatically — not `entrypoint.sh`, not the compose file —
-so a stale copy only causes damage when a person runs it. That is the reason this is
-a documentation problem until the image is rebuilt, and a silent-write problem when
-it is not.
+The automatic path uses the grant list built into the server image, so an image built
+before the list changed keeps the old list until it is rebuilt. The boot line names the
+number of accounts and tools it wrote (`tenant MCP provisioned for every account`), which
+is the quickest way to see which list is running. The CLI's host drift check remains the
+way to verify a list against the host before deploying it.
 
 `MCP_DEFAULT_STACK_ID` no longer appears in that command. It is **deprecated and
 ignored**: still tolerated, still warned about once per run, never read. A stored

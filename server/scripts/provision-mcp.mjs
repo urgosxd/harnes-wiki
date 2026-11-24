@@ -40,6 +40,13 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import {
+  MCP_ALL_TOOLS,
+  MCP_HEADERS,
+  MCP_READ_ONLY_WIKI_TOOLS,
+  MCP_READ_TOOLS,
+  MCP_STACK_TOOLS,
+} from "../src/pi/mcp-tools.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -141,43 +148,13 @@ function loadRoster() {
  * (`src/pi/tenant-runtime.ts:201`), so a prefixed spelling here would match nothing and
  * quietly grant no capability at all.
  */
-export const READ_ONLY_WIKI_TOOLS = [
-  "query_wiki",
-  "search_pages",
-  "read_page",
-  "get_context_pack",
-  "wiki_status",
-  "lint_wiki",
-  // `verify_artifact` was granted here until the host stopped publishing it: the
-  // 2026-11-18 build lists 17 tools and none of them is that one. A grant for a tool the
-  // host does not expose is silently dropped by the intersection below, so it reads as
-  // "granted" in the database and grants nothing — the one state this list exists to keep
-  // out.
-];
-
-export const STACK_TOOLS = [
-  "list_stacks",
-  // The graph dimension's three reads. They are filed here rather than with the wiki
-  // reads for the same measured reason `query_stack` always was: each takes a `stackId`
-  // on every call and reads exactly one Stack, and this by-name list is what
-  // `src/pi/tenant-runtime.ts` consults to decide a tool is Stack-scoped before its
-  // schema is read.
-  "query_stack",
-  "traverse_stack",
-  "get_entities",
-  "ingest_jobs_list",
-  "ingest_job_status",
-];
-
-export const TOOLS = [...STACK_TOOLS, ...READ_ONLY_WIKI_TOOLS];
-
-/**
- * Headers the endpoint requires on every request.
- *
- * Streamable HTTP answers 406 without the event-stream half of `Accept`, so this is
- * not optional decoration.
- */
-export const HEADERS = { accept: "application/json, text/event-stream" };
+// The names themselves now live in `src/pi/mcp-tools.ts`, because the server uses the
+// same list to provision every account automatically. Re-exported here so the CLI and
+// the tests keep importing one place, and the server and this script cannot drift.
+export const READ_ONLY_WIKI_TOOLS = MCP_READ_ONLY_WIKI_TOOLS;
+export const STACK_TOOLS = MCP_STACK_TOOLS;
+export const TOOLS = MCP_READ_TOOLS;
+export const HEADERS = MCP_HEADERS;
 
 /**
  * How long the drift check waits for the host before giving up.
@@ -409,6 +386,11 @@ async function main() {
   if (!databaseUrl) throw new Error("DATABASE_URL is required.");
 
   const users = loadRoster();
+  // Writes are opt-in here for the same reason the server makes them opt-in: the
+  // shipped role only reads. A deployment that needs the agent to ingest or compile
+  // sets MCP_GRANT_ALL_TOOLS=true, and then the drift check covers all of them.
+  const grantAll = /^(1|true|yes|on)$/i.test(process.env.MCP_GRANT_ALL_TOOLS?.trim() ?? "");
+  const granted = grantAll ? [...MCP_ALL_TOOLS] : [...TOOLS];
   // One deprecation line per run, before any row is touched, and never an error.
   warnDeprecatedDefaultStack();
 
@@ -421,7 +403,7 @@ async function main() {
       "provision-mcp: --skip-drift-check: the grant list is NOT being verified against the host.\n",
     );
   } else {
-    drift = checkHostGrants(await fetchHostTools(url), { url });
+    drift = checkHostGrants(await fetchHostTools(url), { url, granted });
   }
 
   const client = new pg.Client({ connectionString: databaseUrl });
@@ -452,12 +434,12 @@ async function main() {
                headers = excluded.headers,
                exposed_tools = excluded.exposed_tools,
                enabled = true`,
-        [userId, url, JSON.stringify(HEADERS), JSON.stringify(TOOLS)],
+        [userId, url, JSON.stringify(HEADERS), JSON.stringify(granted)],
       );
       process.stdout.write(`provisioned ${userId} -> ${url}\n`);
     }
     process.stdout.write(
-      `\n${users.length} user(s) ${dryRun ? "would be" : ""} provisioned with ${TOOLS.length} tool(s).\n`,
+      `\n${users.length} user(s) ${dryRun ? "would be" : ""} provisioned with ${granted.length} tool(s).\n`,
     );
     if (drift) {
       // The count alone was the misleading part of the old output: "11 tool(s)" looked

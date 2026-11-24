@@ -64,6 +64,10 @@ services:
       # default is 30 s, measured too short for `query_wiki` on a large Stack. Interpolated
       # so an `.env` value is honored; the fallback matches the server's own default.
       MCP_REQUEST_TIMEOUT_MS: ${MCP_REQUEST_TIMEOUT_MS:-120000}
+      # Tenant MCP endpoint auto-provisioned for every account. Empty disables it.
+      MCP_SERVER_URL: ${MCP_SERVER_URL:-}
+      # `true` grants every tool the host publishes, writes included. Off by default.
+      MCP_GRANT_ALL_TOOLS: ${MCP_GRANT_ALL_TOOLS:-false}
       # Origin the ingest service reaches THIS container at. A capability URL is
       # handed to another container, so a relative path or the browser's origin
       # would name the wrong process. Empty keeps uploads working but disables

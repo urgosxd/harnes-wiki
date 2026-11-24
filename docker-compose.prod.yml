@@ -120,6 +120,14 @@ services:
       # back to the model as a tool error, not a failed turn. The fallback matches the
       # server's own default; the server logs the effective value once at startup.
       MCP_REQUEST_TIMEOUT_MS: ${MCP_REQUEST_TIMEOUT_MS:-120000}
+      # The tenant MCP endpoint the server provisions into every account's `tenant_mcp`
+      # row at boot, and into each new account created through `POST /api/users`. Empty
+      # disables automatic provisioning (the legacy/dev default).
+      MCP_SERVER_URL: ${MCP_SERVER_URL:-}
+      # Writes are opt-in. `true` grants every tool the host publishes, including
+      # ingest_source, compile_wiki, export_okf, run_eval and ingest_job_delete; the
+      # default keeps the shipped role's read-only grant.
+      MCP_GRANT_ALL_TOOLS: ${MCP_GRANT_ALL_TOOLS:-false}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://server:8080}
       AGENT_READ_TOOLS: ${AGENT_READ_TOOLS:-true}
       AGENT_SKILLS: ${AGENT_SKILLS:-true}

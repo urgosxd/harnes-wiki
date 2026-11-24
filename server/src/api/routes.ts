@@ -13,6 +13,7 @@ import {
   verifyPassword,
 } from "../http/passwords.ts";
 import { USER_ID_PATTERN } from "../db/seed-users.ts";
+import { upsertTenantMcp, type McpProvisioning } from "../pi/mcp-provision.ts";
 import {
   LoginThrottle,
   SESSION_COOKIE,
@@ -52,6 +53,14 @@ export interface RouteDeps {
    * an existing account must not start leaking that account's name.
    */
   authMode?: AuthMode | undefined;
+  /**
+   * The tenant MCP row every account should get.
+   *
+   * Read in exactly one place: right after `POST /users` inserts the account. Existing
+   * accounts are covered at boot, so a new account can no longer start with no tools.
+   * `undefined` means this deployment has no MCP server, and the route behaves as before.
+   */
+  mcpProvisioning?: McpProvisioning | undefined;
 }
 
 interface CreateBody {
@@ -367,6 +376,14 @@ export function registerRoutes(router: Router, deps: RouteDeps): void {
           }
           // The check shares the insert's transaction, so a reserved id leaves no account
           // behind: the row written above is rolled back together with the refusal.
+
+          // Provision the tools the role needs, in the SAME transaction: an account that
+          // exists but silently has no MCP row is the failure this route used to leave for
+          // an operator to notice. The check above ran first, so this insert cannot make a
+          // normal new id look "reserved".
+          if (deps.mcpProvisioning) {
+            await upsertTenantMcp(tx, userId, deps.mcpProvisioning);
+          }
         });
       } catch (error) {
         // Raised by the insert, which runs before the ownership check, so an id that is both

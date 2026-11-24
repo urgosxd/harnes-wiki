@@ -12,6 +12,7 @@ import { loadConfig } from "./config.ts";
 import { createDatabase } from "./db/pool.ts";
 import { migrate } from "./db/migrate.ts";
 import { seedDefaultUsers } from "./db/seed-users.ts";
+import { provisionAllUsers, resolveMcpProvisioning } from "./pi/mcp-provision.ts";
 import { ConversationStore } from "./db/conversation-store.ts";
 import { TenantRuntime, type TenantDefinition } from "./pi/tenant-runtime.ts";
 import { TurnService } from "./api/turn-service.ts";
@@ -173,6 +174,22 @@ async function main(): Promise<void> {
     log: (line) => log.info(line),
   });
 
+  // The per-user MCP grant. `tenant_mcp` has no foreign key to `users`, so an account
+  // created without this row opens the product with zero tools and the role's own
+  // instructions fail. Provisioned at boot for every existing account, and inside
+  // `POST /users` for every account created later. Off when no MCP server is configured,
+  // which is the development default.
+  const mcpProvisioning = resolveMcpProvisioning(process.env);
+  if (mcpProvisioning) {
+    const provisioned = await provisionAllUsers(db, mcpProvisioning);
+    log.info("tenant MCP provisioned for every account", {
+      users: provisioned.length,
+      tools: mcpProvisioning.tools.length,
+    });
+  } else {
+    log.warn("MCP_SERVER_URL is not set: accounts will have no tenant MCP tools");
+  }
+
   const store = new ConversationStore(db);
 
   // A process that died mid-turn leaves runs stuck in "running", which would keep
@@ -311,7 +328,14 @@ async function main(): Promise<void> {
   }
 
   const router = createRouter({ authenticate: authenticator });
-  registerRoutes(router, { store, turns, db, authMode, publicBaseUrl: config.publicBaseUrl });
+  registerRoutes(router, {
+    store,
+    turns,
+    db,
+    authMode,
+    publicBaseUrl: config.publicBaseUrl,
+    ...(mcpProvisioning ? { mcpProvisioning } : {}),
+  });
 
   // The external ingest service is reached server-side only, because it validates
   // its own request headers and cannot be called from the browser's origin. When no
