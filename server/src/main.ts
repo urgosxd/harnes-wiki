@@ -28,6 +28,7 @@ import {
 import { AgentRoleReader, type AgentRoleSource } from "./pi/agent-role.ts";
 import { registerIngestRoutes } from "./api/ingest-routes.ts";
 import { registerDocumentRoutes, capabilityPath } from "./api/document-routes.ts";
+import { DocumentIngestState } from "./api/document-ingest-state.ts";
 import { DocumentStore } from "./db/document-store.ts";
 import { IngestClient } from "./ingest/client.ts";
 import type { Model } from "@earendil-works/pi-ai";
@@ -359,7 +360,14 @@ async function main(): Promise<void> {
         },
       }
     : undefined;
-  registerDocumentRoutes(router, { documents, publicBaseUrl: config.publicBaseUrl });
+  registerDocumentRoutes(router, {
+    documents,
+    publicBaseUrl: config.publicBaseUrl,
+    // The listing's ingest state needs the same adapter, and only exists when one is
+    // configured: with no service to read there is nothing to compare a hash against, and
+    // the route answers `ingest: null` rather than claiming a document is not ingested.
+    ...(ingest ? { ingestState: new DocumentIngestState({ ingest, ingests: documents }) } : {}),
+  });
   registerIngestRoutes(router, { ingest, documents: documentResolver, ingests: documents });
   if (config.ingestApi) {
     log.info("ingest service adapter configured", {

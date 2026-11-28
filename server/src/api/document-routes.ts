@@ -34,12 +34,25 @@
  * A PDF served at a path without `.pdf` is therefore fetched as a WEB PAGE and dies
  * in the HTML extraction step. The extension is part of the wire contract, so the
  * filename travels in the path, and a header alone would not be enough.
+ *
+ * ## What the listing answers now, and what it refuses to answer
+ *
+ * Each document carries its CONTENT HASH and, when the request named a Stack, the state
+ * of its ingest in that Stack. The hash is what makes the "ingested" mark self-invalidating:
+ * it is the value compared against the wiki's own `source_hash`, so replacing the file drops
+ * the mark with nothing having to remember to clear it.
+ *
+ * None of that is allowed to cost the listing. Documents are NOT Stack-scoped, so a request
+ * with no Stack still lists everything, with `ingest: null`; and a wiki that cannot be read
+ * makes the state UNKNOWN (`known: false`, no `current` key), never "not ingested".
  */
 
-import type { Router } from "../http/router.ts";
+import { createHash } from "node:crypto";
+import type { Router, RequestContext } from "../http/router.ts";
 import { HttpError, sendJson } from "../http/router.ts";
 import type { DocumentStore } from "../db/document-store.ts";
 import { sanitizeFilename } from "../db/document-store.ts";
+import type { DocumentIngestState } from "./document-ingest-state.ts";
 
 /**
  * Upload ceiling: 25 MB.
@@ -64,6 +77,15 @@ export interface DocumentRouteDeps {
    * can never read.
    */
   publicBaseUrl: string | undefined;
+  /**
+   * The ingest state seam: our record for one document in one Stack, merged with what the
+   * wiki says it holds.
+   *
+   * `undefined` disables the state, and the listing then answers `ingest: null` for every
+   * document without talking to any other service. That is the honest answer for a
+   * deployment that consumes no ingest service at all.
+   */
+  ingestState?: DocumentIngestState | undefined;
 }
 
 /** The path the ingest service will fetch. Exported so the ingest route reuses it. */
@@ -73,6 +95,24 @@ export function capabilityPath(document: { id: string; secret: string; filename:
 
 export function registerDocumentRoutes(router: Router, deps: DocumentRouteDeps): void {
   const { documents } = deps;
+
+  /**
+   * The Stack this request selects, as the browser named it.
+   *
+   * A SELECTION, never an authorisation: nothing here is derived from it and no row is
+   * written with it. Absent, blank, joined from two headers, or comma-separated are all
+   * the same fact — no Stack — because the one thing that must never be guessed is which
+   * tenant's compile a mark describes. This is the same rule `routes.ts` applies to the
+   * turn endpoint; it is repeated rather than shared because that helper is private to a
+   * router this module must not depend on.
+   */
+  const requestStackId = (ctx: RequestContext): string | undefined => {
+    const header = ctx.req.headers["x-stack-id"];
+    if (Array.isArray(header)) return undefined;
+    const raw = header?.trim();
+    if (!raw || raw.includes(",")) return undefined;
+    return raw;
+  };
 
   /**
    * Store one document. The body is the raw bytes; the filename is a query
@@ -111,7 +151,17 @@ export function registerDocumentRoutes(router: Router, deps: DocumentRouteDeps):
 
     let stored;
     try {
-      stored = await documents.create({ userId: ctx.userId, filename, contentType, content });
+      stored = await documents.create({
+        userId: ctx.userId,
+        filename,
+        contentType,
+        content,
+        // The hash is computed HERE, on the bytes that are being written, and stored by
+        // the same statement. Plain lowercase hex and no `sha256:` prefix, because it has
+        // to be comparable byte for byte with the wiki's own `source_hash`; a decorated
+        // value would silently never match and every document would read "not ingested".
+        contentHash: createHash("sha256").update(content).digest("hex"),
+      });
     } catch (error) {
       // sanitizeFilename refuses a name that cleans away to nothing.
       throw new HttpError(400, "invalid_filename", error instanceof Error ? error.message : String(error));
@@ -129,18 +179,39 @@ export function registerDocumentRoutes(router: Router, deps: DocumentRouteDeps):
     });
   });
 
-  /** One user's documents, newest first. Never includes a secret. */
+  /**
+   * One user's documents, newest first. Never includes a secret.
+   *
+   * With a Stack named, each document also carries the state of its ingest THERE. The
+   * wiki is read once for the whole listing (the state object caches per Stack), never
+   * once per document.
+   */
   router.get("/documents", async (ctx) => {
     const list = await documents.listForUser(ctx.userId);
-    sendJson(ctx.res, 200, {
-      documents: list.map((document) => ({
+    const stackId = requestStackId(ctx);
+    const ingestState = deps.ingestState;
+
+    const payload = [];
+    for (const document of list) {
+      payload.push({
         id: document.id,
         filename: document.filename,
         bytes: document.bytes,
         contentType: document.contentType,
         createdAt: document.createdAt,
-      })),
-    });
+        contentHash: document.contentHash,
+        ingest: ingestState
+          ? await ingestState.forDocument({
+              documentId: document.id,
+              contentHash: document.contentHash,
+              userId: ctx.userId,
+              stackId,
+            })
+          : null,
+      });
+    }
+
+    sendJson(ctx.res, 200, { documents: payload });
   });
 
   /**

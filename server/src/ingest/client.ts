@@ -133,6 +133,21 @@ export class IngestClient {
       .filter((id): id is string => id !== undefined);
   }
 
+  /**
+   * Every source the wiki holds in one Stack: its content hashes and when they landed.
+   *
+   * The Stack is a PATH segment here, not a `?stackId=` query parameter, and that is not
+   * an inconsistency: this is the service's own Stack RESOURCE (`/stacks/*`), whose routes
+   * take the id in the path, while `stackQuery` belongs to the ingest job API
+   * (`/api/ingest/*`) which selects a Stack with a parameter. One base URL serves both.
+   *
+   * The body is returned unreshaped, like every other read here: what the listing carries
+   * is the provider's contract, and reading it is the caller's job.
+   */
+  async listStackDocuments(stackId: string): Promise<UpstreamResponse> {
+    return this.request("GET", `/stacks/${encodeURIComponent(stackId)}/documents`);
+  }
+
   /** Read one job snapshot. 404 (unknown id) and 503 (no tracking) are distinct. */
   async getJob(id: string, stackId?: string): Promise<UpstreamResponse> {
     return this.request("GET", `/api/ingest/jobs/${encodeURIComponent(id)}${stackQuery(stackId)}`);

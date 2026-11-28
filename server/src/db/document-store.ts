@@ -43,6 +43,15 @@ export interface DocumentRecord {
   /** Capability half of the URL. Never present in a listing. */
   secret: string;
   createdAt: Date;
+  /**
+   * sha256 of the stored bytes, plain lowercase hex, or `null` for a row stored before
+   * hashing existed.
+   *
+   * Not a decoration: it is one side of the comparison that decides whether the wiki
+   * holds these exact bytes (`document-ingest-state.ts`). NULL means "no mark", which is
+   * true of a legacy upload, and is why the column stays nullable.
+   */
+  contentHash: string | null;
 }
 
 /** A document with its bytes, for the route that serves them. */
@@ -82,6 +91,7 @@ interface DocumentRow {
   bytes: number;
   secret: string;
   created_at: Date;
+  content_hash: string | null;
 }
 
 interface DocumentContentRow extends DocumentRow {
@@ -132,6 +142,7 @@ function toRecord(row: DocumentRow): DocumentRecord {
     bytes: row.bytes,
     secret: row.secret,
     createdAt: row.created_at,
+    contentHash: row.content_hash,
   };
 }
 
@@ -168,13 +179,22 @@ export class DocumentStore {
     filename: string;
     contentType: string;
     content: Buffer;
+    /**
+     * sha256 of `content`, computed by the caller that holds the bytes.
+     *
+     * Passed in rather than computed here so the column is written by the same statement
+     * that writes the bytes: a hash filled in by a later UPDATE would leave a window where
+     * a row exists with no identity, and a second place that decides what the hash is.
+     * Omitted means NULL, which is what a legacy row legitimately holds.
+     */
+    contentHash?: string | null;
   }): Promise<DocumentRecord> {
     const id = randomUUID();
     const secret = randomBytes(SECRET_BYTES).toString("base64url");
     const rows = await this.db.query<DocumentRow>(
-      `INSERT INTO documents (id, user_id, filename, content_type, bytes, secret, content)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, user_id, filename, content_type, bytes, secret, created_at`,
+      `INSERT INTO documents (id, user_id, filename, content_type, bytes, secret, content, content_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, user_id, filename, content_type, bytes, secret, created_at, content_hash`,
       [
         id,
         input.userId,
@@ -183,6 +203,7 @@ export class DocumentStore {
         input.content.length,
         secret,
         input.content,
+        input.contentHash ?? null,
       ],
     );
     return toRecord(rows[0]!);
@@ -191,7 +212,7 @@ export class DocumentStore {
   /** One user's documents, newest first. The upload list. */
   async listForUser(userId: string): Promise<DocumentRecord[]> {
     const rows = await this.db.query<DocumentRow>(
-      `SELECT id, user_id, filename, content_type, bytes, secret, created_at
+      `SELECT id, user_id, filename, content_type, bytes, secret, created_at, content_hash
          FROM documents
         WHERE user_id = $1
         ORDER BY created_at DESC`,
@@ -203,7 +224,7 @@ export class DocumentStore {
   /** One document the user owns, or undefined. A foreign document is not found. */
   async findOwned(id: string, userId: string): Promise<DocumentRecord | undefined> {
     const rows = await this.db.query<DocumentRow>(
-      `SELECT id, user_id, filename, content_type, bytes, secret, created_at
+      `SELECT id, user_id, filename, content_type, bytes, secret, created_at, content_hash
          FROM documents
         WHERE id = $1 AND user_id = $2`,
       [id, userId],
@@ -222,7 +243,7 @@ export class DocumentStore {
    */
   async findByCapability(id: string, secret: string): Promise<DocumentWithContent | undefined> {
     const rows = await this.db.query<DocumentContentRow>(
-      `SELECT id, user_id, filename, content_type, bytes, secret, created_at, content
+      `SELECT id, user_id, filename, content_type, bytes, secret, created_at, content_hash, content
          FROM documents
         WHERE id = $1 AND secret = $2`,
       [id, secret],
