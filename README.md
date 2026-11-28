@@ -56,7 +56,8 @@ deployment that deliberately has no accounts. The web client does not support th
 | `POST` | `/documents` | Upload a document; `201` with its id and a capability URL |
 | `GET` | `/documents` | The caller's uploads, newest first. Never includes a secret |
 | `GET` | `/documents/:id/:secret/:filename` | The bytes. No identity: the URL authorises itself |
-| `DELETE` | `/documents/:id` | Remove an upload |
+| `DELETE` | `/documents/:id` | Remove an upload. `409 document_ingested` while the wiki still compiles it |
+| `POST` | `/documents/:id/retract` | Ask the ingest service to delete a compiled source and recompile. `202 {jobId}`; `503 source_retraction_unavailable` unless `SOURCE_RETRACTION_ENABLED` is on |
 | `POST` | `/ingest/jobs` | Start an async ingest job; `202` with a job id |
 | `GET` | `/ingest/jobs` | Retained jobs, newest first |
 | `GET` | `/ingest/jobs/:id` | One job snapshot; the poller's only read |
@@ -97,6 +98,7 @@ Never commit provider credentials.
 | `DATABASE_URL` | Postgres connection string. |
 | `INGEST_API_BASE_URL` | Origin of the external ingest service, e.g. `http://host:4173`. Empty answers `503 ingest_not_configured`. |
 | `INGEST_API_TIMEOUT_MS` | Deadline for one job read. Default `10000`. |
+| `SOURCE_RETRACTION_ENABLED` | Lets `POST /documents/:id/retract` call the ingest service's `DELETE /stacks/<stackId>/sources/<identity>`, which deletes the compiled source and recompiles without it. Default **off**: the endpoint then answers `503 source_retraction_unavailable` naming this variable, with no upstream call. |
 | `MCP_REQUEST_TIMEOUT_MS` | Deadline for one MCP tool request, e.g. `query_wiki`. Default `120000` (120 s); the MCP client library's own default is 30 s, which timed out on a large Stack. A value that is not a positive number FAILS the boot rather than falling back. |
 | `PUBLIC_BASE_URL` | Origin the ingest service reaches THIS server at, e.g. `http://server:8080`. Empty still allows uploads and plain references, but not ingest-by-document. |
 

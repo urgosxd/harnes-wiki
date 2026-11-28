@@ -53,6 +53,7 @@ import { HttpError, sendJson } from "../http/router.ts";
 import type { DocumentStore } from "../db/document-store.ts";
 import { sanitizeFilename } from "../db/document-store.ts";
 import type { DocumentIngestState } from "./document-ingest-state.ts";
+import type { DocumentRetraction } from "./document-retraction.ts";
 
 /**
  * Upload ceiling: 25 MB.
@@ -86,6 +87,14 @@ export interface DocumentRouteDeps {
    * deployment that consumes no ingest service at all.
    */
   ingestState?: DocumentIngestState | undefined;
+  /**
+   * The retraction path, or `undefined` in a deployment that cannot retract at all.
+   *
+   * The capability itself (a flag, an adapter, and which upstream call it makes) lives in
+   * `document-retraction.ts`: the route's job is to establish WHO is asking about WHICH
+   * document in WHICH Stack, and then to answer with what that module decided.
+   */
+  retraction?: DocumentRetraction | undefined;
 }
 
 /** The path the ingest service will fetch. Exported so the ingest route reuses it. */
@@ -235,6 +244,64 @@ export function registerDocumentRoutes(router: Router, deps: DocumentRouteDeps):
       "content-disposition": `inline; filename="${sanitizeFilename(found.filename)}"`,
     });
     ctx.res.end(found.content);
+  });
+
+  /**
+   * Retract: ask the wiki to delete the compiled source for this document in one Stack.
+   *
+   * The order of the answers is the contract, and each step exists for a reason:
+   *
+   *  - OWNERSHIP FIRST, before the Stack, before the gate, before the flag. Answering `409`
+   *    or `400` for a document that is not the caller's confirms that it exists (and, for
+   *    the gate, that it was ingested). A foreign document keeps the identical `404` the
+   *    rest of this router answers.
+   *  - THEN THE STACK, which is required here and optional in the listing. A retraction
+   *    deletes content in ONE Stack and recompiles it there, so "no Stack" has no sensible
+   *    default: guessing one would delete another tenant's compiled source.
+   *  - THEN the deployment capability, the local gate, the identity and the call, in that
+   *    order and all of them inside `DocumentRetraction`.
+   *
+   * The answer is `202 { jobId }` even though the wiki's own body may say more: a client
+   * that wanted to follow the recompile needs the id, and forwarding a body this layer did
+   * not define would bind every client to a shape nobody promised.
+   */
+  router.post("/documents/:id/retract", async (ctx) => {
+    const id = ctx.params.id ?? "";
+    const owned = await documents.findOwned(id, ctx.userId);
+    if (!owned) throw new HttpError(404, "not_found", "no such document");
+
+    const stackId = requestStackId(ctx);
+    if (!stackId) {
+      throw new HttpError(
+        400,
+        "invalid_stack_id",
+        "send one x-stack-id header naming the Stack to retract from",
+      );
+    }
+
+    const retraction = deps.retraction;
+    if (!retraction) {
+      throw new HttpError(
+        503,
+        "source_retraction_unavailable",
+        "this deployment cannot retract sources: it has no ingest service configured",
+      );
+    }
+
+    const accepted = await retraction.retract({
+      documentId: id,
+      userId: ctx.userId,
+      stackId,
+      // The identity the wiki is asked to delete is resolved from OUR bytes, not from the
+      // upload's filename: the two are not the same name upstream.
+      contentHash: owned.contentHash,
+    });
+
+    // The listing's cached wiki rows describe the Stack as it was BEFORE this call, so a
+    // mark read a moment later would still claim the wiki holds bytes it just deleted.
+    deps.ingestState?.forget(stackId);
+
+    sendJson(ctx.res, 202, { jobId: accepted.jobId });
   });
 
   /**

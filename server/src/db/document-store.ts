@@ -329,6 +329,30 @@ export class DocumentStore {
   }
 
   /**
+   * Record that the wiki no longer holds this document's content in one Stack.
+   *
+   * Written by its own statement rather than through {@link recordIngest} with
+   * `status: 'retracted'`: that upsert RESETS `job_id` to whatever it is handed, and a
+   * retraction is not a job. The ingest job that compiled these bytes is still the last
+   * ingest we know of, and overwriting it with a retraction id would make the listing report
+   * a job the panel cannot follow. This statement sets the state and nothing else.
+   *
+   * It does NOT insert. A row is the precondition of retracting at all (the route's only
+   * local gate), so an update that matches nothing means the document — or its state — was
+   * removed while the retraction was in flight, and inventing a row for it here would record
+   * a state for a document nobody can list.
+   */
+  async markRetracted(documentId: string, userId: string, stackId: string): Promise<void> {
+    await this.db.query(
+      `UPDATE document_ingests
+          SET last_status = 'retracted',
+              updated_at = now()
+        WHERE document_id = $1 AND user_id = $2 AND stack_id = $3`,
+      [documentId, userId, stackId],
+    );
+  }
+
+  /**
    * Whether ANY Stack still holds a live ingest state for this document.
    *
    * Deliberately NOT Stack-scoped, and that is the whole point of the method. Deleting a

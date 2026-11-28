@@ -855,15 +855,22 @@ export function noticeForOutcome(outcome: PollOutcome): IngestNotice {
 const JOB_CONTROL_REFUSAL_CODES: ReadonlySet<string> = new Set(["job_still_working", "job_changed"]);
 
 /**
- * The document refusal: the delete guard's answer, on the same status code.
+ * The document refusals: the answers whose SUBJECT is a document, on the same status code.
  *
- * `DELETE /documents/:id` answers `409 document_ingested` while the wiki still compiles
- * these bytes, and its message names the retraction that would unblock it. It belongs to
- * a THIRD fact — neither a job that is working nor a lock — so it is classified by name
- * here rather than by status below. One code, one constant: the next document refusal
- * (S5's `document_not_ingested`) is added in this list, not in a second branch.
+ * Two of them, and they are opposites on purpose: `DELETE /documents/:id` answers `409
+ * document_ingested` while the wiki still compiles these bytes, and `POST
+ * /documents/:id/retract` answers `409 document_not_ingested` when we never recorded an
+ * ingest for that document in that Stack. Each message names what would work, so both
+ * reach the screen VERBATIM.
+ *
+ * It belongs to a THIRD fact — neither a job that is working nor a lock — so it is
+ * classified by name here rather than by status below. One list, one branch: the next
+ * document refusal is added here, not as a second `if`.
  */
-const DOCUMENT_REFUSAL_CODES: ReadonlySet<string> = new Set(["document_ingested"]);
+const DOCUMENT_REFUSAL_CODES: ReadonlySet<string> = new Set([
+  "document_ingested",
+  "document_not_ingested",
+]);
 
 /**
  * What a `409` with no job-control code means: one ingest at a time, try again later.

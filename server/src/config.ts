@@ -41,6 +41,17 @@ export interface Config {
   /** `undefined` when this deployment consumes no external ingest service. */
   ingestApi: ExternalApiConfig | undefined;
   /**
+   * Whether `POST /documents/:id/retract` may ask the ingest service to DELETE a compiled
+   * source, which is that service's own E7 capability.
+   *
+   * OFF BY DEFAULT, and the default is the honest answer while this deployment cannot
+   * assume the upstream has the route: the endpoint exists and answers `503
+   * source_retraction_unavailable` naming this variable, before any identity is resolved
+   * and without a single upstream call. Recording a retraction that nothing performed
+   * would be the one failure worse than refusing.
+   */
+  sourceRetractionEnabled: boolean;
+  /**
    * Deadline for ONE MCP tool request, in milliseconds.
    *
    * Ours, not the MCP client library's: its default is 30 s
@@ -249,6 +260,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       urlVar: "INGEST_API_BASE_URL",
       timeoutVar: "INGEST_API_TIMEOUT_MS",
     }),
+    sourceRetractionEnabled: flag("SOURCE_RETRACTION_ENABLED", false),
     mcpRequestTimeoutMs: parseMcpRequestTimeoutMs(env.MCP_REQUEST_TIMEOUT_MS),
     publicBaseUrl: parsePublicBaseUrl(env.PUBLIC_BASE_URL),
     // Pi resolves user-scope resources from $HOME/.agents, so the agents directory
