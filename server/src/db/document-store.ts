@@ -43,6 +43,15 @@ export interface DocumentRecord {
   /** Capability half of the URL. Never present in a listing. */
   secret: string;
   createdAt: Date;
+  /**
+   * sha256 of the stored bytes, plain lowercase hex, or `null` for a row stored before
+   * hashing existed.
+   *
+   * Not a decoration: it is one side of the comparison that decides whether the wiki
+   * holds these exact bytes (`document-ingest-state.ts`). NULL means "no mark", which is
+   * true of a legacy upload, and is why the column stays nullable.
+   */
+  contentHash: string | null;
 }
 
 /** A document with its bytes, for the route that serves them. */
@@ -50,12 +59,26 @@ export interface DocumentWithContent extends DocumentRecord {
   content: Buffer;
 }
 
-/** What we asked the ingest service to do for one document, and what we last saw. */
+/**
+ * What we asked the ingest service to do for one document IN ONE STACK, and what we
+ * last saw.
+ *
+ * The Stack is part of the identity, not an attribute beside it: each Stack compiles
+ * and can be retracted independently, so a document holds one state per Stack and no
+ * lookup can be answered without saying which one it is about.
+ */
 export interface DocumentIngest {
   documentId: string;
+  stackId: string;
   userId: string;
   jobId: string | null;
+  /** Last state we SAW, informational only. Never a live status. */
   lastStatus: string;
+  /**
+   * When this state was FIRST requested. Left untouched by a re-ingest on purpose, so
+   * a caller can tell a long-lived state from one created a second ago; `updated_at`
+   * is the field that moves.
+   */
   requestedAt: Date;
   updatedAt: Date;
 }
@@ -68,6 +91,7 @@ interface DocumentRow {
   bytes: number;
   secret: string;
   created_at: Date;
+  content_hash: string | null;
 }
 
 interface DocumentContentRow extends DocumentRow {
@@ -76,6 +100,7 @@ interface DocumentContentRow extends DocumentRow {
 
 interface IngestRow {
   document_id: string;
+  stack_id: string;
   user_id: string;
   job_id: string | null;
   last_status: string;
@@ -117,12 +142,14 @@ function toRecord(row: DocumentRow): DocumentRecord {
     bytes: row.bytes,
     secret: row.secret,
     createdAt: row.created_at,
+    contentHash: row.content_hash,
   };
 }
 
 function toIngest(row: IngestRow): DocumentIngest {
   return {
     documentId: row.document_id,
+    stackId: row.stack_id,
     userId: row.user_id,
     jobId: row.job_id,
     lastStatus: row.last_status,
@@ -152,13 +179,22 @@ export class DocumentStore {
     filename: string;
     contentType: string;
     content: Buffer;
+    /**
+     * sha256 of `content`, computed by the caller that holds the bytes.
+     *
+     * Passed in rather than computed here so the column is written by the same statement
+     * that writes the bytes: a hash filled in by a later UPDATE would leave a window where
+     * a row exists with no identity, and a second place that decides what the hash is.
+     * Omitted means NULL, which is what a legacy row legitimately holds.
+     */
+    contentHash?: string | null;
   }): Promise<DocumentRecord> {
     const id = randomUUID();
     const secret = randomBytes(SECRET_BYTES).toString("base64url");
     const rows = await this.db.query<DocumentRow>(
-      `INSERT INTO documents (id, user_id, filename, content_type, bytes, secret, content)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING id, user_id, filename, content_type, bytes, secret, created_at`,
+      `INSERT INTO documents (id, user_id, filename, content_type, bytes, secret, content, content_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, user_id, filename, content_type, bytes, secret, created_at, content_hash`,
       [
         id,
         input.userId,
@@ -167,6 +203,7 @@ export class DocumentStore {
         input.content.length,
         secret,
         input.content,
+        input.contentHash ?? null,
       ],
     );
     return toRecord(rows[0]!);
@@ -175,7 +212,7 @@ export class DocumentStore {
   /** One user's documents, newest first. The upload list. */
   async listForUser(userId: string): Promise<DocumentRecord[]> {
     const rows = await this.db.query<DocumentRow>(
-      `SELECT id, user_id, filename, content_type, bytes, secret, created_at
+      `SELECT id, user_id, filename, content_type, bytes, secret, created_at, content_hash
          FROM documents
         WHERE user_id = $1
         ORDER BY created_at DESC`,
@@ -187,7 +224,7 @@ export class DocumentStore {
   /** One document the user owns, or undefined. A foreign document is not found. */
   async findOwned(id: string, userId: string): Promise<DocumentRecord | undefined> {
     const rows = await this.db.query<DocumentRow>(
-      `SELECT id, user_id, filename, content_type, bytes, secret, created_at
+      `SELECT id, user_id, filename, content_type, bytes, secret, created_at, content_hash
          FROM documents
         WHERE id = $1 AND user_id = $2`,
       [id, userId],
@@ -206,7 +243,7 @@ export class DocumentStore {
    */
   async findByCapability(id: string, secret: string): Promise<DocumentWithContent | undefined> {
     const rows = await this.db.query<DocumentContentRow>(
-      `SELECT id, user_id, filename, content_type, bytes, secret, created_at, content
+      `SELECT id, user_id, filename, content_type, bytes, secret, created_at, content_hash, content
          FROM documents
         WHERE id = $1 AND secret = $2`,
       [id, secret],
@@ -229,38 +266,114 @@ export class DocumentStore {
   // ---------------------------------------------------------------------------
 
   /**
-   * Record that a job was requested for a document.
+   * Record that a job was requested for a document, in one Stack.
    *
    * Upsert, not insert: re-ingesting the same document is a supported action (a
-   * compile failed, the source was fixed), and the row must reflect the LATEST
-   * request rather than accumulate history nobody reads.
+   * compile failed, the source was fixed, the Stack was retracted), and the row must
+   * reflect the LATEST request rather than accumulate history nobody reads.
+   *
+   * The conflict target is the COMPOSITE key `(document_id, stack_id)`. It is written
+   * out rather than left implicit for a reason: it used to name `(document_id)` alone,
+   * from before one document could hold one state per Stack, and a conflict target that
+   * names a constraint Postgres no longer has raises instead of upserting. A re-ingest
+   * therefore failed at the exact moment it was supposed to record a second attempt.
+   *
+   * `last_status` is RESET to what the caller passes, not merged with what it held: a
+   * retracted Stack that is ingested again is live again, with no tombstone left behind.
+   * Changing it back is the whole of the reversibility the feature promises, and it is
+   * why this is an assignment rather than a `COALESCE`.
+   *
+   * `requested_at` deliberately keeps the FIRST request: it answers "how long has this
+   * document been tracked in this Stack", which a reset would erase. The latest touch is
+   * `updated_at`.
    */
   async recordIngest(input: {
     documentId: string;
+    stackId: string;
     userId: string;
     jobId: string | null;
     status: string;
   }): Promise<DocumentIngest> {
     const rows = await this.db.query<IngestRow>(
-      `INSERT INTO document_ingests (document_id, user_id, job_id, last_status)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (document_id) DO UPDATE
+      `INSERT INTO document_ingests (document_id, stack_id, user_id, job_id, last_status)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (document_id, stack_id) DO UPDATE
          SET job_id = excluded.job_id,
              last_status = excluded.last_status,
              updated_at = now()
        RETURNING *`,
-      [input.documentId, input.userId, input.jobId, input.status],
+      [input.documentId, input.stackId, input.userId, input.jobId, input.status],
     );
     return toIngest(rows[0]!);
   }
 
-  /** What we last asked for, for one document the user owns. */
-  async ingestFor(documentId: string, userId: string): Promise<DocumentIngest | undefined> {
+  /**
+   * What we last asked for, for one document the user owns IN ONE STACK.
+   *
+   * The Stack is required, not optional-with-a-default. A document with two states has
+   * no "the" row to fall back to: returning the first match would hand Stack B's caller
+   * Stack A's job id, and a caller that then retracted or guarded on it would act on a
+   * different tenant's compile.
+   */
+  async ingestFor(
+    documentId: string,
+    userId: string,
+    stackId: string,
+  ): Promise<DocumentIngest | undefined> {
     const rows = await this.db.query<IngestRow>(
-      "SELECT * FROM document_ingests WHERE document_id = $1 AND user_id = $2",
-      [documentId, userId],
+      "SELECT * FROM document_ingests WHERE document_id = $1 AND user_id = $2 AND stack_id = $3",
+      [documentId, userId, stackId],
     );
     const row = rows[0];
     return row ? toIngest(row) : undefined;
+  }
+
+  /**
+   * Record that the wiki no longer holds this document's content in one Stack.
+   *
+   * Written by its own statement rather than through {@link recordIngest} with
+   * `status: 'retracted'`: that upsert RESETS `job_id` to whatever it is handed, and a
+   * retraction is not a job. The ingest job that compiled these bytes is still the last
+   * ingest we know of, and overwriting it with a retraction id would make the listing report
+   * a job the panel cannot follow. This statement sets the state and nothing else.
+   *
+   * It does NOT insert. A row is the precondition of retracting at all (the route's only
+   * local gate), so an update that matches nothing means the document — or its state — was
+   * removed while the retraction was in flight, and inventing a row for it here would record
+   * a state for a document nobody can list.
+   */
+  async markRetracted(documentId: string, userId: string, stackId: string): Promise<void> {
+    await this.db.query(
+      `UPDATE document_ingests
+          SET last_status = 'retracted',
+              updated_at = now()
+        WHERE document_id = $1 AND user_id = $2 AND stack_id = $3`,
+      [documentId, userId, stackId],
+    );
+  }
+
+  /**
+   * Whether ANY Stack still holds a live ingest state for this document.
+   *
+   * Deliberately NOT Stack-scoped, and that is the whole point of the method. Deleting a
+   * document cascades every Stack's state with it, so answering for one Stack would let a
+   * caller delete content another Stack still has compiled by simply not naming that
+   * Stack — the absence of a header must never be the way past the guard.
+   *
+   * `retracted` is the only status that does not block. Retraction is reversible (S7), so
+   * a retracted row is a state that describes content the wiki no longer holds; a
+   * re-ingest resets it, and there is no tombstone to leave behind. Ownership is not
+   * filtered here because the caller must already have proved it owns the document: the
+   * route checks ownership FIRST, so a refusal can never answer for a foreign row.
+   */
+  async hasActiveIngest(documentId: string): Promise<boolean> {
+    const rows = await this.db.query<{ live: number }>(
+      `SELECT 1 AS live
+         FROM document_ingests
+        WHERE document_id = $1 AND last_status <> 'retracted'
+        LIMIT 1`,
+      [documentId],
+    );
+    return rows.length > 0;
   }
 }

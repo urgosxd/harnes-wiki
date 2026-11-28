@@ -1,4 +1,5 @@
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
+import type { ListedDocument } from "../lib/api.ts";
 import { describeJob, isJobSettled } from "../lib/ingest.ts";
 import { UNRESOLVED_STACK_ID_NOTICE, type UseIngestResult } from "../lib/use-ingest.ts";
 import { IngestJobView } from "./IngestJobView.tsx";
@@ -8,6 +9,50 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024) } KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * What a row may say about its ingest, and the two things it may NOT say.
+ *
+ * Three states, never two:
+ *
+ *  - `current` — the wiki holds these exact bytes in this Stack (`current: true`);
+ *  - nothing — the wiki does NOT hold them (`current: false`), or the row has no content
+ *    identity at all (`contentHash: null`, stored before the hash existed). A verified
+ *    "no" needs no marker, and an unverifiable one must not get one;
+ *  - `unknown` — the wiki could not be read, which the server states as `known: false`
+ *    with NO `current` key. This is the one that must never be rendered as "not
+ *    ingested": that would be a claim about the user's data that nothing verified, and
+ *    the user would act on it (re-ingest, or delete something still compiled).
+ *
+ * `contentHash: null` wins over everything: without a content identity nothing about
+ * these bytes was compared, so the row stays bare and no error is invented from a null.
+ * The `title` is part of the contract, not decoration — it is the only place the reason
+ * for an unknown state is stated.
+ */
+type DocumentMark = { state: "current" | "unknown"; label: string; title: string } | null;
+
+function documentMark(document: ListedDocument): DocumentMark {
+  if (document.contentHash === null || document.contentHash === undefined) return null;
+  const ingest = document.ingest;
+  if (!ingest) return null;
+  if (ingest.known === false) {
+    return {
+      state: "unknown",
+      label: "no data",
+      title:
+        "No data: the wiki could not be read, so whether this document is ingested in " +
+        "this Stack is unknown. That is not the same as not ingested.",
+    };
+  }
+  if (ingest.current === true) {
+    return {
+      state: "current",
+      label: "✓",
+      title: "Ingested: the wiki holds these exact bytes in this Stack right now.",
+    };
+  }
+  return null;
 }
 
 export interface IngestJobsPanelProps {
@@ -208,34 +253,61 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
           <p className="jobs-panel__empty">No documents uploaded yet.</p>
         ) : (
           <ul className="document-list">
-            {ingest.documents.map((document) => (
-              <li key={document.id} className="document-list__row">
-                <span className="document-list__name" title={document.filename}>
-                  {document.filename}
-                </span>
-                <span className="document-list__meta">{formatBytes(document.bytes)}</span>
-                <button
-                  type="button"
-                  className="button button--small"
-                  onClick={() =>
-                    void ingest.ingestDocument(document.id, {
-                      compile,
-                      stackId: stackId ?? undefined,
-                    })
-                  }
-                >
-                  Ingest
-                </button>
-                <button
-                  type="button"
-                  className="button button--small"
-                  aria-label={`Delete ${document.filename}`}
-                  onClick={() => void ingest.removeDocument(document.id)}
-                >
-                  Remove
-                </button>
-              </li>
-            ))}
+            {ingest.documents.map((document) => {
+              // One decision per row, read once: the mark, the hint and the refusal copy
+              // all describe the same three-state answer.
+              const mark = documentMark(document);
+              return (
+                <li key={document.id} className="document-list__row">
+                  {mark && (
+                    <span
+                      className={`document-list__mark document-list__mark--${mark.state}`}
+                      data-ingest-state={mark.state}
+                      role="img"
+                      aria-label={mark.title}
+                      title={mark.title}
+                    >
+                      {mark.label}
+                    </span>
+                  )}
+                  <span className="document-list__name" title={document.filename}>
+                    {document.filename}
+                  </span>
+                  <span className="document-list__meta">{formatBytes(document.bytes)}</span>
+                  <button
+                    type="button"
+                    className="button button--small"
+                    onClick={() =>
+                      void ingest.ingestDocument(document.id, {
+                        compile,
+                        stackId: stackId ?? undefined,
+                      })
+                    }
+                  >
+                    Ingest
+                  </button>
+                  {/*
+                    REMOVAL IS A RETRACTION, and the label says so: the file stays here
+                    and the wiki's compiled source goes. The accessible name stays the
+                    historical `Delete <filename>` — it is a stable key for assistive
+                    tech and for the tests that address this control by it — while the
+                    visible words name the action the operator actually gets.
+
+                    Disabled per row while ITS request is out, like the job controls:
+                    one click is one request.
+                  */}
+                  <button
+                    type="button"
+                    className="button button--small"
+                    aria-label={`Delete ${document.filename}`}
+                    disabled={ingest.retractingIds.has(document.id)}
+                    onClick={() => void ingest.retractDocument(document.id)}
+                  >
+                    {ingest.retractingIds.has(document.id) ? "Removing…" : "Remove from wiki"}
+                  </button>
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>

@@ -34,12 +34,26 @@
  * A PDF served at a path without `.pdf` is therefore fetched as a WEB PAGE and dies
  * in the HTML extraction step. The extension is part of the wire contract, so the
  * filename travels in the path, and a header alone would not be enough.
+ *
+ * ## What the listing answers now, and what it refuses to answer
+ *
+ * Each document carries its CONTENT HASH and, when the request named a Stack, the state
+ * of its ingest in that Stack. The hash is what makes the "ingested" mark self-invalidating:
+ * it is the value compared against the wiki's own `source_hash`, so replacing the file drops
+ * the mark with nothing having to remember to clear it.
+ *
+ * None of that is allowed to cost the listing. Documents are NOT Stack-scoped, so a request
+ * with no Stack still lists everything, with `ingest: null`; and a wiki that cannot be read
+ * makes the state UNKNOWN (`known: false`, no `current` key), never "not ingested".
  */
 
-import type { Router } from "../http/router.ts";
+import { createHash } from "node:crypto";
+import type { Router, RequestContext } from "../http/router.ts";
 import { HttpError, sendJson } from "../http/router.ts";
 import type { DocumentStore } from "../db/document-store.ts";
 import { sanitizeFilename } from "../db/document-store.ts";
+import type { DocumentIngestState } from "./document-ingest-state.ts";
+import type { DocumentRetraction } from "./document-retraction.ts";
 
 /**
  * Upload ceiling: 25 MB.
@@ -64,6 +78,23 @@ export interface DocumentRouteDeps {
    * can never read.
    */
   publicBaseUrl: string | undefined;
+  /**
+   * The ingest state seam: our record for one document in one Stack, merged with what the
+   * wiki says it holds.
+   *
+   * `undefined` disables the state, and the listing then answers `ingest: null` for every
+   * document without talking to any other service. That is the honest answer for a
+   * deployment that consumes no ingest service at all.
+   */
+  ingestState?: DocumentIngestState | undefined;
+  /**
+   * The retraction path, or `undefined` in a deployment that cannot retract at all.
+   *
+   * The capability itself (a flag, an adapter, and which upstream call it makes) lives in
+   * `document-retraction.ts`: the route's job is to establish WHO is asking about WHICH
+   * document in WHICH Stack, and then to answer with what that module decided.
+   */
+  retraction?: DocumentRetraction | undefined;
 }
 
 /** The path the ingest service will fetch. Exported so the ingest route reuses it. */
@@ -73,6 +104,24 @@ export function capabilityPath(document: { id: string; secret: string; filename:
 
 export function registerDocumentRoutes(router: Router, deps: DocumentRouteDeps): void {
   const { documents } = deps;
+
+  /**
+   * The Stack this request selects, as the browser named it.
+   *
+   * A SELECTION, never an authorisation: nothing here is derived from it and no row is
+   * written with it. Absent, blank, joined from two headers, or comma-separated are all
+   * the same fact — no Stack — because the one thing that must never be guessed is which
+   * tenant's compile a mark describes. This is the same rule `routes.ts` applies to the
+   * turn endpoint; it is repeated rather than shared because that helper is private to a
+   * router this module must not depend on.
+   */
+  const requestStackId = (ctx: RequestContext): string | undefined => {
+    const header = ctx.req.headers["x-stack-id"];
+    if (Array.isArray(header)) return undefined;
+    const raw = header?.trim();
+    if (!raw || raw.includes(",")) return undefined;
+    return raw;
+  };
 
   /**
    * Store one document. The body is the raw bytes; the filename is a query
@@ -111,7 +160,17 @@ export function registerDocumentRoutes(router: Router, deps: DocumentRouteDeps):
 
     let stored;
     try {
-      stored = await documents.create({ userId: ctx.userId, filename, contentType, content });
+      stored = await documents.create({
+        userId: ctx.userId,
+        filename,
+        contentType,
+        content,
+        // The hash is computed HERE, on the bytes that are being written, and stored by
+        // the same statement. Plain lowercase hex and no `sha256:` prefix, because it has
+        // to be comparable byte for byte with the wiki's own `source_hash`; a decorated
+        // value would silently never match and every document would read "not ingested".
+        contentHash: createHash("sha256").update(content).digest("hex"),
+      });
     } catch (error) {
       // sanitizeFilename refuses a name that cleans away to nothing.
       throw new HttpError(400, "invalid_filename", error instanceof Error ? error.message : String(error));
@@ -129,18 +188,39 @@ export function registerDocumentRoutes(router: Router, deps: DocumentRouteDeps):
     });
   });
 
-  /** One user's documents, newest first. Never includes a secret. */
+  /**
+   * One user's documents, newest first. Never includes a secret.
+   *
+   * With a Stack named, each document also carries the state of its ingest THERE. The
+   * wiki is read once for the whole listing (the state object caches per Stack), never
+   * once per document.
+   */
   router.get("/documents", async (ctx) => {
     const list = await documents.listForUser(ctx.userId);
-    sendJson(ctx.res, 200, {
-      documents: list.map((document) => ({
+    const stackId = requestStackId(ctx);
+    const ingestState = deps.ingestState;
+
+    const payload = [];
+    for (const document of list) {
+      payload.push({
         id: document.id,
         filename: document.filename,
         bytes: document.bytes,
         contentType: document.contentType,
         createdAt: document.createdAt,
-      })),
-    });
+        contentHash: document.contentHash,
+        ingest: ingestState
+          ? await ingestState.forDocument({
+              documentId: document.id,
+              contentHash: document.contentHash,
+              userId: ctx.userId,
+              stackId,
+            })
+          : null,
+      });
+    }
+
+    sendJson(ctx.res, 200, { documents: payload });
   });
 
   /**
@@ -166,8 +246,97 @@ export function registerDocumentRoutes(router: Router, deps: DocumentRouteDeps):
     ctx.res.end(found.content);
   });
 
+  /**
+   * Retract: ask the wiki to delete the compiled source for this document in one Stack.
+   *
+   * The order of the answers is the contract, and each step exists for a reason:
+   *
+   *  - OWNERSHIP FIRST, before the Stack, before the gate, before the flag. Answering `409`
+   *    or `400` for a document that is not the caller's confirms that it exists (and, for
+   *    the gate, that it was ingested). A foreign document keeps the identical `404` the
+   *    rest of this router answers.
+   *  - THEN THE STACK, which is required here and optional in the listing. A retraction
+   *    deletes content in ONE Stack and recompiles it there, so "no Stack" has no sensible
+   *    default: guessing one would delete another tenant's compiled source.
+   *  - THEN the deployment capability, the local gate, the identity and the call, in that
+   *    order and all of them inside `DocumentRetraction`.
+   *
+   * The answer is `202 { jobId }` even though the wiki's own body may say more: a client
+   * that wanted to follow the recompile needs the id, and forwarding a body this layer did
+   * not define would bind every client to a shape nobody promised.
+   */
+  router.post("/documents/:id/retract", async (ctx) => {
+    const id = ctx.params.id ?? "";
+    const owned = await documents.findOwned(id, ctx.userId);
+    if (!owned) throw new HttpError(404, "not_found", "no such document");
+
+    const stackId = requestStackId(ctx);
+    if (!stackId) {
+      throw new HttpError(
+        400,
+        "invalid_stack_id",
+        "send one x-stack-id header naming the Stack to retract from",
+      );
+    }
+
+    const retraction = deps.retraction;
+    if (!retraction) {
+      throw new HttpError(
+        503,
+        "source_retraction_unavailable",
+        "this deployment cannot retract sources: it has no ingest service configured",
+      );
+    }
+
+    const accepted = await retraction.retract({
+      documentId: id,
+      userId: ctx.userId,
+      stackId,
+      // The identity the wiki is asked to delete is resolved from OUR bytes, not from the
+      // upload's filename: the two are not the same name upstream.
+      contentHash: owned.contentHash,
+    });
+
+    // The listing's cached wiki rows describe the Stack as it was BEFORE this call, so a
+    // mark read a moment later would still claim the wiki holds bytes it just deleted.
+    deps.ingestState?.forget(stackId);
+
+    sendJson(ctx.res, 202, { jobId: accepted.jobId });
+  });
+
+  /**
+   * Delete an upload, unless the wiki still holds it.
+   *
+   * The order is load-bearing, twice over:
+   *
+   *  - OWNERSHIP FIRST. A guard evaluated before the ownership check would answer `409`
+   *    for somebody else's document, which confirms both that it exists and that it was
+   *    ingested. A foreign document must keep answering the plain `404` it answers today,
+   *    whatever its rows say.
+   *  - THE GUARD IS NOT STACK-SCOPED. Deleting this row cascades every Stack's ingest
+   *    state, so the question is "does ANY Stack still hold these bytes compiled", not
+   *    "does the Stack in this request". Reading `x-stack-id` here would make omitting
+   *    the header the way to delete content another tenant still compiles.
+   *
+   * Local state only: no retraction, no call to the wiki. What the caller is told is to
+   * retract first, and retracting is its own endpoint with its own semantics.
+   */
   router.delete("/documents/:id", async (ctx) => {
-    const removed = await documents.delete(ctx.params.id ?? "", ctx.userId);
+    const id = ctx.params.id ?? "";
+    const owned = await documents.findOwned(id, ctx.userId);
+    if (!owned) throw new HttpError(404, "not_found", "no such document");
+
+    if (await documents.hasActiveIngest(id)) {
+      throw new HttpError(
+        409,
+        "document_ingested",
+        `Document "${id}" is ingested; retract it with POST /documents/${id}/retract before deleting it`,
+      );
+    }
+
+    // Repeated ownership in the DELETE itself: between the two reads the row can be gone
+    // or handed over, and this statement is the one that decides.
+    const removed = await documents.delete(id, ctx.userId);
     if (!removed) throw new HttpError(404, "not_found", "no such document");
     ctx.res.writeHead(204);
     ctx.res.end();

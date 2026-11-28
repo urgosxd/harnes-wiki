@@ -27,7 +27,7 @@
 import type { Router } from "../http/router.ts";
 import { HttpError, sendJson } from "../http/router.ts";
 import type { IngestClient } from "../ingest/client.ts";
-import { IngestServiceUnreachable } from "../ingest/client.ts";
+import { IngestServiceUnreachable, newJobId } from "../ingest/client.ts";
 
 /**
  * Turns an uploaded document into the reference the ingest service can read.
@@ -68,7 +68,41 @@ export interface IngestRouteDeps {
   ingest: IngestClient | undefined;
   /** `undefined` when this deployment cannot serve capability URLs. */
   documents: DocumentResolver | undefined;
+  /**
+   * Where a document ingest is remembered locally.
+   *
+   * Present only when uploads are: a document has to exist here before its ingest state
+   * can point at it. Without it the route still starts jobs and records nothing, which is
+   * the honest behaviour for a deployment that keeps no per-document state.
+   */
+  ingests?: DocumentIngestRecorder | undefined;
 }
+
+/**
+ * The local record this route needs after an accepted start.
+ *
+ * Narrow on purpose: the route owns the request, the store owns the row, and neither has
+ * to know the other's shape. Wider than the single call it exists for, it would become a
+ * second place where "what an ingest state is" gets decided.
+ */
+export interface DocumentIngestRecorder {
+  recordIngest(input: {
+    documentId: string;
+    stackId: string;
+    userId: string;
+    jobId: string | null;
+    status: string;
+  }): Promise<unknown>;
+}
+
+/**
+ * The one state we can honestly write: we asked, and nothing here follows the job.
+ *
+ * No `ingested`, no `running`: those are observations the external service owns, and a
+ * row claiming one would be a second, drifting source of truth - exactly what
+ * `003_documents.sql` forbids reading `last_status` as.
+ */
+const REQUESTED_STATUS = "requested";
 
 interface CreateJobBody {
   source?: unknown;
@@ -241,6 +275,35 @@ export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): voi
       }
     }
 
+    /**
+     * Remember the request, but only once the service has ACCEPTED it.
+     *
+     * Three exclusions, each one a fact rather than a shortcut:
+     *
+     *  - A source-kind job has no document. This table is about uploads we hold; a URL
+     *    or a path the service reads by itself has no row to point at.
+     *  - A job with no Stack named has no identity here: the row's key is (document,
+     *    Stack), and inventing a Stack would file a compile under a tenant nobody chose.
+     *  - No recorder means this deployment keeps no per-document state at all.
+     *
+     * A failure to write propagates: better a caller who sees an error than an answer
+     * that claims a state we could not store.
+     */
+    const recordAccepted = async (jobId: string): Promise<void> => {
+      if (target.kind !== "document") return;
+      const stackId = target.stackId;
+      if (stackId === undefined) return;
+      const recorder = deps.ingests;
+      if (!recorder) return;
+      await recorder.recordIngest({
+        documentId: target.documentId,
+        stackId,
+        userId: ctx.userId,
+        jobId,
+        status: REQUESTED_STATUS,
+      });
+    };
+
     // A document reference has to become a URL before the service can read it, and
     // the resolver is the only part that knows storage. Refusing here keeps the
     // failure honest: without a public address there is no URL to hand over.
@@ -269,6 +332,19 @@ export function registerIngestRoutes(router: Router, deps: IngestRouteDeps): voi
         throw new HttpError(502, `ingest_service_${error.reason}`, error.message);
       }
       throw error;
+    }
+
+    // Recorded BEFORE the answer and AFTER the upstream accepted, never earlier: a
+    // refused start (`409 busy`, a 500, an unreachable host) must leave the table exactly
+    // as it was, or the panel's mark and the retract precondition both start lying about
+    // a job that never ran.
+    //
+    // The id is read with `newJobId` because the service names it `jobId` on the start
+    // answer and `id` on a snapshot; pinning this path to one of the two would record
+    // `undefined` the day the host changed shape.
+    if (upstream.status >= 200 && upstream.status < 300) {
+      const acceptedJobId = newJobId(upstream.body);
+      if (acceptedJobId !== undefined) await recordAccepted(acceptedJobId);
     }
 
     if (upstream.status === 202) {

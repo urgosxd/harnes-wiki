@@ -52,6 +52,7 @@ function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
     listDocuments: async () => {},
     upload: async () => null,
     removeDocument: async () => {},
+    retractDocument: async () => {},
     ingestDocument: async () => {},
     documentsNotice: null,
     jobs: [active],
@@ -71,6 +72,7 @@ function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
     retryJob: async () => {},
     deletingIds: new Set<string>(),
     retryingIds: new Set<string>(),
+    retractingIds: new Set<string>(),
     clearPollNotice: () => {},
     ...overrides,
   };

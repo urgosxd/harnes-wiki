@@ -21,6 +21,39 @@ export interface UploadedDocument {
   createdAt: string;
 }
 
+/**
+ * What the server knows about ONE document's ingest in ONE Stack.
+ *
+ * `current` is OPTIONAL on purpose: when the wiki cannot be read the server answers
+ * `known: false` and omits the key entirely, because "I could not look" is not "it is
+ * not there". A required `boolean` would force this surface to invent the negative
+ * answer, and inventing it is a claim about the user's data that nothing verified.
+ */
+export interface DocumentIngestState {
+  jobId: string;
+  requestedAt: string;
+  /** When the wiki accepted these bytes, or `null` when no matching source was seen. */
+  ingestedAt: string | null;
+  /** Whether the wiki still holds these bytes in this Stack. ABSENT when `known` is false. */
+  current?: boolean;
+  /** Whether the wiki listing could be read at all. */
+  known: boolean;
+}
+
+/**
+ * One row of `GET /documents`: the stored document plus its ingest state.
+ *
+ * Kept apart from {@link UploadedDocument} because the upload answer (`POST /documents`)
+ * carries neither field, and a type that claimed otherwise would make every upload look
+ * like it had already been checked against the wiki.
+ */
+export interface ListedDocument extends UploadedDocument {
+  /** `null` for a row stored before the hash was recorded: no content identity. */
+  contentHash: string | null;
+  /** `null` when no Stack was named, or when we never asked the wiki for these bytes. */
+  ingest: DocumentIngestState | null;
+}
+
 export interface Identity {
   id: string;
   displayName: string;
@@ -275,8 +308,15 @@ export class ApiClient {
     );
   }
 
-  async listDocuments(): Promise<UploadedDocument[]> {
-    const body = await this.json<{ documents?: UploadedDocument[] }>("GET", "/documents");
+  /**
+   * One user's documents, newest first, each with what the server knows about its ingest.
+   *
+   * The state travels WITH the listing rather than as a second call per row: the wiki is
+   * read once per Stack on the server, so asking here would multiply that read by the
+   * number of documents.
+   */
+  async listDocuments(): Promise<ListedDocument[]> {
+    const body = await this.json<{ documents?: ListedDocument[] }>("GET", "/documents");
     return body.documents ?? [];
   }
 
@@ -308,6 +348,36 @@ export class ApiClient {
 
   async deleteDocument(id: string): Promise<void> {
     await this.request("DELETE", `/documents/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * Ask the server to retract one document from the wiki: the wiki deletes the compiled
+   * source and recompiles the Stack without it.
+   *
+   * The Stack travels as `x-stack-id`, the header every other document call on this
+   * family is scoped by (`GET /documents`, `DELETE /documents/:id`): a retraction is one
+   * Stack's business — the source being deleted is compiled in that Stack — so a query
+   * parameter would be a second spelling of a fact that already has one.
+   *
+   * The acceptance carries the id of the deletion-and-recompile as ONE job upstream, and
+   * that id is what a caller follows to see the recompile finish.
+   *
+   * A refusal is NOT softened here: `409 document_ingested`, `409 document_not_ingested`,
+   * `409 busy` and `503 source_retraction_unavailable` arrive as `ApiError` with our
+   * server's code and sentence, because the sentence is the part that says what would
+   * work (or which variable an operator has to set).
+   *
+   * `null` when the body names no job id: reporting an ACCEPTED retraction as a failure
+   * because its envelope was unreadable would be worse than not following it.
+   */
+  async retractDocument(documentId: string, stackId: string): Promise<string | null> {
+    const body = await this.json<unknown>(
+      "POST",
+      `/documents/${encodeURIComponent(documentId)}/retract`,
+      undefined,
+      { "x-stack-id": stackId.trim() },
+    );
+    return newJobIdFrom(body);
   }
 
   /** Start an ingest for an uploaded document, by reference rather than by path. */

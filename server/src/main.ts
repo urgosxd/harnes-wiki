@@ -28,6 +28,8 @@ import {
 import { AgentRoleReader, type AgentRoleSource } from "./pi/agent-role.ts";
 import { registerIngestRoutes } from "./api/ingest-routes.ts";
 import { registerDocumentRoutes, capabilityPath } from "./api/document-routes.ts";
+import { DocumentIngestState } from "./api/document-ingest-state.ts";
+import { DocumentRetraction } from "./api/document-retraction.ts";
 import { DocumentStore } from "./db/document-store.ts";
 import { IngestClient } from "./ingest/client.ts";
 import type { Model } from "@earendil-works/pi-ai";
@@ -359,8 +361,24 @@ async function main(): Promise<void> {
         },
       }
     : undefined;
-  registerDocumentRoutes(router, { documents, publicBaseUrl: config.publicBaseUrl });
-  registerIngestRoutes(router, { ingest, documents: documentResolver });
+  registerDocumentRoutes(router, {
+    documents,
+    publicBaseUrl: config.publicBaseUrl,
+    // The listing's ingest state needs the same adapter, and only exists when one is
+    // configured: with no service to read there is nothing to compare a hash against, and
+    // the route answers `ingest: null` rather than claiming a document is not ingested.
+    ...(ingest ? { ingestState: new DocumentIngestState({ ingest, ingests: documents }) } : {}),
+    // Retraction is ALWAYS constructible, and the two ways it can be unavailable are
+    // answered where they belong: no adapter in this deployment, or the flag left off. A
+    // route that did not exist would give the client a `404` for an operation this product
+    // does have — a different fact, and one nobody could act on.
+    retraction: new DocumentRetraction({
+      client: ingest,
+      ingests: documents,
+      enabled: config.sourceRetractionEnabled,
+    }),
+  });
+  registerIngestRoutes(router, { ingest, documents: documentResolver, ingests: documents });
   if (config.ingestApi) {
     log.info("ingest service adapter configured", {
       baseUrl: config.ingestApi.baseUrl,

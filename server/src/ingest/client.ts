@@ -133,6 +133,49 @@ export class IngestClient {
       .filter((id): id is string => id !== undefined);
   }
 
+  /**
+   * Every source the wiki holds in one Stack: its content hashes and when they landed.
+   *
+   * The Stack is a PATH segment here, not a `?stackId=` query parameter, and that is not
+   * an inconsistency: this is the service's own Stack RESOURCE (`/stacks/*`), whose routes
+   * take the id in the path, while `stackQuery` belongs to the ingest job API
+   * (`/api/ingest/*`) which selects a Stack with a parameter. One base URL serves both.
+   *
+   * The body is returned unreshaped, like every other read here: what the listing carries
+   * is the provider's contract, and reading it is the caller's job.
+   */
+  async listStackDocuments(stackId: string): Promise<UpstreamResponse> {
+    return this.request("GET", `/stacks/${encodeURIComponent(stackId)}/documents`);
+  }
+
+  /**
+   * Delete ONE source the wiki holds, and let it recompile without it.
+   *
+   * `DELETE /stacks/<stackId>/sources/<identity>`, where identity is the wiki's own
+   * `storage_path` for the source — not our document id and not the upload's filename: the
+   * wiki deletes the file IT stored, and that path is the only handle it accepts.
+   *
+   * PATH SEGMENTS, not `?stackId=`, for the same reason `listStackDocuments` uses them: this
+   * is the service's own Stack RESOURCE (`/stacks/*`), whose routes take the id in the path,
+   * while `stackQuery` belongs to the ingest job API (`/api/ingest/*`), which selects a Stack
+   * with a parameter. One base URL serves both, and mixing them would 404 on one family.
+   *
+   * The identity is encoded as ONE path segment, and that is the whole point of the call
+   * rather than a detail: a real `storage_path` looks like `wiki/sources/informe.md`, and
+   * sending it raw would address three segments the wiki does not have. `encodeURIComponent`
+   * makes the slashes part of the NAME. A blank identity is refused before the wire — `.../
+   * sources/` with nothing after it names a collection, not a source — instead of being sent
+   * as a request that cannot mean what the caller intended.
+   */
+  async deleteSource(stackId: string, identity: string): Promise<UpstreamResponse> {
+    const source = identity.trim();
+    if (!source) throw new Error("a source deletion needs the wiki's storage_path for the source");
+    return this.request(
+      "DELETE",
+      `/stacks/${encodeURIComponent(stackId)}/sources/${encodeURIComponent(source)}`,
+    );
+  }
+
   /** Read one job snapshot. 404 (unknown id) and 503 (no tracking) are distinct. */
   async getJob(id: string, stackId?: string): Promise<UpstreamResponse> {
     return this.request("GET", `/api/ingest/jobs/${encodeURIComponent(id)}${stackQuery(stackId)}`);
