@@ -37,6 +37,11 @@ import { databaseReady, testUser } from "./support/harness.ts";
  *     `404 source_not_found` becomes our `409 document_not_ingested`, carrying the
  *     upstream's own sentence: one client-visible code, and no `retracted` row for a
  *     deletion that never happened.
+ *  5. READING ANY `404` AS THAT ANSWER. A `404` is also what a route the deployment
+ *     does not serve answers, and reporting THAT as "there was nothing to retract" is
+ *     a false statement about the caller's data made about a deletion nobody attempted.
+ *     Only a body that carries the missing-source marker earns the `409`; anything else
+ *     is `503 source_retraction_unavailable`, and the cases below pin both sides.
  *
  * The wiki is stubbed at the TRANSPORT (a real HTTP server answering the real routes),
  * never at the client class: the paths this adapter builds, the query-vs-path choice and
@@ -359,6 +364,72 @@ describe("POST /documents/:id/retract removes the compiled source from the wiki"
       await rows(documentId),
       [{ stack_id: stackId, last_status: "requested" }],
       "a deletion that did not happen must not be recorded as one",
+    );
+  });
+
+  test("an upstream 404 that NAMES the missing source in its message is still our 409", async () => {
+    const stackId = freshStack("upstream404msg");
+    const documentId = await upload(INGESTED_BYTES);
+    await record(documentId, stackId);
+    wikiListings.set(stackId, { status: 200, body: listingBody([wikiRow()]) });
+    // The marker spelled into a SENTENCE, with no recognisable code at all: the wiki's
+    // word for the fact is what decides, not the envelope's shape.
+    const said = `Source "${STORAGE_PATH}" was not found in Stack "${stackId}"`;
+    deleteAnswer = { status: 404, body: { error: { message: said } } };
+    const before = deleteCalls.length;
+
+    const res = await retract(documentId, { stackId, upstream: true });
+
+    assert.equal(res.status, 409);
+    assert.deepEqual(res.body, { error: "document_not_ingested", message: said });
+    assert.equal(deleteCalls.length, before + 1, "exactly one deletion");
+    assert.deepEqual(
+      await rows(documentId),
+      [{ stack_id: stackId, last_status: "requested" }],
+      "a deletion that did not happen must not be recorded as one",
+    );
+  });
+
+  test("an upstream 404 for an unknown ROUTE is not 'nothing to retract': 503, row untouched", async () => {
+    const stackId = freshStack("upstream404route");
+    const documentId = await upload(INGESTED_BYTES);
+    await record(documentId, stackId);
+    wikiListings.set(stackId, { status: 200, body: listingBody([wikiRow()]) });
+    // A body of the kind an undeployed route answers with: it names the PATH it could not
+    // match (plural `sources`), and says nothing about any source existing or not. Reading
+    // this as the wiki's "nothing to retract" would tell the caller their data is not in
+    // the wiki when nobody ever asked the wiki about it.
+    deleteAnswer = {
+      status: 404,
+      body: {
+        statusCode: 404,
+        error: "Not Found",
+        message: `Route DELETE:/stacks/${stackId}/sources/:identity not found`,
+      },
+    };
+    const before = deleteCalls.length;
+
+    const res = await retract(documentId, { stackId, upstream: true });
+
+    assert.equal(res.status, 503);
+    const body = res.body as { error: string; message: string };
+    assert.equal(body.error, "source_retraction_unavailable");
+    // The operator has to be able to act on it: the variable is the switch, and the
+    // sentence states what this deployment does NOT do rather than mutating our data story.
+    assert.match(body.message, /SOURCE_RETRACTION_ENABLED/, "the message must name the variable");
+    assert.match(body.message, /does not offer/i, "it must state the deployment's gap");
+    assert.doesNotMatch(
+      body.message,
+      /nothing to retract|not ingested|no ingest/i,
+      "an unknown route is not evidence that there was nothing to retract",
+    );
+    // The route's own words are not forwarded: they describe a path, not the caller's source.
+    assert.doesNotMatch(body.message, /Route DELETE/);
+    assert.equal(deleteCalls.length, before + 1, "the deletion WAS attempted, once");
+    assert.deepEqual(
+      await rows(documentId),
+      [{ stack_id: stackId, last_status: "requested" }],
+      "a refusal that performed nothing must change nothing",
     );
   });
 

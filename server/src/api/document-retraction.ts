@@ -144,13 +144,30 @@ export class DocumentRetraction {
     }
 
     if (answer.status === 404) {
-      // The wiki's own "nothing to retract", folded into our one code and carrying the
-      // wiki's sentence: it names the source, which ours cannot.
+      // A `404` from the wiki has TWO meanings, and telling them apart is not pedantry.
+      // One is the wiki saying "this Stack holds no such source": our one code for
+      // "there was nothing to retract", carrying the wiki's own sentence, which names the
+      // source and ours cannot.
+      //
+      // The other is the wiki not SERVING the route at all — a deployment where the
+      // upstream deletion is not there yet. Folding that into the same `409` would report
+      // "there was nothing to retract" about a deletion nobody attempted: a false
+      // statement about the caller's data, made by us. So the marker decides, and a `404`
+      // that carries none is answered as the deployment gap it is.
+      if (namesMissingSource(answer.body)) {
+        throw new HttpError(
+          409,
+          NOTHING_TO_RETRACT,
+          upstreamMessage(answer.body) ??
+            `Document "${documentId}" has no compiled source in Stack "${stackId}" to retract`,
+        );
+      }
       throw new HttpError(
-        409,
-        NOTHING_TO_RETRACT,
-        upstreamMessage(answer.body) ??
-          `Document "${documentId}" has no compiled source in Stack "${stackId}" to retract`,
+        503,
+        "source_retraction_unavailable",
+        "this deployment does not offer source retraction: the ingest service answered 404 to the " +
+          "source deletion without saying the source is missing, so the route it addresses is not " +
+          "served here. Set SOURCE_RETRACTION_ENABLED=true once the ingest service carries it",
       );
     }
 
@@ -272,4 +289,70 @@ function upstreamMessage(body: unknown): string | undefined {
     if (typeof message === "string" && message.trim()) return message.trim();
   }
   return undefined;
+}
+
+/**
+ * The upstream code for "this Stack holds no such source", as the E7 contract spells it.
+ *
+ * Compared after normalisation, so a spelling with a dash, a space or capitals is the same
+ * fact as the contract's own `source_not_found`.
+ */
+const SOURCE_NOT_FOUND_CODE = "source_not_found";
+
+/**
+ * The same fact spelled into a MESSAGE, in the shapes the wiki may choose.
+ *
+ * The list is narrow on purpose, and each entry is one sentence shape rather than "any
+ * `404` that mentions a source": a framework's route-not-found body names the path it
+ * could not match (`Route DELETE:/stacks/:id/sources/:identity not found`), and reading
+ * that as this fact is the defect the caller must never be handed.
+ */
+const MISSING_SOURCE_TEXT: readonly RegExp[] = [
+  // The code written into a sentence: "source_not_found", "source not found".
+  /source[_ ]?not[_ ]?found/i,
+  // The other phrasing of the same fact.
+  /\bno such source\b/i,
+  // One clause naming ONE source and saying it is not there: `Source
+  // "wiki/sources/informe.md" was not found in Stack "s"`. `\bsource\b` is SINGULAR on
+  // purpose: a route template names the PLURAL (`.../sources/:identity`), and the plural
+  // is exactly what must not be read as "the source is gone".
+  /\bsource\b[^\n]{0,80}?\bnot[\s_-]+found\b/i,
+];
+
+/**
+ * Whether the wiki said "there is no such source".
+ *
+ * The one thing that turns an upstream `404` into our `409 document_not_ingested`. Both
+ * spellings count — the error code and the sentence — because the wiki may answer with
+ * either, and neither is an inference: one of them has to be present.
+ *
+ * A body with no marker is NOT this fact. That is the whole point of the closed list: a
+ * `404` is also what an undeployed route answers, and guessing in that direction tells the
+ * caller their content was not ingested when nothing was ever asked about it.
+ */
+function namesMissingSource(body: unknown): boolean {
+  if (typeof body !== "object" || body === null) return false;
+  const record = body as { error?: unknown; code?: unknown; message?: unknown };
+
+  // Both the flat envelope (`{ error: { code, message } }`) and the code-as-a-string one
+  // (`{ error: "source_not_found", message }`) are read: which shape arrives is the
+  // service's business, and a reader that knew only one would answer 503 for a wiki that
+  // was in fact telling us the source is gone.
+  const codes: string[] = [];
+  const messages: string[] = [];
+  if (typeof record.code === "string") codes.push(record.code);
+  if (typeof record.error === "string") codes.push(record.error);
+  if (typeof record.message === "string") messages.push(record.message);
+  if (typeof record.error === "object" && record.error !== null) {
+    const envelope = record.error as { code?: unknown; message?: unknown };
+    if (typeof envelope.code === "string") codes.push(envelope.code);
+    if (typeof envelope.message === "string") messages.push(envelope.message);
+  }
+
+  const codeSaysIt = codes.some(
+    (code) => code.trim().toLowerCase().replace(/[\s-]+/g, "_") === SOURCE_NOT_FOUND_CODE,
+  );
+  return (
+    codeSaysIt || MISSING_SOURCE_TEXT.some((pattern) => messages.some((text) => pattern.test(text)))
+  );
 }
