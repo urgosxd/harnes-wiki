@@ -63,6 +63,53 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
 
 ## Log
 
+L8 (worker): the web half of S5 is now PINNED by a committed test, in `241c70c`
+(`test(web): pin the document refusal notices`) — one file, `web/src/components/ingest-jobs.test.tsx`,
++86 lines, no product code touched. L7 proved the mapping `document_not_ingested` → the
+server's sentence with a throwaway out-of-worktree probe, because that file was outside its
+surfaces; a probe leaves nothing behind, so a later edit could have dropped the code from
+`DOCUMENT_REFUSAL_CODES` with every test still green. What is now pinned, and why in these
+places:
+  1. TWO PURE CASES in a new block next to the delete guard's
+     (`noticeFor: 409 document_not_ingested is a document fact too`): the server's sentence
+     reaches the notice VERBATIM and WHOLE (`toEqual` on the full string, no code prefix, and
+     explicitly not the concurrency sentence), and the empty body falls back to our own
+     sentence asserted character for character, so a later edit to that fallback is a visible
+     diff. `document_not_ingested` is reachable from every documents call, so the mapping is
+     the right thing to pin; the two cases issue no request, which is why the request
+     assertion lives in the third.
+  2. ONE END-TO-END CASE in the panel block, next to S4's `document_ingested` case: the same
+     code driven through the REAL hook and REAL client over the recording transport, the
+     alert's WHOLE text compared to the server's sentence, and every recorded wire asserted to
+     carry no `x-user-id` / `x-dev-token`. The wire answer carries the code on purpose — no
+     client call asks for it until S7 wires the retraction button, so which endpoint produces
+     it is S7's business and what the notice says is this file's.
+  3. THE FOUR NEIGHBOURS ALREADY PINNED, verified rather than duplicated: `job_still_working`
+     and `job_changed` (code-prefixed, exact) and `busy` plus the code-less lock (the byte-for-
+     byte concurrency sentence) are all asserted with literal equality in
+     `describe("noticeFor: a 409 is two different facts")`. Nothing was added there.
+  4. OBSERVATION FOR S7, not changed here: with an empty body, `document_not_ingested` falls
+     back to the DELETE guard's sentence — "This document is ingested; retract it before it can
+     be deleted." For a document with NO ingest that sentence states the opposite fact. It is
+     pinned exactly as it behaves today (this step preserves, it does not fix), and it becomes
+     user-visible the moment S7 calls the retract endpoint and it answers without a body. One
+     line in `documentRefusalMessage` would give that code its own fallback; that is a copy
+     decision for the owner, not a defect a test should silence.
+  Evidence: `npx vitest run src/components/ingest-jobs.test.tsx` 73/73 (70 before, +3),
+  `cd web && npx vitest run` 382/382, `npx tsc --noEmit` clean, `cd server && npm test` 552/552
+  unchanged. No RED is claimed — this is a PRESERVE step and the behavior already existed — so
+  the test's non-vacuity was proven by MUTATION instead: with `"document_not_ingested"` removed
+  from `DOCUMENT_REFUSAL_CODES` in `use-ingest.ts`, exactly the three new cases fail (the two
+  pure ones on the deep-equality of the sentence, the end-to-end one on
+  `'Another ingest is running. That is a …'` where the server's sentence was expected) and the
+  other 70 pass; restored, `sha256sum -c` on the saved copy is OK, `git diff` for
+  `use-ingest.ts` is empty, and the file re-runs 73/73. Which sentences a `409` carries is
+  therefore load-bearing in versioned evidence, not in a probe.
+  Slice note for the transaction controller: the branch is at 3532 authored changed lines in
+  13 commits since `main`, past the ~400-line work-unit slice, and `241c70c` is a 86-line
+  addition on top. Delivery slicing of the feature branch is NOT this step's decision and was
+  not taken here; recorded so the boundary is not lost.
+
 L7 (worker): S5 landed in `e6ef89f` (`feat(api): add document retraction gated on an enable
 flag`) — `server/src/api/document-retraction.ts` (new), `server/src/api/document-routes.ts`,
 `server/src/ingest/client.ts`, `server/src/db/document-store.ts`, `server/src/config.ts`,
