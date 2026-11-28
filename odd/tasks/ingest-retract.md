@@ -26,7 +26,7 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
 
 - S0 — feature document. Route: worker.
 - S1 — migration 007: `documents.content_hash`, `document_ingests.stack_id`, composite PK. Route: worker.
-- S2 — wire `recordIngest`. Route: worker.
+- S2 — wire `recordIngest`. Route: worker. Commit `cff8f25`.
 - S3 — `GET /api/documents` contract with `current`. Route: worker.
 - S4 — UI mark, three states. Route: worker.
 - S5 — `POST /:id/retract` (503 while E7 pending). Route: worker.
@@ -37,3 +37,10 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
 L1 (user, verbatim): "en la ui de ingest , hay botones en cada recurso para ingent hay ingest y remove ademas quisiera un check en los items ya ingestados, y quiero saber que hacer remove me gustaria que dispare una compilacion que haga delete, asi que dime que requieres del backend , que enpoints"
 
 L2 (human, relayed by the Chief): (a) marking = ingested and current by hash, a changed file drops the mark by itself; (b) Remove decides nothing on our side, the panel only calls the retraction endpoint and llm-wiki owns the rest, no conditional branch on `current` in the client or the handler; (c) reversible: re-ingesting the same file restores the content, no permanent tombstone; (d) data model 1:N, one document with one ingest state per stack.
+
+L3 (worker): S2 landed in `cff8f25` (`feat(api): record document ingests per stack`) — `server/src/db/document-store.ts`, `server/src/api/ingest-routes.ts`, `server/src/main.ts`, `server/test/document-ingest-record.test.ts`. Three defects/incomplete facts fixed, not just wired:
+  1. `recordIngest` upserted `ON CONFLICT (document_id)`, a unique constraint migration 007 removed when it made the key `(document_id, stack_id)`. Postgres raises on a conflict target with no matching constraint, so the write would have failed on its first call, exactly as it failed silently before it had callers. It now names the composite key and RESETS `last_status` on re-ingest (the data half of S7, no tombstone).
+  2. `ingestFor` filtered on `document_id + user_id` and returned `rows[0]`, which with N stacks answered with another Stack's job id. It now requires the stack and filters on it.
+  3. The route records only after the upstream answers 2xx WITH a job id, and never for a source-kind job or a job that names no Stack. `server/src/main.ts` gained the one line that gives the seam its production call site (`ingests: documents`), approved by the Lead: the previous `recordIngest` had no callers and nobody noticed.
+  Evidence: `server/test/document-ingest-record.test.ts` 10/10 (RED first: 6 of 8 failing), `cd server && npm test` 523/523 passing, `npx tsc --noEmit` clean. The store and route behaviour is proven by execution; the production wiring in `main.ts` is read from code, not executed by any test.
+  Open for S3: `requested_at` keeps the FIRST request on re-ingest (documented in the store), and a document ingest with no named Stack writes no row.
