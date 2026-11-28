@@ -31,6 +31,7 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
 - S4 — UI mark, three states. Route: worker. Commit `fba2f0c`.
 - S5 — `POST /:id/retract` (503 while E7 pending). Route: worker. Commit `e6ef89f`.
 - S6 — `DELETE` 409 guard. Route: worker. Commit `5aebe6b`.
+- S7 — `Remove` consume `POST /:id/retract` AHORA (el humano adelantó el gate de E7) y un `404` de ruta desconocida deja de leerse como "nada que retraer". Route: worker. Commits `a24ae13` (server) + `dfe069a` (web).
 
 ## Open risks
 
@@ -62,6 +63,81 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
   `server/src/api/document-ingest-state.ts`.
 
 ## Log
+
+L10 (worker): S7 is done, in TWO commits, because the two halves answer different
+questions and either one alone leaves a lie on screen.
+
+  1. THE HUMAN OVERRODE THE E7 GATE, verbatim: "pero porque no borra solo debes consumer el
+     enpoint ?". Until this step `Remove` called `DELETE /documents/:id` — local cleanup —
+     so an ingested document was refused there, and the row carried a hint saying removal
+     needed a retraction the panel could not ask for yet. That hint was the truth about the
+     old wiring and is now gone: the control calls `POST /documents/:id/retract`, reads
+     `Remove from wiki`, and states the action instead of its absence. The accessible name
+     stays the byte-identical historical `Delete <filename>`: the owner approved the visible
+     change and asked for the key to stay, and both are pinned as two literals.
+  2. THE DEFECT THIS STEP EXISTS FOR, in `a24ae13`
+     (`fix(api): stop reading an unknown-route 404 as 'nothing to retract'`): every upstream
+     `404` from the source deletion was mapped to our `409 document_not_ingested`. That is
+     only true when the wiki says the SOURCE is gone. A `404` is also what a route the
+     deployment does not serve answers, and reporting THAT as "there was nothing to
+     retract" states something false about the caller's data, about a deletion nobody
+     attempted. The mapping is now conditional on a marker in the body: the
+     `source_not_found` code (any separator or case), or a message that NAMES a source and
+     says it is not there. An unrecognised `404` becomes `503
+     source_retraction_unavailable`, naming `SOURCE_RETRACTION_ENABLED` and stating that
+     this deployment does not offer retraction. Neither answer creates a job or touches
+     `last_status`. Two details are load-bearing and were not obvious: the message
+     recogniser is a CLOSED list (a framework's route-not-found body names the path it could
+     not match — `.../sources/:identity not found` — and "source ... not found" proximity
+     alone would fire on it), and `\bsource\b` there is SINGULAR on purpose, because a route
+     template uses the plural. `busy`, the gate `409`, the flag-off `503`, the happy path
+     and the identity encoding are untouched and still green.
+  3. THE FLAG STAYS OFF. `SOURCE_RETRACTION_ENABLED` keeps its OFF default here — flipping
+     it is a deployment action, not this step's — so TODAY the button's live behaviour is:
+     one `POST /api/documents/<id>/retract`, answered `503
+     source_retraction_unavailable`, shown to the operator in the server's own words
+     ("source retraction is not enabled in this deployment: set
+     SOURCE_RETRACTION_ENABLED=true …"), row still listed, nothing retracted, no second
+     request. The moment a deployment sets `SOURCE_RETRACTION_ENABLED=1` (and E7's deletion
+     route is served) the same click resolves the wiki identity, deletes the compiled source
+     and recompiles, and the panel follows the returned job id and re-reads the list — no
+     client change, no second flag. If the route is NOT served there, the new `503` says
+     exactly that instead of claiming there was nothing to ingest.
+  4. `noticeFor` HAD TO GROW: a `503 source_retraction_unavailable` was reported as "The
+     ingest service does not track jobs", which names a different deployment gap and drops
+     the variable the operator must set. The retraction refusal now passes the service's own
+     sentence through, and the "heard nothing" rule (empty body, or the client's own
+     `request failed with <status>`) became one helper, `serviceSaid`, shared with the
+     document refusals instead of duplicated. No other notice sentence moved.
+  Evidence: RED first, on both halves, against the previous commit — server
+  `documents-retract.test.ts` 12/13 with the new unknown-route case failing `409 !== 503`
+  (the marker case passed there only because every `404` was already a `409`; it was made
+  non-vacuous by MUTATION: deleting the clause pattern from `MISSING_SOURCE_TEXT` fails it
+  alone, then restored and sha256-verified); web `ingest-jobs.test.tsx` 70 passed / 9 failed
+  against `fff8b47` — the 8 new S7 cases (Remove still issued a `DELETE`, so no retraction
+  appeared) plus the updated S4 mark case (the hint it asserted is gone). GREEN after:
+  server 554/554 (+2), web 388/388 (+6 net: 2 obsolete cases replaced, 8 added), both
+  `npx tsc --noEmit` clean, `npm run build` clean, `npm test` in `server` 554/554.
+  TWO WEB CASES WERE REPLACED, not deleted silently: `keeps the row and shows the refusal
+  verbatim when Remove is refused (S4)` and `puts a document_not_ingested refusal on the
+  notice whole` both pinned `Remove` → `DELETE`, which is the behaviour this step removes.
+  Their substance survives: the 409 notice path is covered end to end by the new cases, and
+  the `document_not_ingested` mapping (including its empty-body fallback) stays pinned
+  character-for-character by the two pure cases L8/L9 added. A third end-to-end case now
+  covers that code through the retraction endpoint, which is the call that really produces
+  it.
+  ONE FILE OUTSIDE THE ORIGINAL SURFACES, with the owner's explicit grant, and nothing else:
+  `web/src/components/ingest-panel-controls.test.tsx` needed its hand-built
+  `UseIngestResult` double to learn the two new members (`retractDocument`,
+  `retractingIds`) — two lines, no reformatting. Loosening the contract to satisfy a double
+  was considered and REJECTED by the owner on principle: an optional `retractDocument` would
+  let the panel render a Remove control that silently does nothing. It is the only other
+  double of that type in the repository (`grep` for `: UseIngestResult`), so no other file
+  inherits the change.
+  Slice note for the transaction controller: the branch is at 4096 authored changed lines in
+  17 commits since `main`, past the ~400-line work-unit slice. Delivery slicing of the
+  feature branch is NOT this step's decision and was not taken here; recorded so the
+  boundary is not lost.
 
 L9 (worker): L8's item 4, the empty-body fallback of `409 document_not_ingested`, is CLOSED
 — fixed in this commit (`fix(web): give the not-ingested refusal its own sentence`), not left
