@@ -64,6 +64,41 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
 
 ## Log
 
+L11 (delivery): the feature is MERGED into `main`, and the flag that would make it
+  retract anything is still OFF. The human authorized the merge, verbatim: "mergea", after
+  the implementation and its tests were green; `main` received
+  `Merge feature/ingest-retract: mark ingested documents and retract via compilation` at
+  `ee53feb` (--no-ff, the 18 work-unit commits intact, nothing pushed). Counts observed on
+  the merged `main`, not inherited from any prior entry: `server` `npm test` 554/554, `web`
+  `npx vitest run` 388/388 in 22 files, `npx tsc --noEmit` clean in both, `web` `npm run
+  build` clean.
+  WHAT IS LIVE ON `main` TODAY: the mark (S1 `content_hash`, S2 per-stack ingest state, S3
+  the listing contract, S4 the three-state check in the panel) and the `DELETE
+  /documents/:id` guard (S6 `409 document_ingested`) — both answer without any wiki call and
+  are active the moment this commit is deployed. The retract endpoint itself
+  (`POST /documents/:id/retract`, S5) is PRESENT but GATED, and the panel's `Remove from
+  wiki` call (S7) is LIVE and wired to it: with the flag off that click is answered `503
+  source_retraction_unavailable` and changes NOTHING — no job, no `last_status` write, the
+  row still listed — which is the shape L10 item 3 already recorded.
+  WHAT STAYS INERT, AND THE ONE ACTION THAT ACTIVATES IT: `SOURCE_RETRACTION_ENABLED` keeps
+  its OFF default in code. Enabling it is a DEPLOYMENT action, not a code change, and it
+  requires E7 (`DELETE /stacks/:stackId/sources/:identity`) to actually be served by the
+  wiki; setting the flag against a deployment that does not serve that route turns the same
+  click into a `503` that says the deployment does not offer retraction instead of claiming
+  there was nothing to ingest (L10 item 2). No code change is needed to enable it: set the
+  variable and serve E7.
+  SLICE BOUNDARY — THE DISPOSITION OF THE HOOK'S WARNING, recorded so it is not
+  re-litigated: the branch carried ~4,170 authored changed lines (4,104 insertions, 68
+  deletions across 21 files) in 18 commits, deliberately ONE COMMIT PER TASK rather than one
+  per ~400-line slice. That shape was chosen so each `S#` is reviewable and reverts alone;
+  the warning was seen, and this is its answer, not an oversight left for a later step to
+  re-open.
+  STILL OPEN, and NOT closed by delivery: the risks in `## Open risks` above — the
+  `'retracted'`-written-on-ACCEPT limitation (owner decision pending) and the wiki envelope
+  that is assumed rather than observed. Nothing in this feature was verified against a
+  running wiki: every wiki answer was exercised through fixtures, so a live deployment is
+  the first place those two risk items are really tested.
+
 L10 (worker): S7 is done, in TWO commits, because the two halves answer different
 questions and either one alone leaves a lie on screen.
 
