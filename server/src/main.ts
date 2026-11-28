@@ -360,7 +360,7 @@ async function main(): Promise<void> {
       }
     : undefined;
   registerDocumentRoutes(router, { documents, publicBaseUrl: config.publicBaseUrl });
-  registerIngestRoutes(router, { ingest, documents: documentResolver });
+  registerIngestRoutes(router, { ingest, documents: documentResolver, ingests: documents });
   if (config.ingestApi) {
     log.info("ingest service adapter configured", {
       baseUrl: config.ingestApi.baseUrl,

@@ -50,12 +50,26 @@ export interface DocumentWithContent extends DocumentRecord {
   content: Buffer;
 }
 
-/** What we asked the ingest service to do for one document, and what we last saw. */
+/**
+ * What we asked the ingest service to do for one document IN ONE STACK, and what we
+ * last saw.
+ *
+ * The Stack is part of the identity, not an attribute beside it: each Stack compiles
+ * and can be retracted independently, so a document holds one state per Stack and no
+ * lookup can be answered without saying which one it is about.
+ */
 export interface DocumentIngest {
   documentId: string;
+  stackId: string;
   userId: string;
   jobId: string | null;
+  /** Last state we SAW, informational only. Never a live status. */
   lastStatus: string;
+  /**
+   * When this state was FIRST requested. Left untouched by a re-ingest on purpose, so
+   * a caller can tell a long-lived state from one created a second ago; `updated_at`
+   * is the field that moves.
+   */
   requestedAt: Date;
   updatedAt: Date;
 }
@@ -76,6 +90,7 @@ interface DocumentContentRow extends DocumentRow {
 
 interface IngestRow {
   document_id: string;
+  stack_id: string;
   user_id: string;
   job_id: string | null;
   last_status: string;
@@ -123,6 +138,7 @@ function toRecord(row: DocumentRow): DocumentRecord {
 function toIngest(row: IngestRow): DocumentIngest {
   return {
     documentId: row.document_id,
+    stackId: row.stack_id,
     userId: row.user_id,
     jobId: row.job_id,
     lastStatus: row.last_status,
@@ -229,36 +245,63 @@ export class DocumentStore {
   // ---------------------------------------------------------------------------
 
   /**
-   * Record that a job was requested for a document.
+   * Record that a job was requested for a document, in one Stack.
    *
    * Upsert, not insert: re-ingesting the same document is a supported action (a
-   * compile failed, the source was fixed), and the row must reflect the LATEST
-   * request rather than accumulate history nobody reads.
+   * compile failed, the source was fixed, the Stack was retracted), and the row must
+   * reflect the LATEST request rather than accumulate history nobody reads.
+   *
+   * The conflict target is the COMPOSITE key `(document_id, stack_id)`. It is written
+   * out rather than left implicit for a reason: it used to name `(document_id)` alone,
+   * from before one document could hold one state per Stack, and a conflict target that
+   * names a constraint Postgres no longer has raises instead of upserting. A re-ingest
+   * therefore failed at the exact moment it was supposed to record a second attempt.
+   *
+   * `last_status` is RESET to what the caller passes, not merged with what it held: a
+   * retracted Stack that is ingested again is live again, with no tombstone left behind.
+   * Changing it back is the whole of the reversibility the feature promises, and it is
+   * why this is an assignment rather than a `COALESCE`.
+   *
+   * `requested_at` deliberately keeps the FIRST request: it answers "how long has this
+   * document been tracked in this Stack", which a reset would erase. The latest touch is
+   * `updated_at`.
    */
   async recordIngest(input: {
     documentId: string;
+    stackId: string;
     userId: string;
     jobId: string | null;
     status: string;
   }): Promise<DocumentIngest> {
     const rows = await this.db.query<IngestRow>(
-      `INSERT INTO document_ingests (document_id, user_id, job_id, last_status)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (document_id) DO UPDATE
+      `INSERT INTO document_ingests (document_id, stack_id, user_id, job_id, last_status)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (document_id, stack_id) DO UPDATE
          SET job_id = excluded.job_id,
              last_status = excluded.last_status,
              updated_at = now()
        RETURNING *`,
-      [input.documentId, input.userId, input.jobId, input.status],
+      [input.documentId, input.stackId, input.userId, input.jobId, input.status],
     );
     return toIngest(rows[0]!);
   }
 
-  /** What we last asked for, for one document the user owns. */
-  async ingestFor(documentId: string, userId: string): Promise<DocumentIngest | undefined> {
+  /**
+   * What we last asked for, for one document the user owns IN ONE STACK.
+   *
+   * The Stack is required, not optional-with-a-default. A document with two states has
+   * no "the" row to fall back to: returning the first match would hand Stack B's caller
+   * Stack A's job id, and a caller that then retracted or guarded on it would act on a
+   * different tenant's compile.
+   */
+  async ingestFor(
+    documentId: string,
+    userId: string,
+    stackId: string,
+  ): Promise<DocumentIngest | undefined> {
     const rows = await this.db.query<IngestRow>(
-      "SELECT * FROM document_ingests WHERE document_id = $1 AND user_id = $2",
-      [documentId, userId],
+      "SELECT * FROM document_ingests WHERE document_id = $1 AND user_id = $2 AND stack_id = $3",
+      [documentId, userId, stackId],
     );
     const row = rows[0];
     return row ? toIngest(row) : undefined;
