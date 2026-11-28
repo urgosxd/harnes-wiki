@@ -27,12 +27,57 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
 - S0 — feature document. Route: worker.
 - S1 — migration 007: `documents.content_hash`, `document_ingests.stack_id`, composite PK. Route: worker.
 - S2 — wire `recordIngest`. Route: worker. Commit `cff8f25`.
-- S3 — `GET /api/documents` contract with `current`. Route: worker.
+- S3 — `GET /api/documents` contract with `current`. Route: worker. Commit `4a5dfc4`.
 - S4 — UI mark, three states. Route: worker.
 - S5 — `POST /:id/retract` (503 while E7 pending). Route: worker.
 - S6 — `DELETE` 409 guard. Route: worker.
 
+## Open risks
+
+- **Wiki envelope assumed, not recorded; closed in S5 against the real listing.** The
+  `GET /stacks/:stackId/documents` body used by S3's fixture
+  (`server/test/documents-ingest-state.test.ts`) is derived from the same service's
+  `{ jobs: [...] }` collection convention, not observed: the wiki was not running when S3
+  landed, and its contract document
+  (`/home/urgosxd/Desktop/ofk/llm-wiki-compiler/docs/guides/http-ingest-jobs.mdx`) is
+  outside this project root and needs the human's grant to read. The reader is tolerant
+  (bare array; `documents`/`sources`/`items`/`data`; snake or camel fields) and an
+  unrecognised envelope fails closed to `known: false` with no `current` key, so a wrong
+  guess shows as "no data" and never as "not ingested". One read of that document settles
+  it; the fix would be the fixture plus `readWikiRows` in
+  `server/src/api/document-ingest-state.ts`.
+
 ## Log
+
+L4 (worker): S3 landed — `content_hash` is written at upload and the listing answers the
+ingest state. What changed and why:
+  1. `POST /documents` hashes the stored bytes with `node:crypto` (`sha256`, plain lowercase
+     hex, no prefix) and passes it into `DocumentStore.create`, so the column is written by
+     the same statement as the bytes; a later `UPDATE` would leave rows with no identity and
+     a second place deciding what the hash is. `DocumentRecord` gained `contentHash`, and
+     every read that builds one now selects it.
+  2. `IngestClient.listStackDocuments(stackId)` reads `/stacks/<id>/documents` — the Stack is a
+     PATH segment there, unlike the job API's `?stackId=`, because one base URL serves both
+     resource families.
+  3. `server/src/api/document-ingest-state.ts` (new) holds the ONE comparison,
+     `matchingWikiSource`, plus a 5 s per-Stack cache of the wiki listing and `readWikiRows`.
+     `GET /documents` answers `contentHash` and `ingest { jobId, requestedAt, ingestedAt,
+     current, known }`, `ingest: null` with no Stack or no `document_ingests` row, and
+     `known: false` with NO `current` key when the wiki cannot be read (an unreadable answer is
+     never cached, so a failure cannot be inherited as a stale success).
+  4. `server/src/main.ts` passes the ingest client into `registerDocumentRoutes` only when a
+     service is configured; otherwise every document answers `ingest: null` and nothing is
+     called upstream.
+  OPEN RISK, named in `## Open risks`: the wiki envelope in the test fixture is ASSUMED, not
+  recorded (the service was not running, and its contract document is outside this project
+  root). Fail-closed is proven by two unrecognised-envelope cases, and closing this is one
+  read in S5.
+  Evidence: `server/test/documents-ingest-state.test.ts` 11/11 (RED first: 9 of 10 failing
+  against `8a85763`, the module absent; the unrecognised-envelope case was mutation-checked by
+  adding `rows` to `COLLECTION_KEYS`, which failed it alone, then reverted),
+  `cd server && npm test` 534/534, `npx tsc --noEmit` clean. Proven by execution: the whole
+  listing contract, the cache window, the fail-closed paths and the hash of a known vector.
+  Read from code, not executed: the production wiring in `main.ts`.
 
 L1 (user, verbatim): "en la ui de ingest , hay botones en cada recurso para ingent hay ingest y remove ademas quisiera un check en los items ya ingestados, y quiero saber que hacer remove me gustaria que dispare una compilacion que haga delete, asi que dime que requieres del backend , que enpoints"
 
