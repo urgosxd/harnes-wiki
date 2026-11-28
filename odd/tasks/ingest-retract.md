@@ -63,6 +63,38 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
 
 ## Log
 
+L9 (worker): L8's item 4, the empty-body fallback of `409 document_not_ingested`, is CLOSED
+— fixed in this commit (`fix(web): give the not-ingested refusal its own sentence`), not left
+as an observation for S7. It was a copy defect, not a test gap: `documentRefusalMessage` had
+ONE fallback for both document refusals, and it was the delete guard's sentence, so a
+not-ingested refusal that arrived with no body told the operator the opposite fact.
+  Before: `This document is ingested; retract it before it can be deleted.`
+  After:  `There is no ingest of this document in this Stack, so there is nothing to retract.`
+What changed, and the shape that keeps it from recurring:
+  1. Each document refusal now carries its OWN fallback. `DOCUMENT_REFUSAL_FALLBACKS` is a
+     code→sentence table and `DOCUMENT_REFUSAL_CODES` is DERIVED from its keys, so a new
+     document refusal cannot be registered without a sentence of its own, and cannot inherit
+     a neighbour's. That was the actual bug shape: the set and the sentence were declared in
+     two places, and only the set grew.
+  2. The verbatim pass-through is untouched and still first: when the service sends a message,
+     the service's words win and no fallback is reachable. Only the empty-body path (and the
+     client's own `request failed with 409`) changed.
+  3. Stated as a FACT, not an instruction. The delete guard's sentence is advice ("retract it
+     before it can be deleted"); this one reports the state, because there is nothing here
+     the operator can be told to do.
+  No other refusal sentence moved, verified byte-wise against `2d341e7`: the delete guard's
+  sentence (moved verbatim into the table, still one occurrence), `Another ingest is running.
+  That is a retry signal, not a failure.`, `job_still_working`, `job_changed` and `busy` all
+  occur the same number of times before and after, and their literal-equality tests are
+  unchanged and green.
+  Evidence: RED first — the updated pin in `web/src/components/ingest-jobs.test.tsx` fails
+  alone against `2d341e7` (1 failed / 72 passed, expected the new sentence, received the
+  delete guard's); GREEN after the change in `use-ingest.ts` 73/73. `cd web && npx vitest run`
+  382/382 (unchanged: this replaces a string, it adds no case), `npx tsc --noEmit` clean,
+  `cd server && npm test` 552/552 unchanged. Files: `web/src/lib/use-ingest.ts`,
+  `web/src/components/ingest-jobs.test.tsx`, this document. Nothing else — no panel, no
+  endpoint, no server change.
+
 L8 (worker): the web half of S5 is now PINNED by a committed test, in `241c70c`
 (`test(web): pin the document refusal notices`) — one file, `web/src/components/ingest-jobs.test.tsx`,
 +86 lines, no product code touched. L7 proved the mapping `document_not_ingested` → the

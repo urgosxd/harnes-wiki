@@ -783,15 +783,17 @@ function refusalMessage(error: ApiError): string {
  * The sentence is the answer here: it names the retraction endpoint that would allow the
  * delete. So it is NOT prefixed with the code (unlike {@link refusalMessage}, where the
  * code is the fact) and it is not rewritten — a paraphrase could drop the endpoint. Only
- * a body that said nothing at all falls back to a sentence of our own, which still says
- * what to do rather than looking like a transient fault.
+ * a body that said nothing at all falls back to a sentence of our own, and that sentence
+ * is the refusal's OWN fact (see {@link DOCUMENT_REFUSAL_FALLBACKS}): the two document
+ * refusals are opposites, so one shared sentence would state the opposite of one of them.
  */
 function documentRefusalMessage(error: ApiError): string {
   const said = error.message.trim();
   const heardNothing = said === "" || said === `request failed with ${error.status}`;
-  return heardNothing
-    ? "This document is ingested; retract it before it can be deleted."
-    : said;
+  if (!heardNothing) return said;
+  // The trailing default is for the type, not a reachable path: the caller only routes
+  // codes whose fallback is declared in the table.
+  return DOCUMENT_REFUSAL_FALLBACKS[error.code ?? ""] ?? INGESTED_REFUSAL_FALLBACK;
 }
 
 /**
@@ -866,11 +868,25 @@ const JOB_CONTROL_REFUSAL_CODES: ReadonlySet<string> = new Set(["job_still_worki
  * It belongs to a THIRD fact — neither a job that is working nor a lock — so it is
  * classified by name here rather than by status below. One list, one branch: the next
  * document refusal is added here, not as a second `if`.
+ *
+ * Each code carries its OWN fallback sentence, used only when the answer said nothing at
+ * all. Sharing one would be false: "this document is ingested; retract it before it can be
+ * deleted" is the delete guard's fact, and a not-ingested refusal means there is no ingest
+ * in that Stack at all. Stated as a fact, never as an instruction, because a refusal with
+ * no body is not something these sentences can tell the operator to go and do.
  */
-const DOCUMENT_REFUSAL_CODES: ReadonlySet<string> = new Set([
-  "document_ingested",
-  "document_not_ingested",
-]);
+const INGESTED_REFUSAL_FALLBACK =
+  "This document is ingested; retract it before it can be deleted.";
+
+const DOCUMENT_REFUSAL_FALLBACKS: Readonly<Record<string, string>> = {
+  document_ingested: INGESTED_REFUSAL_FALLBACK,
+  document_not_ingested:
+    "There is no ingest of this document in this Stack, so there is nothing to retract.",
+};
+
+const DOCUMENT_REFUSAL_CODES: ReadonlySet<string> = new Set(
+  Object.keys(DOCUMENT_REFUSAL_FALLBACKS),
+);
 
 /**
  * What a `409` with no job-control code means: one ingest at a time, try again later.

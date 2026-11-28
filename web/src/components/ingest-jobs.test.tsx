@@ -652,12 +652,15 @@ describe("noticeFor: 409 document_not_ingested is a document fact too", () => {
   });
 
   it("falls back to our own sentence, pinned exactly, when the body names nothing", () => {
-    // PINNED, not matched loosely: today the lost-code fallback is the delete guard's
-    // sentence, and the point of asserting it character for character is that changing it
-    // is a visible diff here rather than a silent change of what the user reads. Both
-    // shapes the mapper treats as "heard nothing" are covered: an empty body, and the
-    // client's own `request failed with 409`.
-    const FALLBACK = "This document is ingested; retract it before it can be deleted.";
+    // PINNED, not matched loosely. The fallback is THIS code's own fact: there is no
+    // ingest in that Stack, so there is nothing to retract. It is deliberately not the
+    // delete guard's sentence ("This document is ingested; retract it…"), which states
+    // the opposite, and asserting the whole string character for character is what keeps
+    // the two from being collapsed back into one another. Both shapes the mapper treats
+    // as "heard nothing" are covered: an empty body, and the client's own `request
+    // failed with 409`.
+    const FALLBACK =
+      "There is no ingest of this document in this Stack, so there is nothing to retract.";
     expect(noticeFor(new ApiError(409, "document_not_ingested", ""))).toEqual({
       kind: "error",
       message: FALLBACK,
