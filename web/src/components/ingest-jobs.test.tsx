@@ -620,6 +620,56 @@ describe("noticeFor: a 409 about a document is its own fact", () => {
   });
 });
 
+/**
+ * THE SAME STATUS CODE, THE OPPOSITE DOCUMENT FACT
+ *
+ * `409 document_not_ingested` is what `POST /documents/:id/retract` answers when there was
+ * nothing to retract: no `document_ingests` row for that document in that Stack. S5 added
+ * it to `DOCUMENT_REFUSAL_CODES`, and until this block existed the ONLY versioned evidence
+ * of that string was the delete guard's neighbouring case — so a later edit could have
+ * dropped it back into the concurrency sentence with every test still green.
+ *
+ * No client call produces the code yet (S7 wires the button), so these pin the MAPPING:
+ * the notice is what every documents call would show for that answer, and it has to be the
+ * service's own sentence. The first two cases are the pure mapping, in the same style as
+ * the block above; the third drives it over the REAL hook and client, which is the only
+ * place a request exists to inspect for a synthetic identity header.
+ */
+describe("noticeFor: 409 document_not_ingested is a document fact too", () => {
+  /** The exact shape the retract endpoint answers with, quoted rather than summarised. */
+  const RETRACT_SAID =
+    'Document "d1" has no ingest in Stack "A"; there is nothing to retract.';
+
+  it("shows the server's sentence verbatim and whole", () => {
+    const notice = noticeFor(new ApiError(409, "document_not_ingested", RETRACT_SAID));
+
+    // Literal equality on the WHOLE sentence: no prefix invented, nothing trimmed, and a
+    // `toContain` would have passed on a message that had grown either.
+    expect(notice).toEqual({ kind: "error", message: RETRACT_SAID });
+    expect(notice?.message.startsWith("document_not_ingested")).toBe(false);
+    // And the lock's retry signal is the wrong advice for "there was nothing to retract".
+    expect(notice?.message).not.toContain("Another ingest is running");
+  });
+
+  it("falls back to our own sentence, pinned exactly, when the body names nothing", () => {
+    // PINNED, not matched loosely: today the lost-code fallback is the delete guard's
+    // sentence, and the point of asserting it character for character is that changing it
+    // is a visible diff here rather than a silent change of what the user reads. Both
+    // shapes the mapper treats as "heard nothing" are covered: an empty body, and the
+    // client's own `request failed with 409`.
+    const FALLBACK = "This document is ingested; retract it before it can be deleted.";
+    expect(noticeFor(new ApiError(409, "document_not_ingested", ""))).toEqual({
+      kind: "error",
+      message: FALLBACK,
+    });
+    expect(
+      noticeFor(new ApiError(409, "document_not_ingested", "request failed with 409")),
+    ).toEqual({ kind: "error", message: FALLBACK });
+    // Whatever the fallback becomes, it is never the concurrency lock.
+    expect(FALLBACK).not.toContain("Another ingest is running");
+  });
+});
+
 /** A hand-built result object, so the panel is testable without a live client. */
 function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
   return {
@@ -1545,6 +1595,42 @@ describe("IngestJobsPanel: the ingested mark and the two states that are not it"
     expect(screen.getByText("contrato.pdf")).toBeDefined();
     expect(screen.queryByText("No documents uploaded yet.")).toBeNull();
 
+    for (const wire of seen) {
+      expect(wire.headers["x-user-id"]).toBeUndefined();
+      expect(wire.headers["x-dev-token"]).toBeUndefined();
+    }
+  });
+
+  it("puts a document_not_ingested refusal on the notice whole, and sends no identity", async () => {
+    // The cross-cutting half of the block above: the mapping's output is pinned there, and
+    // what is pinned HERE is everything around it — the real hook, the real client, the
+    // real notice channel, and the headers the client actually serialized. No client call
+    // asks for this code yet (S7 wires the retraction button), so the wire answer carries
+    // it on purpose: which endpoint produces it is S7's business, the notice is this file's.
+    const RETRACT_SAID =
+      'Document "d1" has no ingest in Stack "A"; there is nothing to retract.';
+    const { client, seen } = stackingClient(
+      ({ method, url }) => {
+        if (method === "GET" && url.endsWith("/documents")) {
+          return jsonResponse({ documents: [listedDocument()] });
+        }
+        if (method === "DELETE" && url.includes("/documents/")) {
+          return jsonResponse({ error: "document_not_ingested", message: RETRACT_SAID }, 409);
+        }
+        return undefined;
+      },
+      // The app's own headers: cookie only, no synthetic identity.
+      {},
+    );
+
+    render(<StackPanel client={client} stackId="A" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete contrato.pdf" }));
+
+    // Whole text, not a substring: the alert carries the server's sentence and nothing else.
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(RETRACT_SAID));
+    expect(screen.getByRole("alert").textContent).not.toContain("Another ingest is running");
+
+    expect(seen.length).toBeGreaterThan(0);
     for (const wire of seen) {
       expect(wire.headers["x-user-id"]).toBeUndefined();
       expect(wire.headers["x-dev-token"]).toBeUndefined();
