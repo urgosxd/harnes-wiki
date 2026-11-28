@@ -327,4 +327,29 @@ export class DocumentStore {
     const row = rows[0];
     return row ? toIngest(row) : undefined;
   }
+
+  /**
+   * Whether ANY Stack still holds a live ingest state for this document.
+   *
+   * Deliberately NOT Stack-scoped, and that is the whole point of the method. Deleting a
+   * document cascades every Stack's state with it, so answering for one Stack would let a
+   * caller delete content another Stack still has compiled by simply not naming that
+   * Stack — the absence of a header must never be the way past the guard.
+   *
+   * `retracted` is the only status that does not block. Retraction is reversible (S7), so
+   * a retracted row is a state that describes content the wiki no longer holds; a
+   * re-ingest resets it, and there is no tombstone to leave behind. Ownership is not
+   * filtered here because the caller must already have proved it owns the document: the
+   * route checks ownership FIRST, so a refusal can never answer for a foreign row.
+   */
+  async hasActiveIngest(documentId: string): Promise<boolean> {
+    const rows = await this.db.query<{ live: number }>(
+      `SELECT 1 AS live
+         FROM document_ingests
+        WHERE document_id = $1 AND last_status <> 'retracted'
+        LIMIT 1`,
+      [documentId],
+    );
+    return rows.length > 0;
+  }
 }

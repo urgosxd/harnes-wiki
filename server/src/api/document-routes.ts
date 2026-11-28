@@ -237,8 +237,39 @@ export function registerDocumentRoutes(router: Router, deps: DocumentRouteDeps):
     ctx.res.end(found.content);
   });
 
+  /**
+   * Delete an upload, unless the wiki still holds it.
+   *
+   * The order is load-bearing, twice over:
+   *
+   *  - OWNERSHIP FIRST. A guard evaluated before the ownership check would answer `409`
+   *    for somebody else's document, which confirms both that it exists and that it was
+   *    ingested. A foreign document must keep answering the plain `404` it answers today,
+   *    whatever its rows say.
+   *  - THE GUARD IS NOT STACK-SCOPED. Deleting this row cascades every Stack's ingest
+   *    state, so the question is "does ANY Stack still hold these bytes compiled", not
+   *    "does the Stack in this request". Reading `x-stack-id` here would make omitting
+   *    the header the way to delete content another tenant still compiles.
+   *
+   * Local state only: no retraction, no call to the wiki. What the caller is told is to
+   * retract first, and retracting is its own endpoint with its own semantics.
+   */
   router.delete("/documents/:id", async (ctx) => {
-    const removed = await documents.delete(ctx.params.id ?? "", ctx.userId);
+    const id = ctx.params.id ?? "";
+    const owned = await documents.findOwned(id, ctx.userId);
+    if (!owned) throw new HttpError(404, "not_found", "no such document");
+
+    if (await documents.hasActiveIngest(id)) {
+      throw new HttpError(
+        409,
+        "document_ingested",
+        `Document "${id}" is ingested; retract it with POST /documents/${id}/retract before deleting it`,
+      );
+    }
+
+    // Repeated ownership in the DELETE itself: between the two reads the row can be gone
+    // or handed over, and this statement is the one that decides.
+    const removed = await documents.delete(id, ctx.userId);
     if (!removed) throw new HttpError(404, "not_found", "no such document");
     ctx.res.writeHead(204);
     ctx.res.end();
