@@ -29,12 +29,26 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
 - S2 — wire `recordIngest`. Route: worker. Commit `cff8f25`.
 - S3 — `GET /api/documents` contract with `current`. Route: worker. Commit `4a5dfc4`.
 - S4 — UI mark, three states. Route: worker. Commit `fba2f0c`.
-- S5 — `POST /:id/retract` (503 while E7 pending). Route: worker.
+- S5 — `POST /:id/retract` (503 while E7 pending). Route: worker. Commit `e6ef89f`.
 - S6 — `DELETE` 409 guard. Route: worker. Commit `5aebe6b`.
 
 ## Open risks
 
-- **Wiki envelope assumed, not recorded; closed in S5 against the real listing.** The
+- **ACCEPTED LIMITATION, owner decision pending: `retracted` is written on ACCEPT, not on
+  settlement.** `POST /documents/:id/retract` sets `document_ingests.last_status =
+  'retracted'` as soon as the wiki ACCEPTS the deletion, because the answer is `202 { jobId }`
+  and this deployment follows no job (E7's deletion and its compile are one call upstream, and
+  job settlement is the wiki's). Consequence: if the compile that follows the deletion FAILS,
+  our row still reads `'retracted'` while the wiki still holds the content — so `DELETE
+  /documents/:id` (S6) is allowed for a document whose compiled source upstream never really
+  went away. The mark is also what S4's listing reports as `current: false`, which is a second
+  place the same optimism is visible. Fixing it properly means job-settlement tracking (poll
+  the returned jobId to a terminal state, and only then write `'retracted'` — or write it and
+  revert on a failed compile), which is a bigger change than this step and is NOT in it. Named
+  here so the owner can accept it or ask for it. A re-ingest resets the row either way, so the
+  damage is bounded and reversible.
+
+- **Wiki envelope assumed, not recorded; NOT closed in S5.** The
   `GET /stacks/:stackId/documents` body used by S3's fixture
   (`server/test/documents-ingest-state.test.ts`) is derived from the same service's
   `{ jobs: [...] }` collection convention, not observed: the wiki was not running when S3
@@ -48,6 +62,77 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
   `server/src/api/document-ingest-state.ts`.
 
 ## Log
+
+L7 (worker): S5 landed in `e6ef89f` (`feat(api): add document retraction gated on an enable
+flag`) — `server/src/api/document-retraction.ts` (new), `server/src/api/document-routes.ts`,
+`server/src/ingest/client.ts`, `server/src/db/document-store.ts`, `server/src/config.ts`,
+`server/src/main.ts`, `server/test/documents-retract.test.ts` (new), `web/src/lib/use-ingest.ts`,
+`README.md`. What it is, and the decisions that are not obvious from the diff:
+  1. THE ORDER OF THE ANSWERS. `findOwned` first (a `409`/`400`/`503` for a foreign document
+     would confirm it exists; the foreign answer stays the byte-identical `404 { error:
+     "not_found", message: "no such document" }`), then `x-stack-id` (`400 invalid_stack_id`:
+     a retraction deletes and recompiles ONE Stack, so "no Stack" has no default), then the
+     deployment capability (`503 source_retraction_unavailable`), then the local gate, then the
+     identity, then the upstream call. The capability check sits BEFORE the local gate on
+     purpose: a deployment that can never retract must not answer `409 document_not_ingested`
+     and send a client down a path that cannot work there.
+  2. NEVER INSPECTS `current`, in the handler or in the adapter. The only local gate is the
+     presence of a `document_ingests` row for (document, Stack). The hash comparison that
+     remains — `matchingWikiSource` from `document-ingest-state.ts` — answers a DIFFERENT
+     question: which of the wiki's sources ARE these bytes, i.e. the identity a deletion must
+     address. Finding no row there is not "there was nothing to retract"; it is "no identity to
+     address", answered `503` with zero upstream DELETEs and never guessed or sent blank.
+  3. THE IDENTITY IS THE WIKI'S `storage_path`, read fresh from `/stacks/<id>/documents` (no
+     cache: a retraction happens right after a compile and a 5 s stale listing may not carry the
+     source it just wrote), and sent as ONE encoded path segment. Proven on the wire with
+     `wiki/sources/informe final.md` → `/stacks/<s>/sources/wiki%2Fsources%2Finforme%20final.md`.
+     `IngestClient.deleteSource` documents why this family uses PATH segments while the job API
+     keeps `?stackId=`.
+  4. ONE CODE FOR "THERE WAS NOTHING TO RETRACT". An upstream `404` (whatever it calls it)
+     becomes our `409 document_not_ingested` carrying the wiki's own sentence verbatim; an
+     upstream `409` becomes our `409 busy` with its sentence; any other status is `502
+     ingest_service_error`, and an unreachable service is `502 ingest_service_<reason>` — the
+     vocabulary `ingest-routes.ts` already answers with.
+  5. `markRetracted` is a dedicated statement, not `recordIngest(..., 'retracted')`: the upsert
+     RESETS `job_id`, and a retraction is not a job — overwriting the ingest job id would make
+     the listing report a job the panel cannot follow. It updates and never inserts: no row is
+     the gate, so a row that vanished mid-flight is a document that was deleted, not a state to
+     invent.
+  6. CONTRACT-vs-TEST CONFLICT, resolved toward the test: the Contract above says `404
+     document_not_found`, and this step's test contract says the foreign answer must be
+     byte-identical to the existing `404`. Byte-identical wins — the existing shape leaks
+     nothing and a distinct code would be an observable difference nobody asked for. So
+     `document_not_found` is realized as `{ error: "not_found", message: "no such document" }`.
+     Recorded here rather than silently: if the owner wants the distinct code, it is one line.
+  7. ENABLE FLAG, this is how S5 ships without E7: `SOURCE_RETRACTION_ENABLED`, default OFF,
+     parsed with the same `flag()` helper as every other boolean in `config.ts`, carried by
+     `main.ts` into `DocumentRetraction` and documented in the README config table. Off means
+     `503` naming the variable, no identity resolved, no upstream call, row untouched. No second
+     flag. `IngestClient.deleteSource` exists and is exercised by the enabled path, so the day
+     E7 deploys the switch is configuration and nothing else.
+  8. NO BUTTON WAS WIRED: `IngestJobsPanel.tsx` is untouched and `Remove` still calls
+     `DELETE /documents/:id`. The one web change is `document_not_ingested` joining
+     `DOCUMENT_REFUSAL_CODES` in `use-ingest.ts`: without it, S5's new code would fall through
+     to "Another ingest is running…" the moment S7 wires the button.
+  Evidence: `server/test/documents-retract.test.ts` 11/11 (RED first: the file failed to load
+  against `427994d` — `document-retraction.ts` absent — and the mutation pass below is what
+  makes that count), `cd server && npm test` 552/552, `npx tsc --noEmit` clean, `cd web && npx
+  vitest run` 379/379, `npx tsc --noEmit` clean. Mutation-checked once, three mutations at once,
+  exactly the intended cases failing and no others: the `x-stack-id` guard disabled → case 3
+  fails; the `SOURCE_RETRACTION_ENABLED` branch disabled → case 4 fails; the identity sent
+  un-encoded → cases 5 and 10 fail (both assert the raw path). Reverted and re-run 11/11.
+  Proven by execution: every status and body above, the zero-upstream-call property of all five
+  refusals, the DELETE path and its encoding, the row transitions (`requested` → `retracted`),
+  the reversibility through `recordIngest`, and the scope of the gate to (document, Stack).
+  Read from code, not executed: the `main.ts` wiring (the retraction is constructed there and
+  exercised in tests through the same constructor), and the web mapping of
+  `document_not_ingested`, which was proven by a throwaway out-of-worktree probe (the sentence
+  reaches the notice verbatim while `busy` keeps the concurrency sentence) because
+  `web/src/components/ingest-jobs.test.tsx` is outside this step's edit surfaces.
+  Still open, for the owner: the accepted `retracted`-on-ACCEPT limitation in `## Open risks`,
+  and the wiki envelope risk, which S5 did NOT close (the upstream service was not running and
+  its contract document is outside this project root; `readWikiRows` remains the single tolerant
+  reader, now also feeding identity resolution).
 
 L6 (worker): S4 landed in `fba2f0c` (`feat(web): mark ingested documents and show the delete
 refusal`) — `web/src/lib/api.ts`, `web/src/lib/use-ingest.ts`,
