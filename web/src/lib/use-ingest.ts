@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiClient, ApiError, type UploadedDocument } from "./api.ts";
+import { ApiClient, ApiError, type ListedDocument, type UploadedDocument } from "./api.ts";
 import {
   compileBlockedByIngestFailure,
   isJobSettled,
@@ -177,7 +177,7 @@ export interface UseIngestResult {
   blockedProblem: string | null;
 
   /** Files this user has uploaded, newest first. Each is a resource, not a job. */
-  documents: UploadedDocument[];
+  documents: ListedDocument[];
   uploading: boolean;
   listDocuments(): Promise<void>;
   upload(file: File): Promise<UploadedDocument | null>;
@@ -250,7 +250,7 @@ export function useIngest({
   // selection to track and nothing a later render could contradict.
   const blocked = stackId === null;
 
-  const [documents, setDocuments] = useState<UploadedDocument[]>([]);
+  const [documents, setDocuments] = useState<ListedDocument[]>([]);
   const [uploading, setUploading] = useState(false);
   const [documentsNotice, setDocumentsNotice] = useState<IngestNotice>(null);
   const [jobs, setJobs] = useState<IngestJob[]>([]);
@@ -778,6 +778,23 @@ function refusalMessage(error: ApiError): string {
 }
 
 /**
+ * A document refusal, in the service's own words.
+ *
+ * The sentence is the answer here: it names the retraction endpoint that would allow the
+ * delete. So it is NOT prefixed with the code (unlike {@link refusalMessage}, where the
+ * code is the fact) and it is not rewritten — a paraphrase could drop the endpoint. Only
+ * a body that said nothing at all falls back to a sentence of our own, which still says
+ * what to do rather than looking like a transient fault.
+ */
+function documentRefusalMessage(error: ApiError): string {
+  const said = error.message.trim();
+  const heardNothing = said === "" || said === `request failed with ${error.status}`;
+  return heardNothing
+    ? "This document is ingested; retract it before it can be deleted."
+    : said;
+}
+
+/**
  * The notice for a read that failed while the follow keeps going.
  *
  * Two sentences, and both halves are load-bearing: what the read said, and that the job is
@@ -838,6 +855,17 @@ export function noticeForOutcome(outcome: PollOutcome): IngestNotice {
 const JOB_CONTROL_REFUSAL_CODES: ReadonlySet<string> = new Set(["job_still_working", "job_changed"]);
 
 /**
+ * The document refusal: the delete guard's answer, on the same status code.
+ *
+ * `DELETE /documents/:id` answers `409 document_ingested` while the wiki still compiles
+ * these bytes, and its message names the retraction that would unblock it. It belongs to
+ * a THIRD fact — neither a job that is working nor a lock — so it is classified by name
+ * here rather than by status below. One code, one constant: the next document refusal
+ * (S5's `document_not_ingested`) is added in this list, not in a second branch.
+ */
+const DOCUMENT_REFUSAL_CODES: ReadonlySet<string> = new Set(["document_ingested"]);
+
+/**
  * What a `409` with no job-control code means: one ingest at a time, try again later.
  *
  * The exact sentence this surface has shown for the concurrency lock since before the
@@ -869,8 +897,14 @@ export function noticeFor(error: unknown): IngestNotice {
       return { kind: "unknown", message: "This job is no longer known to the host." };
     }
     if (error.status === 409) {
-      // One status, two unrelated facts — and the response is the only thing that tells
+      // One status, THREE unrelated facts — and the response is the only thing that tells
       // them apart, so nothing here is branched on that the caller cannot see.
+      //
+      // A document refusal (`document_ingested`) is the delete guard answering: these
+      // bytes are still compiled by the wiki. Its message is passed through VERBATIM,
+      // because it is the only part of the answer that names what would work
+      // (`POST /documents/<id>/retract`), and paraphrasing it into the concurrency
+      // sentence would be a false statement *and* would hide the fix.
       //
       // A job-control refusal (`job_still_working`, `job_changed`) is the host's ANSWER
       // about one job: a working job is refused rather than interrupted, and a job that
@@ -881,6 +915,9 @@ export function noticeFor(error: unknown): IngestNotice {
       // Any other 409 on these routes is the concurrency lock — `start` hitting an ingest
       // that is already running — and that is a retry signal, not a failure. It keeps the
       // sentence this surface has always shown for it, unchanged.
+      if (error.code && DOCUMENT_REFUSAL_CODES.has(error.code)) {
+        return { kind: "error", message: documentRefusalMessage(error) };
+      }
       if (error.code && JOB_CONTROL_REFUSAL_CODES.has(error.code)) {
         return { kind: "error", message: refusalMessage(error) };
       }

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { IngestJobView } from "./IngestJobView.tsx";
 import { IngestJobsPanel } from "./IngestJobsPanel.tsx";
-import { ApiClient, ApiError } from "../lib/api.ts";
+import { ApiClient, ApiError, type DocumentIngestState, type ListedDocument } from "../lib/api.ts";
 import {
   MISSING_STACK_ID_PROBLEM,
   noticeFor,
@@ -586,6 +586,40 @@ describe("noticeFor: a 409 is two different facts", () => {
   });
 });
 
+/**
+ * A THIRD FACT ON THE SAME STATUS CODE
+ *
+ * Since the delete guard landed, a `409` also answers "this document's content is still
+ * compiled by the wiki". Mapping that one to the concurrency sentence would tell the
+ * operator to retry something that will keep being refused, and would throw away the
+ * only part of the answer that says what WOULD work: the retraction endpoint.
+ */
+describe("noticeFor: a 409 about a document is its own fact", () => {
+  /** The exact body the delete guard answers, as the contract states it. */
+  const SERVER_SAID =
+    'Document "d1" is ingested; retract it with POST /documents/d1/retract before deleting it';
+
+  it("shows the server's sentence verbatim, retraction and all", () => {
+    const notice = noticeFor(new ApiError(409, "document_ingested", SERVER_SAID));
+
+    expect(notice).toEqual({ kind: "error", message: SERVER_SAID });
+    // Verbatim means verbatim: no code prefix invented here, and the endpoint that
+    // would fix it survives to the screen.
+    expect(notice?.message.startsWith("document_ingested")).toBe(false);
+    expect(notice?.message).toContain("retract");
+  });
+
+  it("never answers a document refusal with the concurrency sentence", () => {
+    // A body naming the code and nothing usable must still not borrow the lock's
+    // "retry signal": nothing about an ingested document is a retry.
+    for (const said of ["request failed with 409", ""]) {
+      const notice = noticeFor(new ApiError(409, "document_ingested", said));
+      expect(notice?.message).not.toContain("Another ingest is running");
+      expect(notice?.message).toMatch(/retract/i);
+    }
+  });
+});
+
 /** A hand-built result object, so the panel is testable without a live client. */
 function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
   return {
@@ -652,7 +686,15 @@ describe("IngestJobsPanel", () => {
       <IngestJobsPanel
         ingest={fakeIngest({
           documents: [
-            { id: "d1", filename: "contrato.pdf", bytes: 2048, contentType: "application/pdf", createdAt: "" },
+            {
+              id: "d1",
+              filename: "contrato.pdf",
+              bytes: 2048,
+              contentType: "application/pdf",
+              createdAt: "",
+              contentHash: null,
+              ingest: null,
+            },
           ],
           ingestDocument,
         })}
@@ -953,6 +995,8 @@ interface Wire {
   method: string;
   url: string;
   body: Record<string, unknown> | undefined;
+  /** The headers the client actually sent, so a legacy identity header can be refused. */
+  headers: Record<string, string>;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -963,12 +1007,51 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 /**
+ * One row of `GET /documents` as the server now answers it.
+ *
+ * `current` is deliberately built by the CALLER: when the wiki cannot be read the
+ * server omits the key entirely, and a helper that defaulted it would make that third
+ * state unrepresentable in a test.
+ */
+function ingestState(overrides: Partial<DocumentIngestState> = {}): DocumentIngestState {
+  return {
+    jobId: "job_1",
+    requestedAt: "2026-01-01T00:00:00.000Z",
+    ingestedAt: "2026-01-01T00:00:10.000Z",
+    known: true,
+    ...overrides,
+  };
+}
+
+/** A stored document plus the ingest state the listing carries for it. */
+function listedDocument(overrides: Partial<ListedDocument> = {}): ListedDocument {
+  return {
+    id: "d1",
+    filename: "contrato.pdf",
+    bytes: 2048,
+    contentType: "application/pdf",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    contentHash: "a3".repeat(32),
+    ingest: ingestState({ current: true }),
+    ...overrides,
+  };
+}
+
+/**
  * A real client over a recording transport. `answer` gets first refusal on each
  * request, which is how one test makes `GET /stacks` list two Stacks and another
  * makes it fail; everything else answers the settled-job shape so the poll loop
  * ends on its first read instead of scheduling timers.
  */
-function stackingClient(answer: (wire: Wire) => Response | undefined) {
+function stackingClient(
+  answer: (wire: Wire) => Response | undefined,
+  /**
+   * The headers the client sends. The default is the legacy shape a few older cases
+   * still build; `{}` is what the app itself sends (cookie only), which is what the
+   * document cases use so they can prove no identity header goes out.
+   */
+  identityHeaders: Record<string, string> = { "x-user-id": "alice" },
+) {
   const seen: Wire[] = [];
   const fetchImpl = (async (url: string, init?: RequestInit) => {
     const href = String(url);
@@ -980,6 +1063,7 @@ function stackingClient(answer: (wire: Wire) => Response | undefined) {
         typeof init?.body === "string"
           ? (JSON.parse(init.body) as Record<string, unknown>)
           : undefined,
+      headers: { ...((init?.headers as Record<string, string> | undefined) ?? {}) },
     };
     seen.push(wire);
 
@@ -1005,7 +1089,7 @@ function stackingClient(answer: (wire: Wire) => Response | undefined) {
 
   const client = new ApiClient({
     baseUrl: "/api",
-    headers: () => ({ "x-user-id": "alice" }),
+    headers: () => identityHeaders,
     fetchImpl,
   });
 
@@ -1273,6 +1357,197 @@ describe("IngestJobsPanel: delete and retry", () => {
     // would be a promise this product cannot keep.
     for (const name of [/cancel/i, /stop/i, /abort/i, /interrupt/i]) {
       expect(screen.queryByRole("button", { name })).toBeNull();
+    }
+  });
+});
+
+/**
+ * THE MARK HAS THREE STATES, AND "UNKNOWN" IS NOT "NO"
+ *
+ * `GET /documents` says three different things about a document and the panel must not
+ * collapse them:
+ *
+ *   - `current: true`  — the content the wiki holds in this Stack is these bytes;
+ *   - `current: false` — it is not, and that is a verified answer, so the row is bare;
+ *   - `known: false`   — the wiki could not be read, and the `current` KEY IS ABSENT.
+ *     Rendering that as "not ingested" would be a claim about the user's data that
+ *     nothing verified, so it says "no data" and says why.
+ *
+ * The last case here is the cross-cutting one: the mark is derived from the listing the
+ * panel already reads, so it costs no request, and no request carries a legacy identity
+ * header (`x-user-id` / `x-dev-token` are dead; the tenant travels as `x-stack-id`).
+ */
+describe("IngestJobsPanel: the ingested mark and the two states that are not it", () => {
+  it("marks a document whose content is still the one the wiki holds (S4)", () => {
+    const { container } = render(
+      <IngestJobsPanel ingest={fakeIngest({ documents: [listedDocument()] })} onClose={() => {}} />,
+    );
+
+    const mark = container.querySelector('[data-ingest-state="current"]');
+    expect(mark).not.toBeNull();
+    expect(mark?.textContent).toBe("\u2713");
+    // The tooltip says WHAT was verified, because "current" alone is a claim the user
+    // cannot check from here.
+    expect(mark?.getAttribute("title")).toMatch(/the wiki holds these exact bytes in this Stack/i);
+    // And the row states, without changing the button, that removal is not available yet.
+    const row = mark?.closest("li");
+    expect(row?.textContent).toContain("retraction");
+  });
+
+  it("renders NO mark for a document the wiki does not hold", () => {
+    const { container } = render(
+      <IngestJobsPanel
+        ingest={fakeIngest({
+          documents: [listedDocument({ ingest: ingestState({ current: false, ingestedAt: null }) })],
+        })}
+        onClose={() => {}}
+      />,
+    );
+
+    // A verified "no" is not a marker: the row simply carries nothing.
+    expect(container.querySelector("[data-ingest-state]")).toBeNull();
+    expect(screen.queryByText("\u2713")).toBeNull();
+    // And it is not the unknown state either — those two are different answers.
+    expect(container.querySelector('[data-ingest-state="unknown"]')).toBeNull();
+    expect(screen.queryByText("no data")).toBeNull();
+  });
+
+  it("says 'no data' when the wiki could not be read, never 'not ingested'", () => {
+    // `known: false` arrives with NO `current` key on the wire: the absence of the key
+    // IS the third state, and the type keeps it expressible instead of coercing it to
+    // `false`.
+    const { container } = render(
+      <IngestJobsPanel
+        ingest={fakeIngest({
+          documents: [listedDocument({ ingest: ingestState({ known: false, ingestedAt: null }) })],
+        })}
+        onClose={() => {}}
+      />,
+    );
+
+    const mark = container.querySelector('[data-ingest-state="unknown"]');
+    expect(mark).not.toBeNull();
+    expect(mark?.textContent).toBe("no data");
+    // Visually distinct AND explained: the tooltip names the cause, the wiki read.
+    expect(mark?.getAttribute("title")).toMatch(/could not be read/i);
+    // Not a check, and distinguishable from the bare "not ingested" row asserted above:
+    // one states missing data, the other states nothing at all.
+    expect(screen.queryByText("\u2713")).toBeNull();
+    expect(screen.queryByText("not ingested")).toBeNull();
+  });
+
+  it("renders no mark and no error for a legacy row with no content hash", () => {
+    // A row stored before the hash existed has no content identity, so nothing can be
+    // said about it: no check, no "no data", and no error box invented from a null.
+    const { container } = render(
+      <IngestJobsPanel
+        ingest={fakeIngest({
+          documents: [
+            listedDocument({ contentHash: null, ingest: ingestState({ current: false, ingestedAt: null }) }),
+            listedDocument({
+              id: "d2",
+              filename: "sin-hash-y-sin-wiki.pdf",
+              contentHash: null,
+              ingest: ingestState({ known: false, ingestedAt: null }),
+            }),
+          ],
+        })}
+        onClose={() => {}}
+      />,
+    );
+
+    expect(container.querySelector("[data-ingest-state]")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    // Both rows are on screen: this is an absence of a claim, not an absence of data.
+    expect(screen.getByText("contrato.pdf")).toBeDefined();
+    expect(screen.getByText("sin-hash-y-sin-wiki.pdf")).toBeDefined();
+  });
+
+  it("renders all three states from ONE listing and adds no request of its own", async () => {
+    const { client, seen } = stackingClient(
+      ({ method, url }) =>
+        method === "GET" && url.endsWith("/documents")
+          ? jsonResponse({
+              documents: [
+                listedDocument({ id: "d1", filename: "vigente.pdf" }),
+                listedDocument({
+                  id: "d2",
+                  filename: "no-ingestado.pdf",
+                  ingest: ingestState({ current: false, ingestedAt: null }),
+                }),
+                listedDocument({
+                  id: "d3",
+                  filename: "sin-datos.pdf",
+                  ingest: ingestState({ known: false, ingestedAt: null }),
+                }),
+              ],
+            })
+          : undefined,
+      // The app's own headers: cookie only, no synthetic identity.
+      {},
+    );
+
+    const { container } = render(<StackPanel client={client} stackId="A" />);
+    await screen.findByText("sin-datos.pdf");
+
+    const rowOf = (filename: string) =>
+      Array.from(container.querySelectorAll("li")).find((li) => li.textContent?.includes(filename));
+
+    const current = rowOf("vigente.pdf")?.querySelector('[data-ingest-state="current"]');
+    expect(current?.textContent).toBe("\u2713");
+    const unknown = rowOf("sin-datos.pdf")?.querySelector('[data-ingest-state="unknown"]');
+    expect(unknown?.textContent).toBe("no data");
+    expect(rowOf("no-ingestado.pdf")?.querySelector("[data-ingest-state]")).toBeNull();
+
+    // The mark costs no request: the panel still reads the listing ONCE.
+    expect(seen.filter((wire) => wire.method === "GET" && wire.url.endsWith("/documents"))).toHaveLength(1);
+    // And nothing on the wire carries a legacy identity header.
+    for (const wire of seen) {
+      expect(wire.headers["x-user-id"]).toBeUndefined();
+      expect(wire.headers["x-dev-token"]).toBeUndefined();
+    }
+  });
+
+  it("keeps the row and shows the refusal verbatim when Remove is refused (S4)", async () => {
+    // S5 has not landed, so an ingested document cannot be removed yet. That state has
+    // to be honest on screen: the server's own sentence, once, and the row still there.
+    const SERVER_SAID =
+      'Document "d1" is ingested; retract it with POST /documents/d1/retract before deleting it';
+    const { client, seen } = stackingClient(
+      ({ method, url }) => {
+        if (method === "GET" && url.endsWith("/documents")) {
+          return jsonResponse({ documents: [listedDocument()] });
+        }
+        if (method === "DELETE" && url.includes("/documents/")) {
+          return jsonResponse({ error: "document_ingested", message: SERVER_SAID }, 409);
+        }
+        return undefined;
+      },
+      {},
+    );
+
+    render(<StackPanel client={client} stackId="A" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Delete contrato.pdf" }));
+
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(SERVER_SAID));
+    // The sentence maps to the document fact, not to the concurrency lock.
+    expect(screen.getByRole("alert").textContent).not.toContain("Another ingest is running");
+
+    // One click, one request — Remove still calls the existing delete, not a retraction.
+    const deletes = seen.filter(
+      (wire) => wire.method === "DELETE" && wire.url.includes("/documents/"),
+    );
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]!.url).toBe("/api/documents/d1");
+    expect(seen.some((wire) => wire.url.includes("/retract"))).toBe(false);
+
+    // A refusal deleted nothing: the row is still listed.
+    expect(screen.getByText("contrato.pdf")).toBeDefined();
+    expect(screen.queryByText("No documents uploaded yet.")).toBeNull();
+
+    for (const wire of seen) {
+      expect(wire.headers["x-user-id"]).toBeUndefined();
+      expect(wire.headers["x-dev-token"]).toBeUndefined();
     }
   });
 });

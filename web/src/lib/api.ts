@@ -21,6 +21,39 @@ export interface UploadedDocument {
   createdAt: string;
 }
 
+/**
+ * What the server knows about ONE document's ingest in ONE Stack.
+ *
+ * `current` is OPTIONAL on purpose: when the wiki cannot be read the server answers
+ * `known: false` and omits the key entirely, because "I could not look" is not "it is
+ * not there". A required `boolean` would force this surface to invent the negative
+ * answer, and inventing it is a claim about the user's data that nothing verified.
+ */
+export interface DocumentIngestState {
+  jobId: string;
+  requestedAt: string;
+  /** When the wiki accepted these bytes, or `null` when no matching source was seen. */
+  ingestedAt: string | null;
+  /** Whether the wiki still holds these bytes in this Stack. ABSENT when `known` is false. */
+  current?: boolean;
+  /** Whether the wiki listing could be read at all. */
+  known: boolean;
+}
+
+/**
+ * One row of `GET /documents`: the stored document plus its ingest state.
+ *
+ * Kept apart from {@link UploadedDocument} because the upload answer (`POST /documents`)
+ * carries neither field, and a type that claimed otherwise would make every upload look
+ * like it had already been checked against the wiki.
+ */
+export interface ListedDocument extends UploadedDocument {
+  /** `null` for a row stored before the hash was recorded: no content identity. */
+  contentHash: string | null;
+  /** `null` when no Stack was named, or when we never asked the wiki for these bytes. */
+  ingest: DocumentIngestState | null;
+}
+
 export interface Identity {
   id: string;
   displayName: string;
@@ -275,8 +308,15 @@ export class ApiClient {
     );
   }
 
-  async listDocuments(): Promise<UploadedDocument[]> {
-    const body = await this.json<{ documents?: UploadedDocument[] }>("GET", "/documents");
+  /**
+   * One user's documents, newest first, each with what the server knows about its ingest.
+   *
+   * The state travels WITH the listing rather than as a second call per row: the wiki is
+   * read once per Stack on the server, so asking here would multiply that read by the
+   * number of documents.
+   */
+  async listDocuments(): Promise<ListedDocument[]> {
+    const body = await this.json<{ documents?: ListedDocument[] }>("GET", "/documents");
     return body.documents ?? [];
   }
 
