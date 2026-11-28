@@ -686,6 +686,7 @@ function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
     listDocuments: vi.fn(async () => {}),
     upload: vi.fn(async () => null),
     removeDocument: vi.fn(async () => {}),
+    retractDocument: vi.fn(async () => {}),
     ingestDocument: vi.fn(async () => {}),
     documentsNotice: null,
     jobs: [],
@@ -705,6 +706,7 @@ function fakeIngest(overrides: Partial<UseIngestResult> = {}): UseIngestResult {
     retryJob: vi.fn(async () => {}),
     deletingIds: new Set<string>(),
     retryingIds: new Set<string>(),
+    retractingIds: new Set<string>(),
     clearPollNotice: vi.fn(),
     ...overrides,
   };
@@ -1442,9 +1444,11 @@ describe("IngestJobsPanel: the ingested mark and the two states that are not it"
     // The tooltip says WHAT was verified, because "current" alone is a claim the user
     // cannot check from here.
     expect(mark?.getAttribute("title")).toMatch(/the wiki holds these exact bytes in this Stack/i);
-    // And the row states, without changing the button, that removal is not available yet.
+    // And the row's removal control is the retraction-backed one, named for what it does:
+    // the "cannot ask for a retraction yet" hint is gone because it is no longer true.
     const row = mark?.closest("li");
-    expect(row?.textContent).toContain("retraction");
+    expect(row?.textContent).toContain("Remove from wiki");
+    expect(row?.textContent).not.toMatch(/cannot ask for yet/i);
   });
 
   it("renders NO mark for a document the wiki does not hold", () => {
@@ -1560,78 +1564,257 @@ describe("IngestJobsPanel: the ingested mark and the two states that are not it"
       expect(wire.headers["x-dev-token"]).toBeUndefined();
     }
   });
+});
 
-  it("keeps the row and shows the refusal verbatim when Remove is refused (S4)", async () => {
-    // S5 has not landed, so an ingested document cannot be removed yet. That state has
-    // to be honest on screen: the server's own sentence, once, and the row still there.
-    const SERVER_SAID =
-      'Document "d1" is ingested; retract it with POST /documents/d1/retract before deleting it';
-    const { client, seen } = stackingClient(
-      ({ method, url }) => {
-        if (method === "GET" && url.endsWith("/documents")) {
+/**
+ * REMOVE IS A RETRACTION (S7)
+ *
+ * `Remove` used to call `DELETE /documents/:id`, which is local cleanup, so an ingested
+ * document was refused there and the row said removal was not available yet. The human
+ * overrode that gate: removal must consume the retraction endpoint NOW, not after the
+ * upstream deletion ships. So the control says what it does, and the wire shows ONE
+ * request to the endpoint that does it.
+ *
+ * What is pinned here, and why each half matters:
+ *
+ *  - the REQUEST: exactly one `POST /documents/<id>/retract`, carrying the Stack the way
+ *    every other document call carries it, and ZERO deletes — a delete riding along is the
+ *    regression this step exists to prevent;
+ *  - the ANSWER: the `202`'s job id is FOLLOWED (the wiki deletes and recompiles in one
+ *    job upstream) and the list is re-read;
+ *  - the REFUSALS: the service's own sentence reaches the screen whole, the row stays
+ *    listed because nothing was removed, and nothing is retried;
+ *  - the CONTROL: disabled while ITS request is out, visible words naming the action, and
+ *    the historical accessible name kept byte for byte.
+ */
+describe("IngestJobsPanel: Remove from wiki consumes the retraction endpoint (S7)", () => {
+  const RETRACT_PATH = "/api/documents/d1/retract";
+
+  /** A transport holding one ingested document, answering the retraction as told. */
+  function removalClient(answer: (wire: Wire) => Response | undefined) {
+    return stackingClient(
+      (wire) => {
+        if (wire.method === "GET" && wire.url.endsWith("/documents")) {
           return jsonResponse({ documents: [listedDocument()] });
         }
-        if (method === "DELETE" && url.includes("/documents/")) {
-          return jsonResponse({ error: "document_ingested", message: SERVER_SAID }, 409);
-        }
-        return undefined;
-      },
-      {},
-    );
-
-    render(<StackPanel client={client} stackId="A" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Delete contrato.pdf" }));
-
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(SERVER_SAID));
-    // The sentence maps to the document fact, not to the concurrency lock.
-    expect(screen.getByRole("alert").textContent).not.toContain("Another ingest is running");
-
-    // One click, one request — Remove still calls the existing delete, not a retraction.
-    const deletes = seen.filter(
-      (wire) => wire.method === "DELETE" && wire.url.includes("/documents/"),
-    );
-    expect(deletes).toHaveLength(1);
-    expect(deletes[0]!.url).toBe("/api/documents/d1");
-    expect(seen.some((wire) => wire.url.includes("/retract"))).toBe(false);
-
-    // A refusal deleted nothing: the row is still listed.
-    expect(screen.getByText("contrato.pdf")).toBeDefined();
-    expect(screen.queryByText("No documents uploaded yet.")).toBeNull();
-
-    for (const wire of seen) {
-      expect(wire.headers["x-user-id"]).toBeUndefined();
-      expect(wire.headers["x-dev-token"]).toBeUndefined();
-    }
-  });
-
-  it("puts a document_not_ingested refusal on the notice whole, and sends no identity", async () => {
-    // The cross-cutting half of the block above: the mapping's output is pinned there, and
-    // what is pinned HERE is everything around it — the real hook, the real client, the
-    // real notice channel, and the headers the client actually serialized. No client call
-    // asks for this code yet (S7 wires the retraction button), so the wire answer carries
-    // it on purpose: which endpoint produces it is S7's business, the notice is this file's.
-    const RETRACT_SAID =
-      'Document "d1" has no ingest in Stack "A"; there is nothing to retract.';
-    const { client, seen } = stackingClient(
-      ({ method, url }) => {
-        if (method === "GET" && url.endsWith("/documents")) {
-          return jsonResponse({ documents: [listedDocument()] });
-        }
-        if (method === "DELETE" && url.includes("/documents/")) {
-          return jsonResponse({ error: "document_not_ingested", message: RETRACT_SAID }, 409);
-        }
-        return undefined;
+        return answer(wire);
       },
       // The app's own headers: cookie only, no synthetic identity.
       {},
     );
+  }
+
+  /**
+   * The same transport, with the retraction POST held open.
+   *
+   * `stackingClient` answers synchronously, and "still in flight" is exactly the state a
+   * second click must be refused in — so this one case builds its own transport around a
+   * promise the test releases.
+   */
+  function gatedRemovalClient() {
+    const seen: Wire[] = [];
+    let open: (response: Response) => void = () => {};
+    const gate = new Promise<Response>((resolve) => {
+      open = resolve;
+    });
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      const href = String(url);
+      const method = init?.method ?? "GET";
+      seen.push({
+        method,
+        url: href,
+        body:
+          typeof init?.body === "string"
+            ? (JSON.parse(init.body) as Record<string, unknown>)
+            : undefined,
+        headers: { ...((init?.headers as Record<string, string> | undefined) ?? {}) },
+      });
+      if (method === "POST" && href === RETRACT_PATH) return gate;
+      if (method === "GET" && href.endsWith("/documents")) {
+        return jsonResponse({ documents: [listedDocument()] });
+      }
+      if (href.includes("/ingest/jobs/")) return jsonResponse(SETTLED_JOB);
+      return jsonResponse({ jobs: [] });
+    }) as unknown as typeof fetch;
+    const client = new ApiClient({ baseUrl: "/api", headers: () => ({}), fetchImpl });
+    return { client, seen, release: (response: Response) => open(response) };
+  }
+
+  /** The one control this block is about, addressed the way assistive tech names it. */
+  const removeButton = () => screen.findByRole("button", { name: "Delete contrato.pdf" });
+
+  const retractions = (seen: Wire[]) =>
+    seen.filter((wire) => wire.method === "POST" && wire.url === RETRACT_PATH);
+
+  it("issues ONE retraction POST and no DELETE at all", async () => {
+    const { client, seen } = removalClient((wire) =>
+      wire.method === "POST" && wire.url === RETRACT_PATH
+        ? jsonResponse({ jobId: "job_retract_1" }, 202)
+        : undefined,
+    );
 
     render(<StackPanel client={client} stackId="A" />);
-    fireEvent.click(await screen.findByRole("button", { name: "Delete contrato.pdf" }));
+    fireEvent.click(await removeButton());
 
-    // Whole text, not a substring: the alert carries the server's sentence and nothing else.
-    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(RETRACT_SAID));
+    await waitFor(() => expect(retractions(seen)).toHaveLength(1));
+    // The Stack travels the way every other document call carries it (a header), not as a
+    // second spelling in the query.
+    expect(retractions(seen)[0]!.headers["x-stack-id"]).toBe("A");
+    expect(retractions(seen)[0]!.url).not.toContain("?");
+    // One click, one request — and NOT the delete, which is a different operation.
+    expect(seen.some((wire) => wire.method === "DELETE")).toBe(false);
+    expect(seen.some((wire) => wire.url.includes("/documents/d1") && wire.method !== "POST")).toBe(
+      false,
+    );
+  });
+
+  it("follows the job id the acceptance carries, and re-reads the list", async () => {
+    const { client, seen } = removalClient((wire) =>
+      wire.method === "POST" && wire.url === RETRACT_PATH
+        ? jsonResponse({ jobId: "job_retract_7" }, 202)
+        : undefined,
+    );
+
+    render(<StackPanel client={client} stackId="A" />);
+    fireEvent.click(await removeButton());
+
+    // The deletion and the recompile that follows it are ONE job upstream, and this panel
+    // is the only surface that can watch it.
+    await waitFor(() =>
+      expect(
+        seen.some((wire) => wire.method === "GET" && wire.url.includes("/ingest/jobs/job_retract_7")),
+      ).toBe(true),
+    );
+    // Accepted means the row's state just changed: one read on mount, one after the accept.
+    await waitFor(() =>
+      expect(seen.filter((wire) => wire.method === "GET" && wire.url.endsWith("/documents"))).toHaveLength(2),
+    );
+  });
+
+  it("shows the delete guard's 409 verbatim, keeps the row and does not retry", async () => {
+    const SAID =
+      'Document "d1" is ingested; retract it with POST /documents/d1/retract before deleting it';
+    const { client, seen } = removalClient((wire) =>
+      wire.method === "POST" && wire.url === RETRACT_PATH
+        ? jsonResponse({ error: "document_ingested", message: SAID }, 409)
+        : undefined,
+    );
+
+    render(<StackPanel client={client} stackId="A" />);
+    fireEvent.click(await removeButton());
+
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(SAID));
+    // The document fact, never the concurrency lock's sentence.
     expect(screen.getByRole("alert").textContent).not.toContain("Another ingest is running");
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(retractions(seen)).toHaveLength(1);
+    // A refusal removed nothing: the row is still listed.
+    expect(screen.getByText("contrato.pdf")).toBeDefined();
+    expect(screen.queryByText("No documents uploaded yet.")).toBeNull();
+  });
+
+  it("shows 'there is nothing to retract' verbatim, keeps the row and does not retry", async () => {
+    // The refusal the endpoint really answers when this Stack has no ingest of these
+    // bytes. Its sentence is the answer — a paraphrase would drop the fact — and it must
+    // not arrive as the concurrency lock's retry advice.
+    const SAID = 'Document "d1" has no ingest recorded in Stack "A"; there is nothing to retract';
+    const { client, seen } = removalClient((wire) =>
+      wire.method === "POST" && wire.url === RETRACT_PATH
+        ? jsonResponse({ error: "document_not_ingested", message: SAID }, 409)
+        : undefined,
+    );
+
+    render(<StackPanel client={client} stackId="A" />);
+    fireEvent.click(await removeButton());
+
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(SAID));
+    expect(screen.getByRole("alert").textContent).not.toContain("Another ingest is running");
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(retractions(seen)).toHaveLength(1);
+    expect(screen.getByText("contrato.pdf")).toBeDefined();
+  });
+
+  it("shows an unavailable deployment's 503 verbatim, keeps the row and does not retry", async () => {
+    // The LIVE behaviour of a deployment with SOURCE_RETRACTION_ENABLED off. What the
+    // operator reads must be the server's sentence, which names the variable — not this
+    // client's "the ingest service does not track jobs", which reports a different gap and
+    // offers no way forward.
+    const SAID =
+      "source retraction is not enabled in this deployment: set SOURCE_RETRACTION_ENABLED=true " +
+      "to let the wiki delete a compiled source and recompile without it";
+    const { client, seen } = removalClient((wire) =>
+      wire.method === "POST" && wire.url === RETRACT_PATH
+        ? jsonResponse({ error: "source_retraction_unavailable", message: SAID }, 503)
+        : undefined,
+    );
+
+    render(<StackPanel client={client} stackId="A" />);
+    fireEvent.click(await removeButton());
+
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(SAID));
+    expect(screen.getByRole("alert").textContent).toContain("SOURCE_RETRACTION_ENABLED");
+    expect(screen.getByRole("alert").textContent).not.toContain("does not track jobs");
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(retractions(seen)).toHaveLength(1);
+    expect(screen.getByText("contrato.pdf")).toBeDefined();
+  });
+
+  it("disables the control while its request is in flight, so a second click is not a request", async () => {
+    const { client, seen, release } = gatedRemovalClient();
+
+    render(<StackPanel client={client} stackId="A" />);
+    fireEvent.click(await removeButton());
+
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Delete contrato.pdf" }) as HTMLButtonElement).disabled).toBe(
+        true,
+      ),
+    );
+    // The visible words name the request that is out, like the job controls' do.
+    expect(screen.getByRole("button", { name: "Delete contrato.pdf" }).textContent).toBe("Removing…");
+    fireEvent.click(screen.getByRole("button", { name: "Delete contrato.pdf" }));
+
+    release(jsonResponse({ jobId: "job_retract_9" }, 202));
+    await waitFor(() =>
+      expect((screen.getByRole("button", { name: "Delete contrato.pdf" }) as HTMLButtonElement).disabled).toBe(
+        false,
+      ),
+    );
+
+    expect(retractions(seen)).toHaveLength(1);
+  });
+
+  it("keeps the accessible name stable while the visible words say what it does", async () => {
+    // Two literals on purpose: the owner approved the visible change AND asked for the key
+    // to stay, so `Delete <filename>` is the accessible name every other case addresses
+    // this control by, and `Remove from wiki` is what a person reads. Pinned together so
+    // they cannot drift apart silently.
+    const { client } = removalClient((wire) =>
+      wire.method === "POST" && wire.url === RETRACT_PATH
+        ? jsonResponse({ jobId: "job_retract_1" }, 202)
+        : undefined,
+    );
+
+    render(<StackPanel client={client} stackId="A" />);
+    const button = await removeButton();
+
+    expect(button.getAttribute("aria-label")).toBe("Delete contrato.pdf");
+    expect(button.textContent).toBe("Remove from wiki");
+  });
+
+  it("carries no legacy identity header on the retraction or on the reads beside it", async () => {
+    const { client, seen } = removalClient((wire) =>
+      wire.method === "POST" && wire.url === RETRACT_PATH
+        ? jsonResponse({ jobId: "job_retract_1" }, 202)
+        : undefined,
+    );
+
+    render(<StackPanel client={client} stackId="A" />);
+    fireEvent.click(await removeButton());
+    await waitFor(() => expect(retractions(seen)).toHaveLength(1));
 
     expect(seen.length).toBeGreaterThan(0);
     for (const wire of seen) {

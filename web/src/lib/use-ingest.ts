@@ -182,6 +182,17 @@ export interface UseIngestResult {
   listDocuments(): Promise<void>;
   upload(file: File): Promise<UploadedDocument | null>;
   removeDocument(id: string): Promise<void>;
+  /**
+   * Remove a document from the WIKI: the compiled source is deleted and the Stack is
+   * recompiled without it.
+   *
+   * The action behind the panel's `Remove from wiki`, and deliberately NOT the delete: the
+   * stored file stays here. It decides nothing about the document's state — the wiki owns
+   * that, so a file that changed since its compile is exactly the one an owner retracts
+   * (L2) — and a refusal reaches the operator through `documentsNotice` in the service's
+   * own words, with the row left listed because nothing was removed.
+   */
+  retractDocument(id: string): Promise<void>;
   /** Start an ingest for an uploaded document, by reference. */
   ingestDocument(id: string, options?: IngestWriteOptions): Promise<void>;
   /** Set when an upload or listing failed. Distinct from a poll notice. */
@@ -232,6 +243,8 @@ export interface UseIngestResult {
   deletingIds: ReadonlySet<string>;
   /** Ids with a retry POST in flight, kept apart from `deletingIds` for the same reason. */
   retryingIds: ReadonlySet<string>;
+  /** Ids with a retraction POST in flight, kept apart from the other two for the same reason. */
+  retractingIds: ReadonlySet<string>;
   clearPollNotice(): void;
 }
 
@@ -278,6 +291,9 @@ export function useIngest({
   // not look like a delete on another.
   const [deletingIds, setDeletingIds] = useState<ReadonlySet<string>>(new Set());
   const [retryingIds, setRetryingIds] = useState<ReadonlySet<string>>(new Set());
+  // The document rows' own control: a retraction in flight disables THAT row's button and
+  // no other, the same per-id rule the job controls follow.
+  const [retractingIds, setRetractingIds] = useState<ReadonlySet<string>>(new Set());
   /**
    * The same ids, as a guard rather than as a render input.
    *
@@ -526,6 +542,51 @@ export function useIngest({
   }, [activeId, follow, jobs]);
 
   /**
+   * Remove one document from the wiki through the retraction endpoint.
+   *
+   * Declared after `follow` and `listDocuments` for the same reason `ingestDocument` is:
+   * it uses both, and dependencies listed before their declarations would throw.
+   *
+   * Same shape as `removeDocument` — call, surface a refusal on the documents notice,
+   * refresh the list — plus the two things a retraction has that a delete does not:
+   * a Stack it belongs to (resolved by the one precedence helper, never guessed) and a job
+   * id to follow, because the wiki ANSWERS with the deletion-and-recompile it accepted
+   * rather than performing it silently.
+   *
+   * A refusal is not a removal: the notice carries the service's sentence verbatim (it
+   * names the variable or the endpoint that would work) and the row stays listed. Nothing
+   * repeats a rejected request, and the per-row marker drops a second click on the SAME
+   * row while the first is out.
+   */
+  const retractDocument = useCallback(
+    async (id: string) => {
+      const targetStackId = effectiveStackId(undefined, resolvedStackId);
+      if (!targetStackId) {
+        setDocumentsNotice(unresolvedStackIdNotice());
+        return;
+      }
+      const key = `retract:${id}`;
+      if (inFlight.current.has(key)) return;
+      inFlight.current.add(key);
+      setRetractingIds((current) => withId(current, id));
+      setDocumentsNotice(null);
+      try {
+        const jobId = await client.retractDocument(id, targetStackId);
+        // Accepted: the deletion and the recompile that follows it are ONE job upstream,
+        // and this panel is the only surface that can watch it.
+        if (jobId) follow(jobId, { stackId: targetStackId });
+        await listDocuments();
+      } catch (error) {
+        setDocumentsNotice(noticeFor(error));
+      } finally {
+        inFlight.current.delete(key);
+        setRetractingIds((current) => withoutId(current, id));
+      }
+    },
+    [client, follow, listDocuments, resolvedStackId],
+  );
+
+  /**
    * Start an ingest for an uploaded document, by reference.
    *
    * Declared after `follow` and `refreshList` on purpose: it uses both, and
@@ -694,6 +755,7 @@ export function useIngest({
     listDocuments,
     upload,
     removeDocument,
+    retractDocument,
     ingestDocument,
     documentsNotice,
     jobs,
@@ -713,6 +775,7 @@ export function useIngest({
     retryJob,
     deletingIds,
     retryingIds,
+    retractingIds,
     clearPollNotice: () => setPollNotice(null),
   };
 }
@@ -788,12 +851,27 @@ function refusalMessage(error: ApiError): string {
  * refusals are opposites, so one shared sentence would state the opposite of one of them.
  */
 function documentRefusalMessage(error: ApiError): string {
-  const said = error.message.trim();
-  const heardNothing = said === "" || said === `request failed with ${error.status}`;
-  if (!heardNothing) return said;
   // The trailing default is for the type, not a reachable path: the caller only routes
   // codes whose fallback is declared in the table.
-  return DOCUMENT_REFUSAL_FALLBACKS[error.code ?? ""] ?? INGESTED_REFUSAL_FALLBACK;
+  return (
+    serviceSaid(error) ??
+    DOCUMENT_REFUSAL_FALLBACKS[error.code ?? ""] ??
+    INGESTED_REFUSAL_FALLBACK
+  );
+}
+
+/**
+ * What the service actually said, or `undefined` when it said nothing at all.
+ *
+ * "Heard nothing" has exactly two shapes on this client: an empty message, and the
+ * client's own `request failed with <status>`. Both mean the CALLER has to supply a
+ * sentence, and deciding that in one place is what keeps two refusals of the same status
+ * from growing two different ideas of what an empty body means.
+ */
+function serviceSaid(error: ApiError): string | undefined {
+  const said = error.message.trim();
+  if (said === "" || said === `request failed with ${error.status}`) return undefined;
+  return said;
 }
 
 /**
@@ -899,6 +977,16 @@ const INGEST_ALREADY_RUNNING_NOTICE =
   "Another ingest is running. That is a retry signal, not a failure.";
 
 /**
+ * What the surface says when a retraction was refused WITHOUT a sentence.
+ *
+ * Stated as the deployment fact it is: there is nothing here for the operator to retry, and
+ * it must not read as "nothing was there" — nothing was REMOVED, which is a different
+ * statement, and the one that is true.
+ */
+const RETRACTION_UNAVAILABLE_FALLBACK =
+  "This deployment does not offer source retraction, so nothing was removed from the wiki.";
+
+/**
  * Map an HTTP failure to a notice.
  *
  * The one distinction that matters: 503 means "not configured / not tracked",
@@ -908,6 +996,15 @@ const INGEST_ALREADY_RUNNING_NOTICE =
 export function noticeFor(error: unknown): IngestNotice {
   if (error instanceof ApiError) {
     if (error.status === 503) {
+      // A retraction this deployment cannot perform is NOT "this host does not track jobs".
+      // That sentence reports the wrong deployment gap and drops the variable an operator
+      // has to set, so the service's own words are what reach the screen.
+      if (error.code === "source_retraction_unavailable") {
+        return {
+          kind: "unavailable",
+          message: serviceSaid(error) ?? RETRACTION_UNAVAILABLE_FALLBACK,
+        };
+      }
       return {
         kind: "unavailable",
         message:

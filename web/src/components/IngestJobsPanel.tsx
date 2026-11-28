@@ -274,17 +274,6 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
                     {document.filename}
                   </span>
                   <span className="document-list__meta">{formatBytes(document.bytes)}</span>
-                  {mark?.state === "current" && (
-                    /*
-                      Stated, not acted on: the retraction endpoint is a later step, so
-                      Remove below still calls the delete and the server still refuses it.
-                      Saying why BEFORE the refusal is the honest version of a button whose
-                      answer is "not yet".
-                    */
-                    <span className="document-list__hint">
-                      Removing it needs a retraction first, which this panel cannot ask for yet.
-                    </span>
-                  )}
                   <button
                     type="button"
                     className="button button--small"
@@ -297,13 +286,24 @@ export function IngestJobsPanel({ ingest, onClose }: IngestJobsPanelProps) {
                   >
                     Ingest
                   </button>
+                  {/*
+                    REMOVAL IS A RETRACTION, and the label says so: the file stays here
+                    and the wiki's compiled source goes. The accessible name stays the
+                    historical `Delete <filename>` — it is a stable key for assistive
+                    tech and for the tests that address this control by it — while the
+                    visible words name the action the operator actually gets.
+
+                    Disabled per row while ITS request is out, like the job controls:
+                    one click is one request.
+                  */}
                   <button
                     type="button"
                     className="button button--small"
                     aria-label={`Delete ${document.filename}`}
-                    onClick={() => void ingest.removeDocument(document.id)}
+                    disabled={ingest.retractingIds.has(document.id)}
+                    onClick={() => void ingest.retractDocument(document.id)}
                   >
-                    Remove
+                    {ingest.retractingIds.has(document.id) ? "Removing…" : "Remove from wiki"}
                   </button>
                 </li>
               );

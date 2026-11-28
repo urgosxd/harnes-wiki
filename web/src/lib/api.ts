@@ -350,6 +350,36 @@ export class ApiClient {
     await this.request("DELETE", `/documents/${encodeURIComponent(id)}`);
   }
 
+  /**
+   * Ask the server to retract one document from the wiki: the wiki deletes the compiled
+   * source and recompiles the Stack without it.
+   *
+   * The Stack travels as `x-stack-id`, the header every other document call on this
+   * family is scoped by (`GET /documents`, `DELETE /documents/:id`): a retraction is one
+   * Stack's business — the source being deleted is compiled in that Stack — so a query
+   * parameter would be a second spelling of a fact that already has one.
+   *
+   * The acceptance carries the id of the deletion-and-recompile as ONE job upstream, and
+   * that id is what a caller follows to see the recompile finish.
+   *
+   * A refusal is NOT softened here: `409 document_ingested`, `409 document_not_ingested`,
+   * `409 busy` and `503 source_retraction_unavailable` arrive as `ApiError` with our
+   * server's code and sentence, because the sentence is the part that says what would
+   * work (or which variable an operator has to set).
+   *
+   * `null` when the body names no job id: reporting an ACCEPTED retraction as a failure
+   * because its envelope was unreadable would be worse than not following it.
+   */
+  async retractDocument(documentId: string, stackId: string): Promise<string | null> {
+    const body = await this.json<unknown>(
+      "POST",
+      `/documents/${encodeURIComponent(documentId)}/retract`,
+      undefined,
+      { "x-stack-id": stackId.trim() },
+    );
+    return newJobIdFrom(body);
+  }
+
   /** Start an ingest for an uploaded document, by reference rather than by path. */
   async startIngestForDocument(
     documentId: string,
