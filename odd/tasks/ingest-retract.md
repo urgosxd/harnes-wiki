@@ -30,7 +30,7 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
 - S3 — `GET /api/documents` contract with `current`. Route: worker. Commit `4a5dfc4`.
 - S4 — UI mark, three states. Route: worker.
 - S5 — `POST /:id/retract` (503 while E7 pending). Route: worker.
-- S6 — `DELETE` 409 guard. Route: worker.
+- S6 — `DELETE` 409 guard. Route: worker. Commit `5aebe6b`.
 
 ## Open risks
 
@@ -48,6 +48,39 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
   `server/src/api/document-ingest-state.ts`.
 
 ## Log
+
+L5 (worker): S6 landed in `5aebe6b` (`feat(api): refuse deleting an ingested document`) —
+`server/src/api/document-routes.ts`, `server/src/db/document-store.ts`,
+`server/test/documents-delete-guard.test.ts`. What the guard is, and the two decisions that
+make it survive its own edge cases:
+  1. `DELETE /documents/:id` refuses with `409 document_ingested` when ANY row in
+     `document_ingests` for the document has `last_status <> 'retracted'`, REGARDLESS of
+     `stack_id`. Scoping it to the request's `x-stack-id` would make "omit the header" (or
+     naming an unrelated Stack) the way to delete a document another Stack still compiles,
+     and the delete would cascade that live state with no retraction behind it. The query is
+     `DocumentStore.hasActiveIngest(documentId)` — in the store, not inlined in the route,
+     matching how `ingestFor` is placed.
+  2. Ownership is checked FIRST (`findOwned`), then the guard, then the `DELETE`. A guard
+     that answered first would return `409` for somebody else's document, confirming both
+     that it exists and that it was ingested; a foreign document keeps the byte-identical
+     `404 { error: "not_found", message: "no such document" }` it answers today. The final
+     `DELETE` re-asserts ownership because it is the statement that actually decides.
+  3. Local state only: the route never touches the wiki (the test registers a counting
+     `DocumentIngestState` and asserts zero calls on every delete), and the message names
+     the retraction endpoint rather than performing one — `POST /:id/retract` is S5.
+  4. `retracted` is the only unblocking status, which is the S7 half: a retracted row
+     describes content the wiki no longer holds, and a re-ingest resets the row, so
+     everything-retracted deletes normally with its cascade.
+  Evidence: `server/test/documents-delete-guard.test.ts` 7/7 (RED first: 4 of 7 failing
+  against `bbe8593` — the three live-state `409` cases and the mixed retracted/requested
+  one; the three preserve cases — all-retracted delete, no-rows delete, foreign `404` —
+  passed before the change and still do), `cd server && npm test` 541/541,
+  `npx tsc --noEmit` clean. Proven by execution: the guard, its non-Stack scope, the
+  ownership ordering, the cascade on success, and the absence of an upstream call. Read
+  from code, not executed: nothing about this path depends on the wiki envelope left open
+  in `## Open risks` — the guard answers from our own rows.
+  `server/test/documents.test.ts` stayed green unchanged, so no contract conflict: its
+  delete case removes a document with no ingest rows, which is the split the guard needs.
 
 L4 (worker): S3 landed — `content_hash` is written at upload and the listing answers the
 ingest state. What changed and why:
