@@ -28,7 +28,7 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
 - S1 — migration 007: `documents.content_hash`, `document_ingests.stack_id`, composite PK. Route: worker.
 - S2 — wire `recordIngest`. Route: worker. Commit `cff8f25`.
 - S3 — `GET /api/documents` contract with `current`. Route: worker. Commit `4a5dfc4`.
-- S4 — UI mark, three states. Route: worker.
+- S4 — UI mark, three states. Route: worker. Commit `fba2f0c`.
 - S5 — `POST /:id/retract` (503 while E7 pending). Route: worker.
 - S6 — `DELETE` 409 guard. Route: worker. Commit `5aebe6b`.
 
@@ -48,6 +48,57 @@ S8 — Un documento, N estados de ingesta, uno por stack. (Decision humana, L2.)
   `server/src/api/document-ingest-state.ts`.
 
 ## Log
+
+L6 (worker): S4 landed in `fba2f0c` (`feat(web): mark ingested documents and show the delete
+refusal`) — `web/src/lib/api.ts`, `web/src/lib/use-ingest.ts`,
+`web/src/components/IngestJobsPanel.tsx`, `web/src/components/ingest-jobs.test.tsx`. S1, S4
+and S5's UI half are what this covers; S3/S6 (the retract endpoint) are not the UI's and stay
+open.
+  1. The mark has THREE states, and `current?: boolean` is how the third one survives the
+type system. `DocumentIngestState` declares `current` optional because the server omits the
+key when `known: false`; a required `boolean` would force the surface to invent "not
+ingested" out of "could not look". `documentMark()` in the panel maps: `contentHash: null`
+→ nothing (no content identity, no error tooltip either); `known: false` → a `data-ingest-state="unknown"`
+mark reading `no data` with a tooltip naming the unread wiki; `current: true` → `data-ingest-state="current"`
+with `✓`; `current: false` → nothing at all. "Not ingested" is therefore silence, never a
+claim.
+  2. `ListedDocument extends UploadedDocument` instead of widening `UploadedDocument`. The
+upload answer (`POST /documents`, 201) carries neither `contentHash` nor `ingest`, so putting
+those on the shared type would have made every upload look already checked against the wiki.
+Only `listDocuments()` answers `ListedDocument[]`.
+  3. THE DEFECT S4 EXISTS FOR: `noticeFor` mapped every `409` without a job-control code to
+"Another ingest is running", so S6's `document_ingested` delete refusal would have been
+reported as a concurrency lock — false, and it would have dropped the one part of the answer
+that names the fix. There are now two allow-lists, `JOB_CONTROL_REFUSAL_CODES` and
+`DOCUMENT_REFUSAL_CODES`, so the next refusal (S5's `document_not_ingested`) is added in one
+place. A document refusal reaches the screen VERBATIM (no code prefix), because the sentence
+itself names `POST /documents/<id>/retract`; only a body that says nothing falls back to our
+own "retract it before it can be deleted". The lock and both job-control sentences are
+byte-identical to before.
+  4. `Remove` is untouched as an ACTION: it still calls `removeDocument` → `deleteDocument` →
+`DELETE /api/documents/:id` (S7 owns retracting). What changed is that the row now says
+BEFORE the click that removing an ingested document needs a retraction this panel cannot ask
+for yet, and the refusal itself reaches the existing `documentsNotice` channel so the row
+stays listed.
+  5. CORRECTION TO THE S6 REPORT, recorded because a false claim left standing is worse than
+the bug it hides: "no `web/` DELETE caller exists (`grep` for `method: \"DELETE\"` is empty)" is
+WRONG. A `web/` DELETE caller exists and always did: `web/src/lib/api.ts:350`
+(`deleteDocument` → `this.request("DELETE", /documents/<id>)`), reached from
+`web/src/components/IngestJobsPanel.tsx:304` (`Remove`) through `web/src/lib/use-ingest.ts:391`
+(`removeDocument`). The grep was empty because this client passes the VERB as a positional
+argument (`request("DELETE", path)`, `web/src/lib/api.ts:442`); `method: "DELETE"` appears
+only in test wire assertions, never in product code. So S6's guard protects a path the UI
+already uses, which is what makes this step's refusal copy load-bearing rather than
+defensive.
+  Evidence: `npx vitest run src/components/ingest-jobs.test.tsx` 70/70 (RED first: 6 of the 8
+new cases failing against `5aebe6b` — every case that needed a mark or the document notice;
+the two negative cases, "no mark for a not-ingested row" and "no mark for a legacy row",
+passed before the change and still do, which is what they are for), `cd web && npx vitest run`
+379/379, `npx tsc --noEmit` clean, `npm run build` clean, `cd server && npm test` 541/541.
+Proven by execution: the three rendered states, the single listing read, the verbatim refusal
+on a real 409 through the real hook and client, exactly one DELETE, the row surviving it, and
+no `x-user-id`/`x-dev-token` on any request. Read from code, not executed: nothing — the
+mark's data arrives from the S3 listing already pinned server-side.
 
 L5 (worker): S6 landed in `5aebe6b` (`feat(api): refuse deleting an ingested document`) —
 `server/src/api/document-routes.ts`, `server/src/db/document-store.ts`,
